@@ -283,9 +283,36 @@ SSH proxy validates the exact running Gateway bundle, canonical NIC/MAC
 topology, absent installer media, stable root-owned Shared-network
 configuration, and one in-scope DHCP IPv4 address before invoking the fixed
 system netcat binary. Stable HostKeyAlias values preserve strict host-key
-authentication across DHCP changes. Research and Target remain uninstalled;
-the old installed Host release remains selected until their old-release-bound
-seed media can be removed safely.
+authentication across DHCP changes.
+
+Research and Target subsequently completed their old-release-bound unattended
+installers and powered themselves off. Their retained mode-`0600` install and
+media-removal logs are independently digestible evidence: Research install
+`69015414...f54`, Research media removal `78beed9c...5fa`, Target
+install `88e151b9...20e`, and Target media removal `c94a2eff...d1e`.
+Readback after media removal proves the exact three UUIDs stopped, each guest
+booting only from its installed disk, no optical device remaining, and the
+canonical CPU, memory, private-network, and MAC identities unchanged. The
+exact `62fa802` signed and notarized portable-Host candidate was then
+transferred and admitted on the Neo. Its attributed Touch ID request entered
+the protected transition, and the ordinary caller lost the terminal result
+during daemon handoff.
+Independent public verification now identifies target release `e91436af...`
+as the selected, immutable, internally verified Host release with the expected
+candidate authority and complete dynamic-Gateway payload. Its root-authored
+immutable terminal independently binds the original request ID and digest,
+pre-transition target-plan digest, exact target release, committed pair,
+authorization receipt, finalization, and protected-service evidence with
+status `target_committed`. A manually reconstructed runtime-metadata recovery
+invocation used a target-plan digest recomputed after that commit and rejected
+before mutation, as it must: no post-commit digest can simultaneously equal
+the original receipt's pre-transition plan and a plan derived from the new
+STABLE source pair. The deploy wrapper now resolves this response-loss state
+from the exact STABLE-bound terminal before considering receipt recovery; an
+unrelated terminal falls through, while any same-request mismatch or
+`source_restored` result fails closed. No new authorization was issued, and no
+stack boot, host-key enrollment, boundary qualification, driver install, or
+91-case campaign had begun at this checkpoint.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

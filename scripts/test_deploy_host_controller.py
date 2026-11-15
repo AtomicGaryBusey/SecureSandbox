@@ -2133,6 +2133,121 @@ class DeployHostControllerTests(unittest.TestCase):
             )
         )
 
+    def test_ambiguous_install_accepts_exact_public_committed_terminal(self):
+        terminal = self.pair_terminal()
+        request_id = terminal["authorization_request_id"]
+        request_sha256 = terminal["authorization_request_sha256"]
+        stable = self.pair_stable(terminal)
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, "6" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, b"terminal"),
+            ),
+        ):
+            self.assertEqual(
+                DEPLOY.public_terminal_for_ambiguous_install(
+                    request_id, request_sha256,
+                    self.target_plan_sha256, "a" * 64,
+                ),
+                terminal,
+            )
+
+    def test_ambiguous_install_ignores_only_unrelated_public_terminal(self):
+        terminal = self.pair_terminal()
+        terminal["authorization_request_id"] = str(
+            uuid.UUID(int=103, version=4)
+        )
+        stable = self.pair_stable(terminal)
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, "6" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, b"terminal"),
+            ),
+        ):
+            self.assertIsNone(
+                DEPLOY.public_terminal_for_ambiguous_install(
+                    self.pair_pending()["authorization_request_id"],
+                    "e" * 64, self.target_plan_sha256, "a" * 64,
+                )
+            )
+
+    def test_ambiguous_install_rejects_same_request_terminal_mismatch(self):
+        terminal = self.pair_terminal()
+        stable = self.pair_stable(terminal)
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, "6" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, b"terminal"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "host_pair_terminal_mismatch"):
+                DEPLOY.public_terminal_for_ambiguous_install(
+                    terminal["authorization_request_id"], "9" * 64,
+                    self.target_plan_sha256, "a" * 64,
+                )
+
+    def test_deploy_ambiguous_committed_terminal_skips_sudo_recovery(self):
+        request_id = self.pair_pending()["authorization_request_id"]
+        request_sha256 = "e" * 64
+        diagnostic = {
+            "action": "inspect_authorization_receipt_before_retry",
+            "code": "privileged_operation_outcome_ambiguous",
+            "operation": "host-controller-install",
+            "outcome": "ambiguous",
+            "phase": "result",
+            "request_id": request_id,
+            "retry": "forbidden",
+            "schema": "secure-sandbox-operator-diagnostic-v1",
+        }
+        completed = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"Request digest: {request_sha256}\n"
+                + json.dumps(diagnostic, separators=(",", ":"), sort_keys=True)
+                + "\n"
+            ),
+        )
+        terminal = self.pair_terminal()
+        terminal["authorization_request_id"] = request_id
+        terminal["authorization_request_sha256"] = request_sha256
+        with (
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+            mock.patch.object(
+                DEPLOY, "public_terminal_for_ambiguous_install",
+                return_value=terminal,
+            ) as read_terminal,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            mock.patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            self.assertEqual(self.run_main([
+                "deploy", "--requesting-agent", "Codex",
+                "--requesting-session", "thread-7",
+            ]), 0)
+        self.assertEqual(run.call_count, 1)
+        read_terminal.assert_called_once_with(
+            request_id, request_sha256,
+            self.target_plan_sha256, "a" * 64,
+        )
+        self.assertEqual(
+            json.loads(stdout.getvalue().splitlines()[-1]), terminal,
+        )
+
     def test_install_result_accepts_explicit_runtime_metadata_recovery_marker(self):
         target = {
             "release_id": "1" * 64,

@@ -1329,6 +1329,60 @@ def runtime_metadata_recovery_binding_from_failure(
     return request_id, digests[0]
 
 
+def public_terminal_for_ambiguous_install(
+    request_id: str, request_sha256: str,
+    authorized_target_plan_sha256: str, target_release_id: str,
+) -> dict[str, object] | None:
+    """Resolve a lost broker reply from the immutable public Host terminal.
+
+    A daemon handoff can commit the exact authorized transition while the
+    unprivileged broker caller loses its final response. In that state the
+    current STABLE record and its immutable terminal are stronger evidence
+    than a new privileged recovery attempt: they bind the exact request,
+    target plan, committed pair, and protected service readback.
+    """
+    MANAGER._validated_uuid4(request_id, "authorization_request_id")
+    if (MANAGER.SHA256.fullmatch(request_sha256) is None
+            or MANAGER.SHA256.fullmatch(
+                authorized_target_plan_sha256
+            ) is None
+            or MANAGER.SHA256.fullmatch(target_release_id) is None):
+        raise RuntimeError("host_pair_terminal_binding_invalid")
+    try:
+        public = MANAGER.host_release_launcher_pair_public(
+            INSTALL_ROOT, 0,
+        )
+    except MANAGER.ReleaseFailure as error:
+        raise RuntimeError("host_pair_terminal_untrusted") from error
+    if public is None:
+        return None
+    stable, _stable_sha256 = public
+    if stable.get("schema") != (
+            MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA):
+        return None
+    try:
+        verified = MANAGER.verified_public_host_pair_terminal(
+            INSTALL_ROOT, 0, stable,
+        )
+    except MANAGER.ReleaseFailure as error:
+        raise RuntimeError("host_pair_terminal_untrusted") from error
+    if verified is None:
+        return None
+    terminal = verified[0]
+    if terminal.get("authorization_request_id") != request_id:
+        return None
+    if (terminal.get("authorization_request_sha256") != request_sha256
+            or terminal.get("authorized_target_plan_sha256")
+                != authorized_target_plan_sha256
+            or terminal.get("operation") != "install"):
+        raise RuntimeError("host_pair_terminal_mismatch")
+    if (terminal.get("status") == "target_committed"
+            and terminal.get("committed_pair", {}).get("release_id")
+                != target_release_id):
+        raise RuntimeError("host_pair_terminal_mismatch")
+    return terminal
+
+
 def selector_recovery_required(
     install_root: Path = INSTALL_ROOT, expected_uid: int = 0
 ) -> bool:
@@ -3348,6 +3402,27 @@ def main() -> int:
                 sys.stderr.write(completed.stderr)
             if recovery_binding is not None and args.command == "deploy":
                 request_id, request_sha256 = recovery_binding
+                try:
+                    terminal = public_terminal_for_ambiguous_install(
+                        request_id, request_sha256,
+                        source.authorized_target_plan_sha256,
+                        source.release_id,
+                    )
+                except RuntimeError as error:
+                    print(str(error), file=sys.stderr)
+                    return 1
+                if terminal is not None:
+                    if terminal["status"] != "target_committed":
+                        print(
+                            "host_pair_transition_failed:"
+                            + str(terminal["status"]),
+                            file=sys.stderr,
+                        )
+                        return 1
+                    print(json.dumps(
+                        terminal, separators=(",", ":"), sort_keys=True,
+                    ))
+                    return 0
                 manager_sha256 = hashlib.sha256(
                     MANAGER.read_regular(MANAGER_PATH)
                 ).hexdigest()

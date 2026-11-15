@@ -617,6 +617,18 @@ in ignored local records, not in this file.
   Gateway and pristine Research/Target shells. The Gateway password exposed by
   serial diagnostic echo was immediately rotated in the restricted Agents
   vault; no seed containing the retired credential may be promoted.
+  That repair was published, signed/notarized, installed, and independently
+  verified; a protected Touch ID reprovision then published three fresh exact
+  stopped VMs while retaining the old set in quarantine. The second Gateway
+  install proved real Curtin can return non-chroot from
+  `systemd-detect-virt --chroot` while systemctl still performs its explicit
+  offline refusal. The staged successor accepts only the paired
+  `SYSTEMD_OFFLINE=1` environment and exact C-locale systemctl chroot-refusal
+  text, uses absolute systemd paths, preserves the live reload/readback path,
+  and rejects missing or contradictory signals. Publish, sign/notarize,
+  install, and physically replay this successor before starting Research or
+  Target. Preserve the second failed Gateway clone and the rejected forensic
+  public-key file as evidence; neither is installation authority.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

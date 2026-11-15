@@ -211,6 +211,39 @@ evidence only and must not be promoted or reused; the next signed seed must be
 built from the rotated credential before the exact three-VM set is
 reprovisioned through its protected maintenance path.
 
+The first repair was published as `2f3551d`, passed the 2,606-test canonical
+gate and a zero-finding immutable-range security review, and was signed and
+notarized with freshly rebuilt seeds. Both public remotes independently
+resolved to that commit. The exact candidate was admitted on the Neo and its
+ordinary Touch ID transition durably committed release `384ffa56...`; the
+caller lost the final broker response while launchd replaced the broker, but
+the terminal transition, stable pair, selector, running daemon, and independent
+installed-release verifier all agreed on `target_committed` and `verified`.
+
+The first reprovision dry run then exposed a local ignored-state overwrite:
+the Neo's `runs/control_key.pub` had been replaced during forensic work by a
+different public key carrying the `(stdin)` comment. The rejected key was
+retained as evidence, while the active file was restored to the public-key
+digest embedded identically in the prior and new signed Host seeds and matching
+the release Mac's approved Agents-vault record. A fresh dry plan passed, and a
+separate Touch ID ceremony recoverably quarantined the old VM set and published
+three exact stopped replacements with the protected installer and rotated
+seeds. Independent readback proved new UUIDs, the `neo-8gb` layout, private
+networks, exact media hashes, and no dangling reprovision transaction.
+
+Gateway's second physical install still failed the final privileged-control
+late command. A read-only console capture and byte-verified APFS evidence clone
+proved the repaired script was present, but real Curtin does not necessarily
+make `systemd-detect-virt --chroot` return success even though its systemctl
+invocation is explicitly offline and refuses the query. The next repair
+therefore accepts that second offline form only when both independent signals
+match: `SYSTEMD_OFFLINE=1` and the exact C-locale `/usr/bin/systemctl` response
+`Running in chroot, ignoring command 'is-active'`. Absolute systemd paths,
+positive conventional-chroot handling, live active/reload/repeated readback,
+inactive handling, and fail-closed rejection of every contradictory detector,
+environment, status, or output remain intact. Focused suites again pass 119
+tests, including acceptance and rejection of the paired Curtin signals.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

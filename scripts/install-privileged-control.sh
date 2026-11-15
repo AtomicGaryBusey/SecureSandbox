@@ -58,25 +58,32 @@ visudo -c >/dev/null
 sshd -t
 # BEGIN TESTABLE_SSH_SERVICE_ACTIVATION
 chroot_state_status=0
-systemd-detect-virt --chroot >/dev/null 2>&1 || chroot_state_status=$?
+/usr/bin/systemd-detect-virt --chroot >/dev/null 2>&1 || chroot_state_status=$?
 case "$chroot_state_status" in
   0)
-    # Curtin invokes this installer inside the target chroot.  There is no
-    # target ssh.service to reload yet; systemctl reports success with empty
-    # stdout while explaining the ignored command on stderr.  Accept only the
-    # independent systemd chroot determination, after sshd -t above, and still
-    # require the complete control-plane self-check below.
+    # A conventional chroot has no target ssh.service to reload yet.  Accept
+    # only systemd's positive chroot determination, after sshd -t above, and
+    # still require the complete control-plane self-check below.
     ;;
   1)
     ssh_state_status=0
-    ssh_state="$(systemctl is-active ssh.service 2>/dev/null)" || ssh_state_status=$?
+    ssh_state="$(LC_ALL=C /usr/bin/systemctl is-active ssh.service 2>&1)" \
+      || ssh_state_status=$?
     case "$ssh_state_status:$ssh_state" in
+      "0:Running in chroot, ignoring command 'is-active'")
+        # Curtin's mount namespace is not always classified by
+        # systemd-detect-virt, but curtin sets SYSTEMD_OFFLINE=1 and systemctl
+        # emits this exact C-locale refusal.  Require both signals.
+        [[ "${SYSTEMD_OFFLINE:-}" == 1 ]] \
+          || { echo "ssh_service_offline_state_untrusted" >&2; exit 1; }
+        ;;
       0:active)
-        systemctl reload ssh.service
+        /usr/bin/systemctl reload ssh.service
         ssh_reloaded=false
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
           ssh_state_status=0
-          ssh_state="$(systemctl is-active ssh.service 2>/dev/null)" || ssh_state_status=$?
+          ssh_state="$(LC_ALL=C /usr/bin/systemctl is-active ssh.service 2>&1)" \
+            || ssh_state_status=$?
           case "$ssh_state_status:$ssh_state" in
             0:active) ssh_reloaded=true; break ;;
             0:reloading) sleep 0.1 ;;

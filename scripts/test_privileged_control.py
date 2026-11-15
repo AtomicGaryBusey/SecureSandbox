@@ -1285,10 +1285,16 @@ class RepositoryMigrationTests(unittest.TestCase):
 
     def test_privileged_control_install_reload_is_fail_closed_when_ssh_is_active(self):
         installer = (ROOT / "scripts/install-privileged-control.sh").read_text(encoding="utf-8")
-        self.assertIn('systemd-detect-virt --chroot >/dev/null 2>&1', installer)
+        self.assertIn('/usr/bin/systemd-detect-virt --chroot >/dev/null 2>&1', installer)
         self.assertIn('case "$chroot_state_status" in', installer)
         self.assertIn('systemd_chroot_state_invalid:', installer)
-        self.assertIn('ssh_state="$(systemctl is-active ssh.service 2>/dev/null)"', installer)
+        self.assertIn(
+            'ssh_state="$(LC_ALL=C /usr/bin/systemctl is-active ssh.service 2>&1)"',
+            installer,
+        )
+        self.assertIn("Running in chroot, ignoring command 'is-active'", installer)
+        self.assertIn('[[ "${SYSTEMD_OFFLINE:-}" == 1 ]]', installer)
+        self.assertIn('ssh_service_offline_state_untrusted', installer)
         self.assertIn('0:active)', installer)
         self.assertIn('3:inactive)', installer)
         self.assertIn('ssh_service_state_invalid:', installer)
@@ -1298,8 +1304,8 @@ class RepositoryMigrationTests(unittest.TestCase):
         self.assertIn('systemctl reload ssh.service', installer)
         self.assertNotIn('systemctl reload ssh.service >/dev/null 2>&1 || true', installer)
         self.assertLess(
-            installer.index('systemd-detect-virt --chroot'),
-            installer.index('systemctl is-active ssh.service'),
+            installer.index('/usr/bin/systemd-detect-virt --chroot'),
+            installer.index('/usr/bin/systemctl is-active ssh.service'),
         )
         self.assertLess(
             installer.index('systemctl reload ssh.service'),
@@ -1312,11 +1318,11 @@ class RepositoryMigrationTests(unittest.TestCase):
 
     def test_privileged_control_install_service_state_machine(self):
         installer = (ROOT / "scripts/install-privileged-control.sh").read_text(encoding="utf-8")
-        block = installer.split("# BEGIN TESTABLE_SSH_SERVICE_ACTIVATION\n", 1)[1].split(
+        service_block = installer.split("# BEGIN TESTABLE_SSH_SERVICE_ACTIVATION\n", 1)[1].split(
             "# END TESTABLE_SSH_SERVICE_ACTIVATION\n", 1
         )[0]
 
-        def run(chroot_status, states=(), *, reload_status=0):
+        def run(chroot_status, states=(), *, reload_status=0, systemd_offline=None):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 binary = root / "bin"
@@ -1354,19 +1360,25 @@ exit 98
                 (binary / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 for path in binary.iterdir():
                     path.chmod(0o755)
+                environment = {
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "MOCK_CHROOT_STATUS": str(chroot_status),
+                    "MOCK_COUNTER": str(root / "counter"),
+                    "MOCK_STATES": str(root / "states"),
+                    "MOCK_LOG": str(root / "log"),
+                    "MOCK_RELOAD_STATUS": str(reload_status),
+                }
+                if systemd_offline is not None:
+                    environment["SYSTEMD_OFFLINE"] = systemd_offline
+                block = service_block.replace(
+                    "/usr/bin/systemd-detect-virt", str(binary / "systemd-detect-virt")
+                ).replace("/usr/bin/systemctl", str(binary / "systemctl"))
                 result = subprocess.run(
                     ["/bin/bash", "-c", "set -euo pipefail\n" + block + "printf 'complete\\n'"],
                     text=True,
                     capture_output=True,
                     check=False,
-                    env={
-                        "PATH": f"{binary}:/usr/bin:/bin",
-                        "MOCK_CHROOT_STATUS": str(chroot_status),
-                        "MOCK_COUNTER": str(root / "counter"),
-                        "MOCK_STATES": str(root / "states"),
-                        "MOCK_LOG": str(root / "log"),
-                        "MOCK_RELOAD_STATUS": str(reload_status),
-                    },
+                    env=environment,
                 )
                 return result, (root / "log").read_text(encoding="ascii")
 
@@ -1382,6 +1394,20 @@ exit 98
         ignored, log = run(1, ((0, ""),))
         self.assertEqual(ignored.returncode, 1)
         self.assertIn("ssh_service_state_invalid:unavailable", ignored.stderr)
+        self.assertEqual(log, "")
+
+        curtin, log = run(
+            1,
+            ((0, "Running in chroot, ignoring command 'is-active'"),),
+            systemd_offline="1",
+        )
+        self.assertEqual((curtin.returncode, curtin.stdout, log), (0, "complete\n", ""))
+
+        spoofed_curtin, log = run(
+            1, ((0, "Running in chroot, ignoring command 'is-active'"),)
+        )
+        self.assertEqual(spoofed_curtin.returncode, 1)
+        self.assertIn("ssh_service_offline_state_untrusted", spoofed_curtin.stderr)
         self.assertEqual(log, "")
 
         detector_error, log = run(2)

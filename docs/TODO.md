@@ -954,9 +954,14 @@ in ignored local records, not in this file.
   the exact plan and operator display, rejects UUID/subnet ambiguity, and
   repeats readback before every attachment and after final configuration.
   Publish, install, and independently verify that repair before issuing one
-  fresh VM request; no request is live. Exact stopped VM creation and readback,
-  Neo resource/boundary qualification,
-  protected driver installation, and campaign execution remain pending. The deterministic
+  fresh VM request; no request is live. Exact stopped VM creation, host-key
+  enrollment, and protected driver installation have since completed. The
+  exact-commit campaign is initialized, but its first collector rejected before
+  reserving raw evidence because the installed driver treated its immutable
+  release directory as a Git checkout. Publish and install the repair that
+  verifies the physical invoking repository root, retain the rejected campaign,
+  initialize a new exact-commit campaign, then resume Neo resource/boundary
+  qualification and ordered campaign execution. The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

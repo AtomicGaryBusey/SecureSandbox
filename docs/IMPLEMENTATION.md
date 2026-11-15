@@ -154,8 +154,15 @@ proves stopped-worker PID/start-time/boot identity, serializes against normal
 VM lifecycle operations, and can hard-power only the fixed Research VM after
 an exact acknowledgement while preserving Gateway and Target state. It writes
 raw fixed-authority evidence only after reserving the destination and grants no
-observation or admission authority. Local source tests pass, but no physical
-campaign or acceptance verdict exists yet. A separate fixed recovery projector
+observation or admission authority. Physical execution has initialized an
+exact-commit campaign on the disposable Neo, but the first collector exposed
+that an installed protected driver had mistaken its immutable release root for
+the invoking Git checkout. The repaired supervisor requires the physical
+invoking repository root, exact campaign HEAD, and a clean diff while retaining
+the separately root-owned manifest boundary. Recovery staging carries that same
+resolved checkout into every exact commit/blob read rather than falling back to
+the installed release root. No raw case evidence or acceptance verdict exists
+yet. A separate fixed recovery projector
 now revalidates the complete raw checkpoint/fault/reboot/recovery/boundary
 chain, snapshots canonical bytes against same-user races, and publishes the
 suite-assigned observations without accepting authority, kind, outcome, or

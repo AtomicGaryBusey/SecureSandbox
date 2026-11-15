@@ -132,13 +132,14 @@ def write_new(path: Path, value: dict[str, Any]) -> None:
 def command(argv: list[str], *, timeout: float = 30,
             accepted: tuple[int, ...] = (0,),
             maximum: int = MAX_OUTPUT,
-            environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+            environment: dict[str, str] | None = None,
+            cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=timeout, check=False,
             start_new_session=True,
-            cwd=ROOT,
+            cwd=ROOT if cwd is None else cwd,
             env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -174,22 +175,37 @@ def prerequisite(path: Path, *, executable: bool = False) -> None:
         raise SupervisorError("supervisor_prerequisite_untrusted")
 
 
-def verify_source_checkout(campaign: dict[str, Any]) -> None:
+def verify_source_checkout(campaign: dict[str, Any],
+                           checkout: Path | None = None) -> Path:
+    checkout = Path.cwd() if checkout is None else checkout
+    if not checkout.is_absolute():
+        raise SupervisorError("supervisor_source_checkout_invalid")
     environment = {
         "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
         "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
     }
+    top = command(
+        [str(GIT), "rev-parse", "--show-toplevel"],
+        environment=environment, cwd=checkout,
+    ).stdout
+    try:
+        expected_top = f"{checkout.resolve(strict=True)}\n".encode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise SupervisorError("supervisor_source_checkout_invalid") from error
+    if top != expected_top:
+        raise SupervisorError("supervisor_source_checkout_mismatch")
     head = command(
         [str(GIT), "rev-parse", "--verify", "HEAD^{commit}"],
-        environment=environment,
+        environment=environment, cwd=checkout,
     ).stdout
     if head != f"{campaign['source_commit']}\n".encode("ascii"):
         raise SupervisorError("supervisor_source_checkout_mismatch")
     command(
         [str(GIT), "diff", "--quiet", "--exit-code", campaign["source_commit"], "--"],
-        environment=environment,
+        environment=environment, cwd=checkout,
     )
+    return checkout.resolve(strict=True)
 
 
 def acquire_lock() -> int:
@@ -303,7 +319,8 @@ def read_worker_checkpoint(process: subprocess.Popen[bytes], timeout: float) -> 
     return value
 
 
-def stage_exact_commit(campaign: dict[str, Any], directory: Path) -> list[Path]:
+def stage_exact_commit(campaign: dict[str, Any], directory: Path,
+                       checkout: Path) -> list[Path]:
     commit = campaign["source_commit"]
     git_environment = {
         "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
@@ -312,13 +329,13 @@ def stage_exact_commit(campaign: dict[str, Any], directory: Path) -> list[Path]:
     }
     command(
         [str(GIT), "cat-file", "-e", f"{commit}^{{commit}}"],
-        environment=git_environment,
+        environment=git_environment, cwd=checkout,
     )
     staged: list[Path] = []
     for name, source in SOURCE_FILES.items():
         result = command(
             [str(GIT), "cat-file", "blob", f"{commit}:{source}"],
-            maximum=1024 * 1024, environment=git_environment,
+            maximum=1024 * 1024, environment=git_environment, cwd=checkout,
         )
         if not result.stdout or len(result.stdout) > 1024 * 1024:
             raise SupervisorError("supervisor_source_blob_invalid")
@@ -333,12 +350,12 @@ def stage_exact_commit(campaign: dict[str, Any], directory: Path) -> list[Path]:
     return staged
 
 
-def deploy(campaign: dict[str, Any], staging_root: Path) -> None:
+def deploy(campaign: dict[str, Any], staging_root: Path, checkout: Path) -> None:
     with tempfile.TemporaryDirectory(prefix=".acceptance-deploy-",
                                      dir=staging_root) as temporary:
         stage = Path(temporary)
         stage.chmod(0o700)
-        files = stage_exact_commit(campaign, stage)
+        files = stage_exact_commit(campaign, stage, checkout)
         installer = stage / "install-harness-lifecycle-acceptance-recovery.sh"
         argv = [
             str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG),
@@ -717,7 +734,7 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
             evidence_root: Path, acknowledgement: str) -> dict[str, Any]:
     now = int(time.time())
     campaign = validate_campaign(trusted_json(campaign_path), now)
-    verify_source_checkout(campaign)
+    checkout = verify_source_checkout(campaign)
     if current_machine_identity() != campaign["machine_identity_sha256"]:
         raise SupervisorError("supervisor_machine_identity_mismatch")
     case = next_recovery_case(campaign_path, observations, case_id)
@@ -747,7 +764,7 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
             os.fsync(parent)
         finally:
             os.close(parent)
-        deploy(campaign, destination)
+        deploy(campaign, destination, checkout)
         pre_boot = (remote_json(campaign, "boot-readback", case_id)
                     if interaction == "supervisor-research-vm-hard-power" else None)
         if pre_boot is not None:

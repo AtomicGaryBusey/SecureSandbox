@@ -251,17 +251,31 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
             payload = b"source\n" if "blob" in argv else b""
             return mock.Mock(stdout=payload, stderr=b"", returncode=0)
 
-        with mock.patch.object(supervisor, "command", side_effect=fake_command):
-            supervisor.stage_exact_commit(self.campaign, stage)
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+        calls = []
+
+        def recording_command(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return fake_command(argv, **kwargs)
+
+        with mock.patch.object(supervisor, "command", side_effect=recording_command):
+            supervisor.stage_exact_commit(self.campaign, stage, checkout)
         self.assertEqual(
             (stage / "campaign.json").read_bytes(), acceptance.canonical(self.campaign),
         )
+        self.assertTrue(all(call[1]["cwd"] == checkout for call in calls))
 
     def test_running_checkout_must_equal_campaign_commit_without_replacements(self):
         calls = []
 
         def exact(argv, **kwargs):
             calls.append((argv, kwargs))
+            if "--show-toplevel" in argv:
+                return mock.Mock(
+                    stdout=f"{Path.cwd().resolve()}\n".encode(),
+                    stderr=b"", returncode=0,
+                )
             return mock.Mock(
                 stdout=(f"{self.campaign['source_commit']}\n".encode()
                         if "rev-parse" in argv else b""),
@@ -270,15 +284,39 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
 
         with mock.patch.object(supervisor, "command", side_effect=exact):
             supervisor.verify_source_checkout(self.campaign)
-        self.assertEqual(calls[0][0][-2:], ["--verify", "HEAD^{commit}"])
+        self.assertEqual(calls[0][0][-1], "--show-toplevel")
         self.assertIn("GIT_NO_REPLACE_OBJECTS", calls[0][1]["environment"])
-        self.assertIn("--exit-code", calls[1][0])
+        self.assertEqual(calls[1][0][-2:], ["--verify", "HEAD^{commit}"])
+        self.assertIn("--exit-code", calls[2][0])
+        self.assertEqual(calls[0][1]["cwd"], Path.cwd())
 
-        with mock.patch.object(
-            supervisor, "command",
-            return_value=mock.Mock(stdout=b"9" * 40 + b"\n", stderr=b"", returncode=0),
-        ), self.assertRaisesRegex(supervisor.SupervisorError, "source_checkout"):
+        def wrong_head(argv, **_kwargs):
+            output = (f"{Path.cwd().resolve()}\n".encode()
+                      if "--show-toplevel" in argv else b"9" * 40 + b"\n")
+            return mock.Mock(stdout=output, stderr=b"", returncode=0)
+
+        with mock.patch.object(supervisor, "command", side_effect=wrong_head), \
+                self.assertRaisesRegex(supervisor.SupervisorError, "source_checkout"):
             supervisor.verify_source_checkout(self.campaign)
+
+    def test_installed_driver_verifies_invoking_checkout_not_release_root(self):
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+        calls = []
+
+        def exact(argv, **kwargs):
+            calls.append((argv, kwargs))
+            output = (f"{checkout.resolve()}\n".encode()
+                      if "--show-toplevel" in argv
+                      else (f"{self.campaign['source_commit']}\n".encode()
+                            if "--verify" in argv else b""))
+            return mock.Mock(stdout=output, stderr=b"", returncode=0)
+
+        with mock.patch.object(supervisor, "command", side_effect=exact), \
+                mock.patch.object(supervisor.Path, "cwd", return_value=checkout):
+            supervisor.verify_source_checkout(self.campaign)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call[1]["cwd"] == checkout for call in calls))
 
     def test_process_loss_writes_exact_fixed_collector_artifacts(self):
         case = self.case("process-loss-fenced")

@@ -1,9 +1,26 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: physical prerequisite preparation is in progress on the disposable
-Neo. The protected Host bootstrap and several retained fail-closed upgrade
-attempts are physical evidence, but the 91-case campaign has not begun and no
-acceptance verdict has been issued.
+Status: the exact-commit campaign has been initialized on the disposable Neo,
+but its first case has not produced raw evidence and no acceptance verdict has
+been issued. The protected Host bootstrap, three-VM installation, host-key
+enrollment, protected acceptance-driver installation, and retained fail-closed
+upgrade attempts are physical preparation evidence.
+
+The first `bootstrap-clean-install` collector rejected during preflight before
+reserving its raw-evidence destination. Decomposition proved the campaign and
+machine bindings valid and the invoking checkout clean at its exact public
+commit. The installed supervisor had instead forced Git's working directory to
+its immutable root-owned driver release, which intentionally has no `.git`
+metadata. The repair makes the invoking checkout an explicit subprocess
+boundary, requires it to be the physical repository top level, and verifies
+the exact campaign HEAD plus a clean diff there. It does not treat the
+protected release as a checkout or relax the root-owned driver manifest. The
+same resolved checkout is carried into later recovery-source staging so that
+every exact `git cat-file` read uses the repository already bound by preflight,
+not the installed driver root. The focused acceptance suite passes, including
+installed-layout and recovery-staging regressions. The rejected campaign
+remains retained; no raw case directory was claimed and it must not be retried
+with a driver that is not its exact source commit.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

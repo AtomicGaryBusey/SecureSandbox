@@ -542,7 +542,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
     def test_recovery_evidence_is_reserved_before_remote_mutation(self):
         destination = self.recovery_supervisor.index(
             "destination = output_destination(evidence_root, case_id)")
-        deployment = self.recovery_supervisor.index("deploy(campaign, destination)")
+        deployment = self.recovery_supervisor.index(
+            "deploy(campaign, destination, checkout)",
+        )
         worker = self.recovery_supervisor.index("worker = subprocess.Popen", deployment)
         self.assertLess(destination, deployment)
         self.assertLess(deployment, worker)

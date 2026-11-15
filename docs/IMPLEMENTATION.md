@@ -632,9 +632,15 @@ SecureSandbox uses three isolated Linux guests on an operator-controlled host:
 
 The internal subnet layout, canonical per-device MAC identities, and Host SSH
 aliases are tracked protocol and release authority.  The portable SSH payload
-uses OpenSSH `%d` paths beneath the admitted operator's home and the fixed
-Parallels Shared-network Gateway address.  Physical acceptance must still prove
-that address on each clean Mac.  Private keys, `known_hosts`, archive
+uses OpenSSH `%d` paths beneath the admitted operator's home. Parallels Shared
+networking legitimately assigns the Gateway address by DHCP, so the signed
+Gateway aliases use a fixed, shell-safe proxy command instead of embedding an
+address. The proxy accepts only port 22, validates the root-owned Parallels
+network configuration, requires the exact running Gateway bundle and canonical
+two-NIC/MAC topology with no installer media, and forwards only to its sole IPv4
+address inside the validated Shared DHCP scope. Stable `HostKeyAlias` values
+keep strict `known_hosts` authentication authoritative after address changes.
+Private keys, `known_hosts`, archive
 recipients, retention names, provider credential references, model profiles,
 and persona selections remain ignored machine-local state.
 

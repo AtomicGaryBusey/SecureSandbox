@@ -346,6 +346,15 @@ named-network attachment and after final configuration. This fails before
 Touch ID when the planes are absent or unsafe and detects changes between
 review, attachment, and final readback.
 
+Physical boot also proved that the Gateway's Parallels Shared address is a
+dynamic transport fact, not a portable release constant. The signed Host SSH
+configuration must therefore discover that address without treating discovery
+as identity: the installed immutable resolver accepts only the exact running
+Gateway bundle, canonical NIC/MAC topology, no enabled installer media, and one
+IPv4 address inside a stable, root-owned Shared DHCP configuration. OpenSSH
+continues to authenticate a stable Gateway HostKeyAlias through the strict
+known-hosts file. A DHCP address alone can never nominate a trusted guest.
+
 The first network-bound request on macOS 27.2 exposed a separate
 cross-language canonicalization defect before any authorization window or VM
 mutation. Python's explicit `sort_keys=True` ordering placed

@@ -57,6 +57,7 @@ LAYOUTS = {
 }
 INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 PRLCTL = Path("/Applications/Parallels Desktop.app/Contents/MacOS/prlctl")
+NC = Path("/usr/bin/nc")
 NETWORK_CONFIG = Path("/Library/Preferences/Parallels/network.desktop.xml")
 MIN_FREE_BYTES = 30 * 1024 * 1024 * 1024
 VM_UUID = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
@@ -395,9 +396,9 @@ def reject_extended_acl(descriptor: int) -> None:
             raise MaintenanceError("vm_network_config_untrusted")
 
 
-def private_network_config(path: Path = NETWORK_CONFIG,
-                           expected_uid: int = 0) -> dict[str, dict[str, str]]:
-    """Read and validate the two fail-closed host-only network planes."""
+def trusted_network_root(path: Path = NETWORK_CONFIG,
+                         expected_uid: int = 0) -> ET.Element:
+    """Read one stable, root-owned Parallels network configuration snapshot."""
     parent_descriptor = -1
     descriptor = -1
     try:
@@ -454,6 +455,13 @@ def private_network_config(path: Path = NETWORK_CONFIG,
         root = ET.fromstring(bytes(raw))
     except ET.ParseError as error:
         raise MaintenanceError("vm_network_config_invalid") from error
+    return root
+
+
+def private_network_config(path: Path = NETWORK_CONFIG,
+                           expected_uid: int = 0) -> dict[str, dict[str, str]]:
+    """Read and validate the two fail-closed host-only network planes."""
+    root = trusted_network_root(path, expected_uid)
     expected = {
         "control-net": ("172.30.10.2", "172.30.10.1", "172.30.10.30"),
         "lab-net": ("172.30.20.2", "172.30.20.1", "172.30.20.30"),
@@ -525,6 +533,161 @@ def private_network_config(path: Path = NETWORK_CONFIG,
         if any(other_subnet.overlaps(protected) for protected in protected_subnets):
             raise MaintenanceError(f"vm_network_overlap:{name}")
     return result
+
+
+def shared_network_scope(root: ET.Element) -> tuple[ipaddress.IPv4Network,
+                                                   ipaddress.IPv4Address,
+                                                   ipaddress.IPv4Address,
+                                                   frozenset[ipaddress.IPv4Address]]:
+    """Validate Shared networking and return its admitted DHCP address scope."""
+    networks = [
+        network for network in root.iter("VirtualNetwork")
+        if network.findtext("NetworkID") == "Shared"
+    ]
+    if len(networks) != 1:
+        raise MaintenanceError("vm_shared_network_invalid")
+    network = networks[0]
+    host = network.find("HostOnlyNetwork")
+    if host is None:
+        raise MaintenanceError("vm_shared_network_invalid")
+    try:
+        subnet = ipaddress.IPv4Network((
+            host.findtext("HostIPAddress") or "",
+            host.findtext("IPNetMask") or "",
+        ), strict=False)
+        host_ip = ipaddress.IPv4Address(host.findtext("HostIPAddress") or "")
+        dhcp_ip = ipaddress.IPv4Address(host.findtext("DhcpIPAddress") or "")
+        start = ipaddress.IPv4Address(host.findtext("DHCPServer/IPScopeStart") or "")
+        end = ipaddress.IPv4Address(host.findtext("DHCPServer/IPScopeEnd") or "")
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError) as error:
+        raise MaintenanceError("vm_shared_network_invalid") from error
+    if (network.findtext("Enabled") != "1"
+            or network.findtext("NetworkType") != "1"
+            or host.findtext("DHCPServer/Enabled") != "1"
+            or host.findtext("NATServer/Enabled") != "1"
+            or host.findtext("HostAssignIPv6") != "0"
+            or any(address not in subnet for address in (host_ip, dhcp_ip, start, end))
+            or start in (subnet.network_address, subnet.broadcast_address)
+            or end in (subnet.network_address, subnet.broadcast_address)
+            or int(start) > int(end)):
+        raise MaintenanceError("vm_shared_network_invalid")
+    excluded = frozenset({subnet.network_address, subnet.broadcast_address, host_ip, dhcp_ip})
+    return subnet, start, end, excluded
+
+
+def trusted_root_executable(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise MaintenanceError(f"gateway_proxy_executable_untrusted:{path.name}") from error
+    if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_nlink != 1 or info.st_mode & 0o022
+            or not info.st_mode & 0o111):
+        raise MaintenanceError(f"gateway_proxy_executable_untrusted:{path.name}")
+
+
+def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
+                           network_path: Path = NETWORK_CONFIG) -> str:
+    """Resolve only the exact running Gateway VM inside validated Shared DHCP."""
+    if uid <= 0 or os.geteuid() != uid or os.getuid() != uid:
+        raise MaintenanceError("gateway_proxy_unprivileged_user_required")
+    account = pwd.getpwuid(uid)
+    expected_repo = (Path(account.pw_dir) / "SecureSandbox") if repo is None else repo
+    resolved_repo = trusted_repo(str(expected_repo), uid)
+    trusted_root_executable(PRLCTL)
+    trusted_root_executable(NC)
+    root = trusted_network_root(network_path)
+    _subnet, start, end, excluded = shared_network_scope(root)
+    values = json.loads(run([
+        str(PRLCTL), "list", "-a", "-i", "-j", NAMES[0],
+    ], capture=True))
+    if not isinstance(values, list) or len(values) != 1:
+        raise MaintenanceError("gateway_proxy_vm_invalid")
+    value = values[0]
+    if not isinstance(value, dict):
+        raise MaintenanceError("gateway_proxy_vm_invalid")
+    expected_home = resolved_repo / f"vms/{NAMES[0]}.pvm"
+    home = Path(str(value.get("Home", "")).rstrip("/"))
+    try:
+        home_info = home.lstat()
+        identifier = normalize_vm_uuid(value.get("ID"))
+        exact_home = home.resolve(strict=True) == expected_home.resolve(strict=True)
+    except (OSError, MaintenanceError) as error:
+        raise MaintenanceError("gateway_proxy_vm_invalid") from error
+    hardware = value.get("Hardware")
+    if not isinstance(hardware, dict):
+        raise MaintenanceError("gateway_proxy_vm_invalid")
+    if any((key.startswith("net") or key.startswith("cdrom"))
+           and (not isinstance(device, dict)
+                or ("enabled" in device and not isinstance(device["enabled"], bool)))
+           for key, device in hardware.items()):
+        raise MaintenanceError("gateway_proxy_vm_invalid")
+    networks = sorted([
+        {
+            "key": key,
+            "type": device.get("type", ""),
+            "iface": device.get("iface") or "",
+            "mac": str(device.get("mac", "")).upper(),
+        }
+        for key, device in hardware.items()
+        if (key.startswith("net") and isinstance(device, dict)
+            and device.get("enabled", True))
+    ], key=lambda item: item["key"])
+    expected_networks = [
+        {"key": "net0", "type": "shared", "iface": "",
+         "mac": NETWORK_MACS[NAMES[0]]["net0"]},
+        {"key": "net1", "type": "host", "iface": "control-net",
+         "mac": NETWORK_MACS[NAMES[0]]["net1"]},
+    ]
+    if (value.get("Name") != NAMES[0] or value.get("State") != "running"
+            or not VM_UUID.fullmatch(identifier)
+            or home.is_symlink() or not stat.S_ISDIR(home_info.st_mode)
+            or home_info.st_uid != uid or not exact_home
+            or networks != expected_networks
+            or any(key.startswith("cdrom") and isinstance(device, dict)
+                   and device.get("enabled", True)
+                   for key, device in hardware.items())):
+        raise MaintenanceError("gateway_proxy_vm_invalid")
+    network_status = value.get("Network")
+    if (not isinstance(network_status, dict)
+            or network_status.get("Conditioned") != "off"):
+        raise MaintenanceError("gateway_proxy_address_invalid")
+    raw_addresses = network_status.get("ipAddresses")
+    if not isinstance(raw_addresses, list):
+        raise MaintenanceError("gateway_proxy_address_invalid")
+    tokens: list[str] = []
+    declared_types: list[str] = []
+    for item in raw_addresses:
+        if (not isinstance(item, dict) or set(item) != {"type", "ip"}
+                or item.get("type") not in {"ipv4", "ipv6"}
+                or not isinstance(item.get("ip"), str)):
+            raise MaintenanceError("gateway_proxy_address_invalid")
+        declared_types.append(item["type"])
+        tokens.append(item["ip"])
+    try:
+        addresses = [ipaddress.ip_address(token) for token in tokens]
+    except ValueError as error:
+        raise MaintenanceError("gateway_proxy_address_invalid") from error
+    if (len(set(addresses)) != len(addresses)
+            or any(declared != ("ipv4" if isinstance(address, ipaddress.IPv4Address)
+                                else "ipv6")
+                   for declared, address in zip(declared_types, addresses))):
+        raise MaintenanceError("gateway_proxy_address_invalid")
+    ipv4 = [address for address in addresses if isinstance(address, ipaddress.IPv4Address)]
+    if (len(ipv4) != 1 or ipv4[0] in excluded
+            or not int(start) <= int(ipv4[0]) <= int(end)):
+        raise MaintenanceError("gateway_proxy_address_invalid")
+    return str(ipv4[0])
+
+
+def exec_gateway_proxy(port: int) -> None:
+    if port != 22:
+        raise MaintenanceError("gateway_proxy_port_invalid")
+    endpoint = gateway_proxy_endpoint(os.geteuid())
+    os.execve(
+        str(NC), [str(NC), "-w", "10", endpoint, str(port)],
+        {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
 
 
 def normalize_vm_uuid(value: Any) -> str:
@@ -1071,9 +1234,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=(
         "plan-create", "plan-reprovision", "create", "reprovision",
-        "plan-preserve-legacy", "preserve-legacy",
+        "plan-preserve-legacy", "preserve-legacy", "proxy-gateway",
     ))
-    parser.add_argument("--repo", required=True)
+    parser.add_argument("--repo")
+    parser.add_argument("--port", type=int)
     parser.add_argument("--invoking-uid", type=int, default=os.getuid())
     parser.add_argument("--generation")
     parser.add_argument("--layout-profile", choices=tuple(LAYOUTS), default="standard")
@@ -1091,6 +1255,19 @@ def main() -> int:
     parser.add_argument("--expected-preservation-planner-sha256")
     parser.add_argument("--expected-preservation-executor-sha256")
     args = parser.parse_args()
+    if args.operation == "proxy-gateway":
+        try:
+            if args.repo is not None or args.port is None:
+                raise MaintenanceError("gateway_proxy_arguments_invalid")
+            exec_gateway_proxy(args.port)
+            raise MaintenanceError("gateway_proxy_exec_returned")
+        except (MaintenanceError, OSError, ValueError, json.JSONDecodeError):
+            print(json.dumps({
+                "status": "rejected", "error": "gateway_proxy_rejected",
+            }, sort_keys=True), file=sys.stderr)
+            return 1
+    if args.repo is None:
+        parser.error("--repo is required for VM maintenance operations")
     operation = args.operation.removeprefix("plan-")
     try:
         if operation == "preserve-legacy":

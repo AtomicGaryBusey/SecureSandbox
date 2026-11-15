@@ -1,7 +1,10 @@
 # Canonical portable Host SSH configuration. OpenSSH expands %d to the local
 # operator's home directory on each admitted Mac.
 Host sandbox-gateway
-    HostName 10.211.55.16
+    HostName gateway.securesandbox.invalid
+    HostKeyAlias SecureSandbox-Gateway
+    CheckHostIP no
+    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/vm_maintenance proxy-gateway --port %p
     User labadmin
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
     IdentityFile %d/SecureSandbox/runs/provisioning_key.pub
@@ -11,7 +14,10 @@ Host sandbox-gateway
     UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
 
 Host sandbox-gateway-control
-    HostName 10.211.55.16
+    HostName gateway.securesandbox.invalid
+    HostKeyAlias SecureSandbox-Gateway
+    CheckHostIP no
+    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/vm_maintenance proxy-gateway --port %p
     User securectl
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
     IdentityFile %d/SecureSandbox/runs/control_key.pub
@@ -22,6 +28,8 @@ Host sandbox-gateway-control
 
 Host sandbox-research-admin
     HostName 172.30.10.2
+    HostKeyAlias SecureSandbox-Research
+    CheckHostIP no
     User labadmin
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
@@ -33,6 +41,8 @@ Host sandbox-research-admin
 
 Host sandbox-research
     HostName 172.30.10.2
+    HostKeyAlias SecureSandbox-Research
+    CheckHostIP no
     User agent
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
@@ -44,6 +54,8 @@ Host sandbox-research
 
 Host sandbox-research-control
     HostName 172.30.10.2
+    HostKeyAlias SecureSandbox-Research
+    CheckHostIP no
     User securectl
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
@@ -55,6 +67,8 @@ Host sandbox-research-control
 
 Host sandbox-target-admin
     HostName 172.30.20.2
+    HostKeyAlias SecureSandbox-Target
+    CheckHostIP no
     User labadmin
     ProxyJump sandbox-gateway,sandbox-research-admin
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
@@ -66,6 +80,8 @@ Host sandbox-target-admin
 
 Host sandbox-target-control
     HostName 172.30.20.2
+    HostKeyAlias SecureSandbox-Target
+    CheckHostIP no
     User securectl
     ProxyJump sandbox-gateway,sandbox-research-admin
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock

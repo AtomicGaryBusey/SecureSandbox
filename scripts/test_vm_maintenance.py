@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
+from contextlib import redirect_stderr
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +35,48 @@ class VmMaintenanceTests(unittest.TestCase):
                     "dhcp4_enabled": "0", "dhcp6_enabled": "0",
                     "nat_enabled": "0", "host_assign_ipv6": "0"},
     }
+
+    @staticmethod
+    def shared_network_xml(**changes):
+        values = {
+            "network_id": "Shared", "enabled": "1", "network_type": "1",
+            "host_ip": "10.211.55.2", "dhcp_ip": "10.211.55.1",
+            "netmask": "255.255.255.0", "ipv6": "0", "dhcp": "1",
+            "start": "10.211.55.1", "end": "10.211.55.254", "nat": "1",
+        }
+        values.update(changes)
+        return ET.fromstring("""<Root><VirtualNetwork>
+<NetworkID>{network_id}</NetworkID><Enabled>{enabled}</Enabled>
+<NetworkType>{network_type}</NetworkType><HostOnlyNetwork>
+<HostIPAddress>{host_ip}</HostIPAddress><DhcpIPAddress>{dhcp_ip}</DhcpIPAddress>
+<IPNetMask>{netmask}</IPNetMask><HostAssignIPv6>{ipv6}</HostAssignIPv6>
+<DHCPServer><Enabled>{dhcp}</Enabled><IPScopeStart>{start}</IPScopeStart>
+<IPScopeEnd>{end}</IPScopeEnd></DHCPServer>
+<NATServer><Enabled>{nat}</Enabled></NATServer>
+</HostOnlyNetwork></VirtualNetwork></Root>""".format(**values))
+
+    @staticmethod
+    def gateway_value(home, **changes):
+        value = {
+            "ID": "11111111-1111-4111-8111-111111111111",
+            "Name": VM.NAMES[0], "State": "running", "Home": str(home) + "/",
+            "Network": {
+                "Conditioned": "off",
+                "ipAddresses": [
+                    {"type": "ipv4", "ip": "10.211.55.5"},
+                    {"type": "ipv6", "ip": "fe80::21c:42ff:febc:794f"},
+                ],
+            },
+            "Hardware": {
+                "net0": {"enabled": True, "type": "shared", "mac": "001C42BC794F"},
+                "net1": {"enabled": True, "type": "host", "iface": "control-net",
+                         "mac": "001C4292EA7F"},
+                "cdrom0": {"enabled": False},
+                "cdrom1": {"enabled": False},
+            },
+        }
+        value.update(changes)
+        return value
 
     def test_parallels_json_uuid_is_normalized_to_transaction_form(self):
         bare = "-".join(("1" * 8, "2" * 4, "4" + "3" * 3, "8" + "4" * 3, "5" * 12))
@@ -165,6 +210,142 @@ class VmMaintenanceTests(unittest.TestCase):
             path.write_text(f"<Root>{control}{lab}{duplicate}</Root>", encoding="utf-8")
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid"):
                 VM.private_network_config(path, os.getuid())
+
+    def test_shared_network_scope_requires_one_enabled_nat_dhcp_plane(self):
+        subnet, start, end, excluded = VM.shared_network_scope(self.shared_network_xml())
+        self.assertEqual(str(subnet), "10.211.55.0/24")
+        self.assertEqual((str(start), str(end)), ("10.211.55.1", "10.211.55.254"))
+        self.assertEqual({str(value) for value in excluded}, {
+            "10.211.55.0", "10.211.55.1", "10.211.55.2", "10.211.55.255",
+        })
+        invalid_roots = [
+            self.shared_network_xml(enabled="0"),
+            self.shared_network_xml(network_type="0"),
+            self.shared_network_xml(dhcp="0"),
+            self.shared_network_xml(nat="0"),
+            self.shared_network_xml(ipv6="1"),
+            self.shared_network_xml(start="10.211.56.1"),
+            self.shared_network_xml(start="10.211.55.255"),
+            self.shared_network_xml(start="10.211.55.200", end="10.211.55.100"),
+        ]
+        duplicate = self.shared_network_xml()
+        duplicate.append(list(self.shared_network_xml())[0])
+        invalid_roots.append(duplicate)
+        for root in invalid_roots:
+            with self.subTest(root=ET.tostring(root)):
+                with self.assertRaisesRegex(VM.MaintenanceError, "vm_shared_network_invalid"):
+                    VM.shared_network_scope(root)
+
+    def test_gateway_proxy_resolves_only_exact_running_vm_in_shared_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "SecureSandbox"
+            home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
+            home.mkdir(parents=True)
+            value = self.gateway_value(home)
+            with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
+                  mock.patch.object(VM, "trusted_repo", return_value=repo),
+                  mock.patch.object(VM, "trusted_root_executable"),
+                  mock.patch.object(VM, "trusted_network_root",
+                                    return_value=self.shared_network_xml()),
+                  mock.patch.object(VM, "run", return_value=json.dumps([value])) as run):
+                self.assertEqual(
+                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo), "10.211.55.5",
+                )
+            run.assert_called_once_with([
+                str(VM.PRLCTL), "list", "-a", "-i", "-j", VM.NAMES[0],
+            ], capture=True)
+
+    def test_gateway_proxy_rejects_vm_identity_topology_media_and_address_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "SecureSandbox"
+            home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
+            home.mkdir(parents=True)
+            canonical = self.gateway_value(home)
+            cases = {
+                "stopped": {**canonical, "State": "stopped"},
+                "wrong-name": {**canonical, "Name": "Other"},
+                "wrong-home": {**canonical, "Home": str(repo / "vms/Other.pvm")},
+                "wrong-mac": {**canonical, "Hardware": {
+                    **canonical["Hardware"],
+                    "net0": {"enabled": True, "type": "shared", "mac": "001C42FFFFFF"},
+                }},
+                "extra-nic": {**canonical, "Hardware": {
+                    **canonical["Hardware"],
+                    "net2": {"enabled": True, "type": "shared", "mac": "001C42000000"},
+                }},
+                "media": {**canonical, "Hardware": {
+                    **canonical["Hardware"], "cdrom1": {"enabled": True},
+                }},
+                "malformed-media": {**canonical, "Hardware": {
+                    **canonical["Hardware"], "cdrom1": "unexpected",
+                }},
+                "malformed-enabled": {**canonical, "Hardware": {
+                    **canonical["Hardware"],
+                    "net0": {"enabled": "false", "type": "shared",
+                             "mac": "001C42BC794F"},
+                }},
+                "outside-scope": {**canonical, "Network": {
+                    "Conditioned": "off",
+                    "ipAddresses": [{"type": "ipv4", "ip": "192.0.2.5"}],
+                }},
+                "excluded": {**canonical, "Network": {
+                    "Conditioned": "off",
+                    "ipAddresses": [{"type": "ipv4", "ip": "10.211.55.2"}],
+                }},
+                "multiple-ipv4": {**canonical, "Network": {
+                    "Conditioned": "off", "ipAddresses": [
+                        {"type": "ipv4", "ip": "10.211.55.5"},
+                        {"type": "ipv4", "ip": "10.211.55.6"},
+                    ],
+                }},
+                "missing-ip": {**canonical, "Network": {
+                    "Conditioned": "off", "ipAddresses": [],
+                }},
+                "conditioned": {**canonical, "Network": {
+                    "Conditioned": "on",
+                    "ipAddresses": [{"type": "ipv4", "ip": "10.211.55.5"}],
+                }},
+                "type-mismatch": {**canonical, "Network": {
+                    "Conditioned": "off",
+                    "ipAddresses": [{"type": "ipv6", "ip": "10.211.55.5"}],
+                }},
+            }
+            for name, value in cases.items():
+                with self.subTest(name=name), \
+                     mock.patch.object(VM.os, "getuid", return_value=os.geteuid()), \
+                     mock.patch.object(VM, "trusted_repo", return_value=repo), \
+                     mock.patch.object(VM, "trusted_root_executable"), \
+                     mock.patch.object(VM, "trusted_network_root",
+                                       return_value=self.shared_network_xml()), \
+                     mock.patch.object(VM, "run", return_value=json.dumps([value])):
+                    with self.assertRaisesRegex(
+                            VM.MaintenanceError,
+                            "gateway_proxy_(vm|address)_invalid"):
+                        VM.gateway_proxy_endpoint(os.geteuid(), repo=repo)
+
+    def test_gateway_proxy_exec_is_port_22_only_and_content_free_on_rejection(self):
+        with self.assertRaisesRegex(VM.MaintenanceError, "gateway_proxy_port_invalid"):
+            VM.exec_gateway_proxy(2222)
+        with (mock.patch.object(VM, "gateway_proxy_endpoint", return_value="10.211.55.5"),
+              mock.patch.object(VM.os, "execve", side_effect=RuntimeError("exec intercepted")) as execute):
+            with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
+                VM.exec_gateway_proxy(22)
+        execute.assert_called_once_with(
+            str(VM.NC), [str(VM.NC), "-w", "10", "10.211.55.5", "22"],
+            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        )
+        with (mock.patch.object(VM.sys, "argv", [
+                  "vm-maintenance.py", "proxy-gateway", "--port", "2222",
+              ]), redirect_stderr(io.StringIO()) as error):
+            self.assertEqual(VM.main(), 1)
+        self.assertEqual(json.loads(error.getvalue()), {
+            "status": "rejected", "error": "gateway_proxy_rejected",
+        })
+        with (mock.patch.object(VM.os, "geteuid", return_value=0),
+              mock.patch.object(VM.os, "getuid", return_value=501)):
+            with self.assertRaisesRegex(
+                    VM.MaintenanceError, "gateway_proxy_unprivileged_user_required"):
+                VM.gateway_proxy_endpoint(501)
 
     def test_resource_readback_rejects_missing_or_conflicting_values(self):
         for detail in (

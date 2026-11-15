@@ -7822,6 +7822,13 @@ class NativeHostSourceProvenanceTests(unittest.TestCase):
         text = (REPO / MANAGER.PAYLOAD_SOURCES["ssh_config"]).read_text(encoding="utf-8")
         self.assertIn("IdentityFile %d/SecureSandbox/runs/control_key.pub", text)
         self.assertIn("UserKnownHostsFile %d/SecureSandbox/runs/known_hosts", text)
+        self.assertNotIn("10.211.55.16", text)
+        self.assertEqual(text.count("HostKeyAlias SecureSandbox-Gateway"), 2)
+        self.assertEqual(text.count(
+            "ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/"
+            "current/vm_maintenance proxy-gateway --port %p"), 2)
+        self.assertEqual(text.count("HostKeyAlias SecureSandbox-Research"), 3)
+        self.assertEqual(text.count("HostKeyAlias SecureSandbox-Target"), 2)
         self.assertNotIn("REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH", text)
         self.assertNotIn("/" + "Users/aharmon/", text)
 

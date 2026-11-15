@@ -40,6 +40,19 @@ The installed self-check evaluates sudo's effective policy as `labadmin`, after 
 
 The existing `labadmin` aliases remain available for manual break-glass work and as restricted ProxyJump hops. Control aliases use end-to-end SSH to the destination. A compromised jump host can deny the connection but cannot read or alter its authenticated plaintext without defeating SSH host/key authentication.
 
+The Gateway's Parallels Shared-network address is deliberately not a release
+constant. The signed Host SSH payload invokes the installed immutable
+`vm_maintenance proxy-gateway` helper with only OpenSSH's numeric port token.
+That unprivileged helper accepts port 22 only; validates the root-owned,
+ACL-free, stable Parallels network configuration; resolves exactly one running
+`SecureSandbox-Gateway` beneath the admitted operator's repository; requires
+the canonical shared/control NIC keys, types, interface, and MACs; rejects any
+enabled installer media; and accepts exactly one IPv4 address inside the
+validated Shared DHCP range, excluding the network, broadcast, Mac-host, and
+DHCP-service addresses. OpenSSH then authenticates the stable
+`SecureSandbox-Gateway` host-key alias from the operator's strict known-hosts
+file. Address discovery therefore supplies transport routing, never identity.
+
 ## Protocol and runtime operations
 
 Every request is a bounded big-endian length-prefixed canonical JSON header followed by an explicitly sized optional payload. The dispatcher rejects malformed schema, truncation, trailing bytes, oversized headers or bodies, unknown operations, wrong-role operations, and invalid argument shapes.

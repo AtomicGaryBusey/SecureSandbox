@@ -140,7 +140,7 @@ commit to its `retain` command and the literal acknowledgement printed by
 
 The retention tool revalidates the canonical old campaign, current hardware,
 complete predecessor protected-driver release, clean replacement checkout,
-both authorized remote tips, and ancestry from old to replacement commit. It
+the disposable-Mac authorized remote tip, and ancestry from old to replacement commit. It
 requires the exact empty directory inventory, writes a self-digested plan into
 that campaign, and atomically moves the entire directory without overwrite to
 `~/SecureSandbox-Acceptance-Handoff/retired-campaigns/<campaign-id>`. It fsyncs
@@ -148,11 +148,21 @@ both parents and exposes retention-only authority. It has no deletion path and
 rejects any observation, raw case entry, unexpected file, ACL, link, mode,
 identity, machine, commit, ancestry, or destination collision.
 
+If a compatible published correction is needed after that immutable plan was
+written but before the move committed, rerunning `retain` does not rewrite the
+plan. It validates the complete prior binding and appends a canonical
+`retention-plan-supersession-<commit>.json` record. Each record binds the prior
+authority digest, prior and replacement commits, current authorized remote tip,
+machine, operator, campaign, inventory, destination, and ancestry. Additional
+corrections extend that one-successor digest chain; forks, gaps, collisions,
+non-descendants, or altered prior bytes fail closed. The atomic move carries
+the original plan and every supersession together.
+
 If the process or filesystem reports failure after the atomic move may have
 committed, do not rerun `retain`. Run its read-only `verify` command with the
 exact old campaign UUID/source and replacement source commits. Verification
 requires the live pathname absent, the retained directory's complete identity
-and bytes, the exact embedded plan, current machine, predecessor release,
+and bytes, the exact embedded plan and append-only supersession chain, current machine, predecessor release,
 replacement ancestry, clean checkout, and both current remote tips. It returns
 the same canonical retention result and performs no recovery mutation.
 

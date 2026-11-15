@@ -24,19 +24,25 @@ with a driver that is not its exact source commit. The original clean-machine
 preflight correctly rejects while that initialized campaign occupies the live
 evidence pathname. A dedicated retention-only repair tool now accepts only
 this zero-observation, zero-raw-evidence condition; binds the old campaign,
-hardware, predecessor protected release, clean published descendant and both
-remote tips; writes its plan into the campaign; and atomically moves the whole
+hardware, predecessor protected release, clean published descendant and the
+disposable-Mac authorized remote tip; writes its plan into the campaign; and atomically moves the whole
 directory without overwrite to the fixed retained-evidence root. It exposes no
 delete/reset path. A separate read-only verifier resolves post-rename process,
 fsync, or readback ambiguity from the exact retained campaign and plan without
 moving anything again. The clean-machine preflight becomes applicable only
 after the old campaign is durably retained under its UUID.
-The first physical invocation rejected before plan publication because the
-tool had applied the private-leaf `0700` mode to the legitimate owner-controlled
-`0755` SecureSandbox application-support parent. The compatibility correction
-admits only `0700` or non-group/non-other-writable `0755` for that one parent;
-campaign, raw, handoff, retained, and plan objects remain on their strict
-private modes.
+The first physical invocation published its immutable plan and then rejected
+before the move because the tool had applied the private-leaf `0700` mode to
+the legitimate owner-controlled `0755` SecureSandbox application-support
+parent. No raw evidence moved and the campaign remained at its live pathname.
+The compatibility correction admits only `0700` or non-group/non-other-writable
+`0755` for that one parent; campaign, raw, handoff, retained, and plan objects
+remain on their strict private modes. Because that plan is bound to the exact
+earlier replacement commit, the repair now preserves it byte-for-byte and
+extends it with an append-only, self-digested supersession chain. Every link
+binds the prior authority digest, old and new descendant commits, remote tip,
+machine, operator, campaign, inventory, and destination; forks, gaps,
+collisions, non-descendants, and altered prior records are rejected.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

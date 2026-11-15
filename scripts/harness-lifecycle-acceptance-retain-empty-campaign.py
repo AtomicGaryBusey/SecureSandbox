@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import stat
 import sys
 import time
@@ -60,17 +61,26 @@ SUPERVISOR = _load(
 
 
 SCHEMA = "secure-sandbox-harness-lifecycle-empty-campaign-retention-plan-v1"
-RESULT_SCHEMA = "secure-sandbox-harness-lifecycle-empty-campaign-retention-v1"
+SUPERSESSION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-empty-campaign-retention-"
+    "supersession-v1"
+)
+RESULT_SCHEMA = "secure-sandbox-harness-lifecycle-empty-campaign-retention-v2"
 ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"
 CAMPAIGN_RELATIVE = Path("Library/Application Support/SecureSandbox/harness-acceptance")
 RETAINED_RELATIVE = Path("SecureSandbox-Acceptance-Handoff/retired-campaigns")
 PLAN_NAME = "retention-plan.json"
+SUPERSESSION_PREFIX = "retention-plan-supersession-"
+SUPERSESSION_PATTERN = re.compile(
+    rf"^{re.escape(SUPERSESSION_PREFIX)}([0-9a-f]{{40}})\.json$",
+)
 EXPECTED_ROOT = {"campaign.json", "observations", "raw"}
 EXPECTED_RAW = {"bootstrap", "qualification", "recovery"}
 RENAME_EXCL = 0x00000004
 RENAME_NOFOLLOW_ANY = 0x00000010
 RENAME_RESOLVE_BENEATH = 0x00000020
 MAX_CAMPAIGN = 1024 * 1024
+MAX_SUPERSESSIONS = 32
 
 
 class RetentionError(RuntimeError):
@@ -147,7 +157,12 @@ def validate_empty_layout(root: Path, uid: int) -> tuple[dict[str, Any], str]:
         entries = set(os.listdir(root_descriptor))
     finally:
         os.close(root_descriptor)
-    if entries != EXPECTED_ROOT and entries != EXPECTED_ROOT | {PLAN_NAME}:
+    extra = entries - EXPECTED_ROOT
+    supersessions = {name for name in extra if SUPERSESSION_PATTERN.fullmatch(name)}
+    if (extra not in (set(), {PLAN_NAME})
+            and (PLAN_NAME not in extra
+                 or extra != {PLAN_NAME} | supersessions
+                 or len(supersessions) > MAX_SUPERSESSIONS)):
         raise RetentionError("retention_campaign_not_empty")
     raw = _campaign_bytes(root, uid)
     try:
@@ -180,12 +195,15 @@ def validate_empty_layout(root: Path, uid: int) -> tuple[dict[str, Any], str]:
     return campaign, digest(inventory)
 
 
-def _write_new(path: Path, value: dict[str, Any]) -> None:
+def _write_new_at(parent_descriptor: int, name: str,
+                  value: dict[str, Any]) -> None:
     raw = canonical(value)
     descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+        name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+        dir_fd=parent_descriptor,
     )
     try:
+        os.fchmod(descriptor, 0o600)
         view = memoryview(raw)
         while view:
             written = os.write(descriptor, view)
@@ -195,11 +213,7 @@ def _write_new(path: Path, value: dict[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
+    os.fsync(parent_descriptor)
 
 
 def _rename_exclusive(source_parent: int, source: str,
@@ -269,8 +283,163 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
     return value
 
 
+def _trusted_canonical_record(path: Path, uid: int, label: str) -> dict[str, Any]:
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != uid or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or not 0 < before.st_size <= MAX_CAMPAIGN):
+        raise RetentionError(f"{label}_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        if not acl_absent(descriptor):
+            raise RetentionError(f"{label}_untrusted")
+        opened = os.fstat(descriptor)
+        data = os.read(descriptor, MAX_CAMPAIGN + 1)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda result: (
+        result.st_dev, result.st_ino, result.st_mode, result.st_uid,
+        result.st_gid, result.st_nlink, result.st_size, result.st_mtime_ns,
+        result.st_ctime_ns,
+    )
+    if (identity(before) != identity(opened) or identity(opened) != identity(after)
+            or len(data) != opened.st_size):
+        raise RetentionError(f"{label}_changed")
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError(f"{label}_invalid") from error
+    if not isinstance(value, dict) or canonical(value) != data:
+        raise RetentionError(f"{label}_invalid")
+    return value
+
+
+def _trusted_supersession(path: Path, uid: int) -> dict[str, Any]:
+    value = _trusted_canonical_record(path, uid, "retention_supersession")
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "supersession_sha256"
+    }
+    expected_keys = {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "campaign_source_commit", "prior_replacement_source_commit",
+        "replacement_source_commit", "prior_authority_sha256",
+        "remote_tips", "machine_identity_sha256", "operator_uid", "reason",
+        "observed_at", "inventory_sha256", "destination_name",
+        "supersession_sha256",
+    }
+    match = SUPERSESSION_PATTERN.fullmatch(path.name)
+    if (set(value) != expected_keys
+            or value.get("schema") != SUPERSESSION_SCHEMA
+            or value.get("status") != "prepared"
+            or value.get("reason") != "retention-plan-compatible-descendant"
+            or not isinstance(value.get("observed_at"), int)
+            or isinstance(value.get("observed_at"), bool)
+            or not isinstance(value.get("operator_uid"), int)
+            or isinstance(value.get("operator_uid"), bool)
+            or value.get("supersession_sha256") != digest(unsigned)
+            or match is None
+            or match.group(1) != value.get("replacement_source_commit")):
+        raise RetentionError("retention_supersession_invalid")
+    return value
+
+
+def _remote_tips_for(commit: str, remote_tips: Any) -> bool:
+    expected = {name for name, _url in PREFLIGHT.AUTHORIZED_REMOTES}
+    return (
+        isinstance(remote_tips, dict)
+        and set(remote_tips) == expected
+        and all(value == commit for value in remote_tips.values())
+    )
+
+
+def _is_ancestor(older: str, newer: str) -> None:
+    try:
+        PREFLIGHT.git_command(
+            ["merge-base", "--is-ancestor", older, newer], cwd=ROOT,
+        )
+    except PREFLIGHT.PreflightError as error:
+        raise RetentionError("retention_replacement_not_descendant") from error
+
+
+def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
+                           inventory_sha256: str, uid: int) -> None:
+    if (plan.get("campaign_id") != campaign["campaign_id"]
+            or plan.get("campaign_sha256") != campaign["campaign_sha256"]
+            or plan.get("campaign_source_commit") != campaign["source_commit"]
+            or plan.get("machine_identity_sha256")
+            != campaign["machine_identity_sha256"]
+            or plan.get("operator_uid") != uid
+            or plan.get("inventory_sha256") != inventory_sha256
+            or plan.get("destination_name") != campaign["campaign_id"]
+            or plan.get("replacement_source_commit")
+            == campaign["source_commit"]
+            or plan.get("observed_at", 0) < campaign["created_at"]
+            or plan.get("observed_at", 0) > int(time.time())
+            or not _remote_tips_for(
+                plan.get("replacement_source_commit", ""),
+                plan.get("remote_tips"),
+            )):
+        raise RetentionError("retention_plan_mismatch")
+    _is_ancestor(
+        campaign["source_commit"], plan["replacement_source_commit"],
+    )
+
+
+def _supersession_chain(root: Path, uid: int, plan: dict[str, Any],
+                        campaign: dict[str, Any],
+                        inventory_sha256: str) -> list[dict[str, Any]]:
+    entries = {
+        name for name in os.listdir(root)
+        if SUPERSESSION_PATTERN.fullmatch(name)
+    }
+    chain: list[dict[str, Any]] = []
+    authority_sha256 = plan["plan_sha256"]
+    replacement = plan["replacement_source_commit"]
+    observed_at = plan["observed_at"]
+    while entries:
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for name in sorted(entries):
+            value = _trusted_supersession(root / name, uid)
+            if value["prior_authority_sha256"] == authority_sha256:
+                candidates.append((name, value))
+        if len(candidates) != 1:
+            raise RetentionError("retention_supersession_chain_invalid")
+        name, value = candidates[0]
+        if (value["campaign_id"] != campaign["campaign_id"]
+                or value["campaign_sha256"] != campaign["campaign_sha256"]
+                or value["campaign_source_commit"] != campaign["source_commit"]
+                or value["prior_replacement_source_commit"] != replacement
+                or value["replacement_source_commit"] == replacement
+                or value["observed_at"] < observed_at
+                or value["observed_at"] > int(time.time())
+                or value["machine_identity_sha256"]
+                != campaign["machine_identity_sha256"]
+                or value["operator_uid"] != uid
+                or value["inventory_sha256"] != inventory_sha256
+                or value["destination_name"] != campaign["campaign_id"]
+                or not _remote_tips_for(
+                    value["replacement_source_commit"], value["remote_tips"],
+                )):
+            raise RetentionError("retention_supersession_mismatch")
+        _is_ancestor(replacement, value["replacement_source_commit"])
+        replacement = value["replacement_source_commit"]
+        authority_sha256 = value["supersession_sha256"]
+        observed_at = value["observed_at"]
+        chain.append(value)
+        entries.remove(name)
+    return chain
+
+
 def _result(campaign: dict[str, Any], replacement: str,
-            plan: dict[str, Any]) -> dict[str, Any]:
+            plan: dict[str, Any],
+            supersessions: list[dict[str, Any]]) -> dict[str, Any]:
+    authority_sha256 = (
+        supersessions[-1]["supersession_sha256"]
+        if supersessions else plan["plan_sha256"]
+    )
     value = {
         "schema": RESULT_SCHEMA,
         "status": "retained",
@@ -278,6 +447,10 @@ def _result(campaign: dict[str, Any], replacement: str,
         "campaign_sha256": campaign["campaign_sha256"],
         "replacement_source_commit": replacement,
         "plan_sha256": plan["plan_sha256"],
+        "supersession_sha256s": [
+            item["supersession_sha256"] for item in supersessions
+        ],
+        "retention_authority_sha256": authority_sha256,
         "destination_name": campaign["campaign_id"],
         "authority": "retention-only",
     }
@@ -308,12 +481,7 @@ def verify_retained(*, expected_campaign_id: str,
     replacement, remote_tips = source_probe()
     if replacement != expected_replacement_commit:
         raise RetentionError("retention_replacement_commit_mismatch")
-    try:
-        PREFLIGHT.git_command([
-            "merge-base", "--is-ancestor", campaign["source_commit"], replacement,
-        ], cwd=ROOT)
-    except PREFLIGHT.PreflightError as error:
-        raise RetentionError("retention_replacement_not_descendant") from error
+    _is_ancestor(campaign["source_commit"], replacement)
     identity_probe = SUPERVISOR.current_machine_identity if identity_probe is None else identity_probe
     machine_identity = identity_probe()
     if machine_identity != campaign["machine_identity_sha256"]:
@@ -324,25 +492,18 @@ def verify_retained(*, expected_campaign_id: str,
     if (readiness.get("available_driver_count") != len(DRIVER_ENTRYPOINTS)
             or readiness.get("status") != "ready"):
         raise RetentionError("retention_predecessor_driver_invalid")
-    expected_plan = {
-        "schema": SCHEMA,
-        "status": "prepared",
-        "campaign_id": campaign["campaign_id"],
-        "campaign_sha256": campaign["campaign_sha256"],
-        "campaign_source_commit": campaign["source_commit"],
-        "replacement_source_commit": replacement,
-        "remote_tips": remote_tips,
-        "machine_identity_sha256": machine_identity,
-        "operator_uid": uid,
-        "reason": "preflight-failed-before-evidence",
-        "observed_at": plan["observed_at"],
-        "inventory_sha256": inventory_sha256,
-        "destination_name": campaign["campaign_id"],
-    }
-    expected_plan["plan_sha256"] = digest(expected_plan)
-    if plan != expected_plan:
-        raise RetentionError("retention_plan_mismatch")
-    return _result(campaign, replacement, plan)
+    _validate_plan_binding(plan, campaign, inventory_sha256, uid)
+    supersessions = _supersession_chain(
+        destination, uid, plan, campaign, inventory_sha256,
+    )
+    final_replacement = (
+        supersessions[-1]["replacement_source_commit"]
+        if supersessions else plan["replacement_source_commit"]
+    )
+    if (final_replacement != replacement
+            or not _remote_tips_for(replacement, remote_tips)):
+        raise RetentionError("retention_replacement_commit_mismatch")
+    return _result(campaign, replacement, plan, supersessions)
 
 
 def retain(*, expected_campaign_id: str, expected_source_commit: str,
@@ -366,12 +527,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     replacement, remote_tips = source_probe()
     if replacement == campaign["source_commit"]:
         raise RetentionError("retention_replacement_commit_required")
-    try:
-        PREFLIGHT.git_command([
-            "merge-base", "--is-ancestor", campaign["source_commit"], replacement,
-        ], cwd=ROOT)
-    except PREFLIGHT.PreflightError as error:
-        raise RetentionError("retention_replacement_not_descendant") from error
+    _is_ancestor(campaign["source_commit"], replacement)
     identity_probe = SUPERVISOR.current_machine_identity if identity_probe is None else identity_probe
     if identity_probe() != campaign["machine_identity_sha256"]:
         raise RetentionError("retention_machine_identity_mismatch")
@@ -382,52 +538,120 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             or readiness.get("status") != "ready"):
         raise RetentionError("retention_predecessor_driver_invalid")
 
-    handoff = home / RETAINED_RELATIVE.parent
-    handoff_descriptor = _directory(handoff, uid)
-    try:
-        retained = handoff / RETAINED_RELATIVE.name
-        try:
-            retained.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        retained_descriptor = _directory(retained, uid)
-    finally:
-        os.close(handoff_descriptor)
     destination_name = campaign["campaign_id"]
-    plan = {
-        "schema": SCHEMA,
-        "status": "prepared",
-        "campaign_id": campaign["campaign_id"],
-        "campaign_sha256": campaign["campaign_sha256"],
-        "campaign_source_commit": campaign["source_commit"],
-        "replacement_source_commit": replacement,
-        "remote_tips": remote_tips,
-        "machine_identity_sha256": campaign["machine_identity_sha256"],
-        "operator_uid": uid,
-        "reason": "preflight-failed-before-evidence",
-        "observed_at": int(time.time()) if now is None else now,
-        "inventory_sha256": inventory_sha256,
-        "destination_name": destination_name,
-    }
-    plan["plan_sha256"] = digest(plan)
-    plan_path = root / PLAN_NAME
-    if plan_path.exists():
-        existing = _trusted_plan(plan_path, uid)
-        comparable = dict(existing)
-        comparable["observed_at"] = plan["observed_at"]
-        comparable.pop("plan_sha256")
-        expected = dict(plan)
-        expected.pop("plan_sha256")
-        if comparable != expected:
-            raise RetentionError("retention_plan_mismatch")
-        plan = existing
-    else:
-        _write_new(plan_path, plan)
-
     source_parent = _directory(root.parent, uid, frozenset({0o700, 0o755}))
     root_descriptor = _directory(root, uid)
+    retained_descriptor: int | None = None
     try:
         root_identity = _directory_identity(os.fstat(root_descriptor))
+        named_source = os.stat(
+            root.name, dir_fd=source_parent, follow_symlinks=False,
+        )
+        if _directory_identity(named_source) != root_identity:
+            raise RetentionError("retention_source_identity_changed")
+
+        handoff = home / RETAINED_RELATIVE.parent
+        handoff_descriptor = _directory(handoff, uid)
+        try:
+            retained = handoff / RETAINED_RELATIVE.name
+            try:
+                os.mkdir(
+                    RETAINED_RELATIVE.name, mode=0o700,
+                    dir_fd=handoff_descriptor,
+                )
+            except FileExistsError:
+                pass
+            else:
+                os.chmod(
+                    RETAINED_RELATIVE.name, 0o700,
+                    dir_fd=handoff_descriptor, follow_symlinks=False,
+                )
+                os.fsync(handoff_descriptor)
+            retained_descriptor = _directory(retained, uid)
+        finally:
+            os.close(handoff_descriptor)
+        try:
+            os.stat(
+                destination_name, dir_fd=retained_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise RetentionError("retention_destination_exists")
+
+        plan = {
+            "schema": SCHEMA,
+            "status": "prepared",
+            "campaign_id": campaign["campaign_id"],
+            "campaign_sha256": campaign["campaign_sha256"],
+            "campaign_source_commit": campaign["source_commit"],
+            "replacement_source_commit": replacement,
+            "remote_tips": remote_tips,
+            "machine_identity_sha256": campaign["machine_identity_sha256"],
+            "operator_uid": uid,
+            "reason": "preflight-failed-before-evidence",
+            "observed_at": int(time.time()) if now is None else now,
+            "inventory_sha256": inventory_sha256,
+            "destination_name": destination_name,
+        }
+        plan["plan_sha256"] = digest(plan)
+        plan_path = root / PLAN_NAME
+        if os.path.lexists(plan_path):
+            plan = _trusted_plan(plan_path, uid)
+            _validate_plan_binding(plan, campaign, inventory_sha256, uid)
+        else:
+            if not _remote_tips_for(replacement, remote_tips):
+                raise RetentionError("retention_remote_tips_mismatch")
+            _write_new_at(root_descriptor, PLAN_NAME, plan)
+            if _trusted_plan(plan_path, uid) != plan:
+                raise RetentionError("retention_plan_write_failed")
+
+        supersessions = _supersession_chain(
+            root, uid, plan, campaign, inventory_sha256,
+        )
+        prior_replacement = (
+            supersessions[-1]["replacement_source_commit"]
+            if supersessions else plan["replacement_source_commit"]
+        )
+        prior_authority = (
+            supersessions[-1]["supersession_sha256"]
+            if supersessions else plan["plan_sha256"]
+        )
+        if prior_replacement != replacement:
+            _is_ancestor(prior_replacement, replacement)
+            if not _remote_tips_for(replacement, remote_tips):
+                raise RetentionError("retention_remote_tips_mismatch")
+            supersession = {
+                "schema": SUPERSESSION_SCHEMA,
+                "status": "prepared",
+                "campaign_id": campaign["campaign_id"],
+                "campaign_sha256": campaign["campaign_sha256"],
+                "campaign_source_commit": campaign["source_commit"],
+                "prior_replacement_source_commit": prior_replacement,
+                "replacement_source_commit": replacement,
+                "prior_authority_sha256": prior_authority,
+                "remote_tips": remote_tips,
+                "machine_identity_sha256": campaign["machine_identity_sha256"],
+                "operator_uid": uid,
+                "reason": "retention-plan-compatible-descendant",
+                "observed_at": int(time.time()) if now is None else now,
+                "inventory_sha256": inventory_sha256,
+                "destination_name": destination_name,
+            }
+            supersession["supersession_sha256"] = digest(supersession)
+            supersession_path = (
+                root / f"{SUPERSESSION_PREFIX}{replacement}.json"
+            )
+            if os.path.lexists(supersession_path):
+                if _trusted_supersession(supersession_path, uid) != supersession:
+                    raise RetentionError("retention_supersession_mismatch")
+            else:
+                _write_new_at(root_descriptor, supersession_path.name, supersession)
+                if _trusted_supersession(supersession_path, uid) != supersession:
+                    raise RetentionError("retention_supersession_write_failed")
+            supersessions.append(supersession)
+
         named_source = os.stat(
             root.name, dir_fd=source_parent, follow_symlinks=False,
         )
@@ -450,14 +674,19 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     finally:
         os.close(root_descriptor)
         os.close(source_parent)
-        os.close(retained_descriptor)
+        if retained_descriptor is not None:
+            os.close(retained_descriptor)
     destination = retained / destination_name
     retained_campaign, retained_inventory = validate_empty_layout(destination, uid)
     retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
-    if (root.exists() or retained_campaign != campaign
-            or retained_inventory != inventory_sha256 or retained_plan != plan):
+    retained_supersessions = _supersession_chain(
+        destination, uid, retained_plan, retained_campaign, retained_inventory,
+    )
+    if (os.path.lexists(root) or retained_campaign != campaign
+            or retained_inventory != inventory_sha256 or retained_plan != plan
+            or retained_supersessions != supersessions):
         raise RetentionError("retention_readback_failed")
-    return _result(campaign, replacement, plan)
+    return _result(campaign, replacement, plan, supersessions)
 
 
 def parser() -> argparse.ArgumentParser:

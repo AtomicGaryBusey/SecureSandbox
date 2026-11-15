@@ -168,7 +168,11 @@ rejected campaign and its predecessor release, binds a clean published
 descendant plus hardware and remote tips, embeds a self-digested plan, and
 atomically moves the entire campaign without overwrite to a fixed retained
 evidence root. It has no delete/reset path and rejects any existing raw or
-projected evidence. A separate fixed recovery projector
+projected evidence. If a compatible correction follows plan publication but
+precedes the move, the original plan remains byte-identical and a canonical
+supersession record extends its single-successor digest/commit chain. Retention
+and read-only verification validate the entire chain and current published tip;
+no record is rewritten. A separate fixed recovery projector
 now revalidates the complete raw checkpoint/fault/reboot/recovery/boundary
 chain, snapshots canonical bytes against same-user races, and publishes the
 suite-assigned observations without accepting authority, kind, outcome, or

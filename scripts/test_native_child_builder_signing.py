@@ -58,6 +58,16 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
         self.assertIsNone(literal.search(self.touchid))
         self.assertIsNone(literal.search(self.components))
 
+    def test_touchid_release_inventory_covers_every_swift_source(self):
+        source_root = REPO / "macos/TouchIDAuthorization"
+        for path in sorted((source_root / "Sources").rglob("*.swift")):
+            relative = path.relative_to(source_root).as_posix()
+            self.assertEqual(
+                self.touchid.count(f'"{relative}"'),
+                3,
+                f"release inventory must record, snapshot, and attest {relative}",
+            )
+
     def test_touchid_release_selects_and_proves_exact_leaf(self):
         required = (
             f'fixed_team="{FIXED_TEAM}"',
@@ -457,6 +467,7 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
                 "Artwork/AppIcon.icon/Assets/DiagonalAccent.svg",
                 "SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj",
                 "Sources/AuthorizationCore/AuthorizationRequest.swift",
+                "Sources/AuthorizationCore/CanonicalJSON.swift",
                 "Sources/AuthorizationCore/ExecutionApprovalCrypto.swift",
                 "Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift",
                 "Sources/SecureSandboxAuthorizationUI/main.swift",

@@ -118,7 +118,11 @@ ASCII canonical encoder shared by request validation, parameter binding, and
 execution-approval signing. Physical eligibility now requires a signed and
 notarized release containing that repair, a successful cancellation test, and
 only then a fresh exact-plan VM-create authorization; all failed request nonces
-are spent and will not be replayed.
+are spent and will not be replayed. The first release build failed closed
+before signing because its intentionally closed source inventory had not added
+the new encoder file. The inventory now records, snapshots, and attests every
+Swift source, with a regression requiring each source to occur in all three
+closed lists before another release can be built.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

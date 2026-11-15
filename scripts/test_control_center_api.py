@@ -961,8 +961,19 @@ class CatalogTests(unittest.TestCase):
 
                 def select(self, _timeout=None):
                     deadline = time.monotonic() + 2
-                    while not pid_file.exists() and time.monotonic() < deadline:
+                    published = False
+                    while time.monotonic() < deadline:
+                        try:
+                            published = pid_file.read_text(
+                                encoding="ascii"
+                            ).strip().isdigit()
+                        except FileNotFoundError:
+                            published = False
+                        if published:
+                            break
                         time.sleep(0.01)
+                    if not published:
+                        raise AssertionError("broker pid was not published")
                     raise KeyboardInterrupt
 
                 def close(self):

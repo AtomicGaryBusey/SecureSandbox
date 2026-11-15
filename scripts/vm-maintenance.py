@@ -597,7 +597,7 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
     trusted_root_executable(PRLCTL)
     trusted_root_executable(NC)
     root = trusted_network_root(network_path)
-    _subnet, start, end, excluded = shared_network_scope(root)
+    subnet, start, end, excluded = shared_network_scope(root)
     values = json.loads(run([
         str(PRLCTL), "list", "-a", "-i", "-j", NAMES[0],
     ], capture=True))
@@ -673,11 +673,21 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
                                 else "ipv6")
                    for declared, address in zip(declared_types, addresses))):
         raise MaintenanceError("gateway_proxy_address_invalid")
-    ipv4 = [address for address in addresses if isinstance(address, ipaddress.IPv4Address)]
-    if (len(ipv4) != 1 or ipv4[0] in excluded
-            or not int(start) <= int(ipv4[0]) <= int(end)):
+    # Parallels reports addresses from every enabled guest NIC in this one
+    # inventory.  The Gateway legitimately has a static address on the
+    # isolated control plane in addition to its dynamic Shared-network
+    # address.  Transport discovery is authoritative only for the latter:
+    # require exactly one IPv4 inside the independently validated Shared
+    # subnet and then apply the DHCP/exclusion bounds to that address.
+    # Duplicate/type validation above still covers the complete inventory.
+    shared_ipv4 = [
+        address for address in addresses
+        if isinstance(address, ipaddress.IPv4Address) and address in subnet
+    ]
+    if (len(shared_ipv4) != 1 or shared_ipv4[0] in excluded
+            or not int(start) <= int(shared_ipv4[0]) <= int(end)):
         raise MaintenanceError("gateway_proxy_address_invalid")
-    return str(ipv4[0])
+    return str(shared_ipv4[0])
 
 
 def exec_gateway_proxy(port: int) -> None:

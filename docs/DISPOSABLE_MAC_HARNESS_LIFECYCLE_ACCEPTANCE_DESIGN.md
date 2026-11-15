@@ -351,7 +351,12 @@ dynamic transport fact, not a portable release constant. The signed Host SSH
 configuration must therefore discover that address without treating discovery
 as identity: the installed immutable resolver accepts only the exact running
 Gateway bundle, canonical NIC/MAC topology, no enabled installer media, and one
-IPv4 address inside a stable, root-owned Shared DHCP configuration. OpenSSH
+IPv4 address inside a stable, root-owned Shared DHCP configuration. Parallels
+reports addresses from all enabled guest NICs in one inventory after Tools has
+fully initialized, so the resolver filters against that validated Shared subnet
+before requiring exactly one in-scope address; the legitimate static private-
+plane address is never a Shared transport candidate. Complete address duplicate
+and declared-type checks remain fail closed. OpenSSH
 continues to authenticate a stable Gateway HostKeyAlias through the strict
 known-hosts file. A DHCP address alone can never nominate a trusted guest.
 

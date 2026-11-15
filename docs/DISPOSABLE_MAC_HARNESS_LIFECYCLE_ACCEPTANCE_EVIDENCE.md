@@ -285,6 +285,17 @@ configuration, and one in-scope DHCP IPv4 address before invoking the fixed
 system netcat binary. Stable HostKeyAlias values preserve strict host-key
 authentication across DHCP changes.
 
+The first three-guest boot on that release then supplied a stronger Parallels
+Tools readback than the earlier Gateway-only probe: one Shared IPv4 and IPv6
+address plus the legitimate static control-plane IPv4 and link-local IPv6
+address. The immutable resolver rejected rather than guessing because its
+original cardinality check counted every IPv4 across both canonical NICs. The
+repair preserves the complete inventory's duplicate/type checks, filters IPv4
+candidates through the already descriptor-validated Shared subnet, and requires
+exactly one address within its DHCP bounds. Source regression coverage uses the
+Neo's exact two-NIC address shape. No Research host key was accepted and Target
+remained stopped when this boundary was discovered.
+
 Research and Target subsequently completed their old-release-bound unattended
 installers and powered themselves off. Their retained mode-`0600` install and
 media-removal logs are independently digestible evidence: Research install

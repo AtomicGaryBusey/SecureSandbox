@@ -255,6 +255,27 @@ class VmMaintenanceTests(unittest.TestCase):
                 str(VM.PRLCTL), "list", "-a", "-i", "-j", VM.NAMES[0],
             ], capture=True)
 
+    def test_gateway_proxy_ignores_exact_private_plane_addresses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "SecureSandbox"
+            home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
+            home.mkdir(parents=True)
+            value = self.gateway_value(home)
+            value["Network"]["ipAddresses"].extend([
+                {"type": "ipv4", "ip": "172.30.10.1"},
+                {"type": "ipv6", "ip": "fe80::21c:42ff:fe92:ea7f"},
+            ])
+            with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
+                  mock.patch.object(VM, "trusted_repo", return_value=repo),
+                  mock.patch.object(VM, "trusted_root_executable"),
+                  mock.patch.object(VM, "trusted_network_root",
+                                    return_value=self.shared_network_xml()),
+                  mock.patch.object(VM, "run", return_value=json.dumps([value]))):
+                self.assertEqual(
+                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo),
+                    "10.211.55.5",
+                )
+
     def test_gateway_proxy_rejects_vm_identity_topology_media_and_address_drift(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary) / "SecureSandbox"

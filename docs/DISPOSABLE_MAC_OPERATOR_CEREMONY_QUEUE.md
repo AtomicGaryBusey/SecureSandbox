@@ -126,6 +126,44 @@ controller and the exact Gateway, Research, and Target VM set. A wholly empty
 VM inventory is accepted only for the acceptance-driver bootstrap; it is not a
 campaign-ready state.
 
+### Retaining an empty rejected campaign for a driver repair
+
+The clean-machine preflight is intentionally unavailable after campaign
+initialization because the campaign directory is retained state. Do not delete,
+empty, rename manually, or conceal that directory to make the original gate
+pass. If and only if the first collector rejected before reserving a raw case
+directory and every observations/raw directory remains empty, use
+`scripts/harness-lifecycle-acceptance-retain-empty-campaign.py` from a clean
+published replacement checkout. Supply the exact old campaign UUID and source
+commit to its `retain` command and the literal acknowledgement printed by
+`--help`.
+
+The retention tool revalidates the canonical old campaign, current hardware,
+complete predecessor protected-driver release, clean replacement checkout,
+both authorized remote tips, and ancestry from old to replacement commit. It
+requires the exact empty directory inventory, writes a self-digested plan into
+that campaign, and atomically moves the entire directory without overwrite to
+`~/SecureSandbox-Acceptance-Handoff/retired-campaigns/<campaign-id>`. It fsyncs
+both parents and exposes retention-only authority. It has no deletion path and
+rejects any observation, raw case entry, unexpected file, ACL, link, mode,
+identity, machine, commit, ancestry, or destination collision.
+
+If the process or filesystem reports failure after the atomic move may have
+committed, do not rerun `retain`. Run its read-only `verify` command with the
+exact old campaign UUID/source and replacement source commits. Verification
+requires the live pathname absent, the retained directory's complete identity
+and bytes, the exact embedded plan, current machine, predecessor release,
+replacement ancestry, clean checkout, and both current remote tips. It returns
+the same canonical retention result and performs no recovery mutation.
+
+Only after independent readback proves the original pathname absent and the
+same campaign plus plan present at that fixed retained pathname may the normal
+pre-install gate be run for the replacement commit. Install the new protected
+release side by side; never alter the retained predecessor release. Then run a
+fresh post-install preflight and initialize a new exact-commit campaign. A
+campaign with any raw or projected evidence is not eligible for this repair
+path and requires an evidence-preserving continuation design instead.
+
 Do not place Developer ID private keys, Apple notarization credentials,
 1Password service credentials, or provider credentials on the disposable Mac.
 Copy one public native-Host candidate directory exported from the trusted

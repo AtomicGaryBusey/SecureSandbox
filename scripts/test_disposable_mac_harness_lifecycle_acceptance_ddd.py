@@ -43,6 +43,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.bootstrap_diagnostics = (
             ROOT / "scripts/run-host-bootstrap-with-diagnostics.sh"
         ).read_text()
+        cls.empty_campaign_retention = (
+            ROOT / "scripts/harness-lifecycle-acceptance-retain-empty-campaign.py"
+        ).read_text()
         cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
         cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
@@ -224,6 +227,30 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '/usr/bin/sudo -- /usr/bin/env -i \\\n'
             '     PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \\\n'
             '     /bin/bash -- \\\n',
+            self.operator_queue,
+        )
+
+    def test_rejected_empty_campaign_has_one_retention_only_repair_path(self):
+        for phrase in (
+            'ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"',
+            'reason": "preflight-failed-before-evidence"',
+            'validate_campaign(json.loads(raw), int(time.time()), allow_expired=True)',
+            'set(os.listdir(descriptor)) != expected',
+            'PREFLIGHT.source_checkout',
+            '"merge-base", "--is-ancestor"',
+            'SUPERVISOR.current_machine_identity',
+            'ACCEPTANCE_CLI.driver_readiness',
+            'RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH',
+            'def verify_retained(',
+            '"retention_source_still_present"',
+            'retained_campaign, retained_inventory = validate_empty_layout',
+            '"authority": "retention-only"',
+        ):
+            self.assertIn(phrase, self.empty_campaign_retention)
+        for forbidden in ("shutil.rmtree", "os.remove", "unlink(", "rmdir("):
+            self.assertNotIn(forbidden, self.empty_campaign_retention)
+        self.assertIn(
+            "Retaining an empty rejected campaign for a driver repair",
             self.operator_queue,
         )
 

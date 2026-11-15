@@ -20,7 +20,17 @@ every exact `git cat-file` read uses the repository already bound by preflight,
 not the installed driver root. The focused acceptance suite passes, including
 installed-layout and recovery-staging regressions. The rejected campaign
 remains retained; no raw case directory was claimed and it must not be retried
-with a driver that is not its exact source commit.
+with a driver that is not its exact source commit. The original clean-machine
+preflight correctly rejects while that initialized campaign occupies the live
+evidence pathname. A dedicated retention-only repair tool now accepts only
+this zero-observation, zero-raw-evidence condition; binds the old campaign,
+hardware, predecessor protected release, clean published descendant and both
+remote tips; writes its plan into the campaign; and atomically moves the whole
+directory without overwrite to the fixed retained-evidence root. It exposes no
+delete/reset path. A separate read-only verifier resolves post-rename process,
+fsync, or readback ambiguity from the exact retained campaign and plan without
+moving anything again. The clean-machine preflight becomes applicable only
+after the old campaign is durably retained under its UUID.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

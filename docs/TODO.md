@@ -959,9 +959,14 @@ in ignored local records, not in this file.
   exact-commit campaign is initialized, but its first collector rejected before
   reserving raw evidence because the installed driver treated its immutable
   release directory as a Git checkout. Publish and install the repair that
-  verifies the physical invoking repository root, retain the rejected campaign,
-  initialize a new exact-commit campaign, then resume Neo resource/boundary
-  qualification and ordered campaign execution. The deterministic
+  verifies the physical invoking repository root. The original preflight then
+  correctly rejected the initialized campaign state rather than silently
+  treating the machine as clean. Publish and run the retention-only repair that
+  accepts only the exact zero-observation/zero-raw campaign, embeds its bound
+  plan, and atomically moves the whole directory without overwrite to the fixed
+  retained-evidence root. Then install the replacement protected release,
+  initialize a new exact-commit campaign, and resume Neo resource/boundary
+  qualification and ordered execution. The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

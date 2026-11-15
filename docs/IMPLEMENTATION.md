@@ -162,7 +162,13 @@ invoking repository root, exact campaign HEAD, and a clean diff while retaining
 the separately root-owned manifest boundary. Recovery staging carries that same
 resolved checkout into every exact commit/blob read rather than falling back to
 the installed release root. No raw case evidence or acceptance verdict exists
-yet. A separate fixed recovery projector
+yet. Because initialized campaign state correctly blocks a second clean-machine
+preflight, a separate retention-only repair command validates an exact empty
+rejected campaign and its predecessor release, binds a clean published
+descendant plus hardware and remote tips, embeds a self-digested plan, and
+atomically moves the entire campaign without overwrite to a fixed retained
+evidence root. It has no delete/reset path and rejects any existing raw or
+projected evidence. A separate fixed recovery projector
 now revalidates the complete raw checkpoint/fault/reboot/recovery/boundary
 chain, snapshots canonical bytes against same-user races, and publishes the
 suite-assigned observations without accepting authority, kind, outcome, or

@@ -7,6 +7,7 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* AuthorizationRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AuthorizationRequest.swift */; };
+		A10000000000000000000006 /* CanonicalJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* CanonicalJSON.swift */; };
 		A10000000000000000000002 /* ExecutionApprovalCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ExecutionApprovalCrypto.swift */; };
 		A10000000000000000000003 /* SecureEnclaveKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SecureEnclaveKeyStore.swift */; };
 		A10000000000000000000004 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* main.swift */; };
@@ -15,6 +16,7 @@
 
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* AuthorizationRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/AuthorizationCore/AuthorizationRequest.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* CanonicalJSON.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/AuthorizationCore/CanonicalJSON.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ExecutionApprovalCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/AuthorizationCore/ExecutionApprovalCrypto.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* SecureEnclaveKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/SecureSandboxAuthorizationUI/main.swift; sourceTree = "<group>"; };
@@ -33,6 +35,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* AuthorizationRequest.swift */,
+				A20000000000000000000009 /* CanonicalJSON.swift */,
 				A20000000000000000000002 /* ExecutionApprovalCrypto.swift */,
 				A20000000000000000000003 /* SecureEnclaveKeyStore.swift */,
 				A20000000000000000000004 /* main.swift */,
@@ -82,7 +85,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A70000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000006, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */

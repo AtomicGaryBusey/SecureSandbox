@@ -60,6 +60,17 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
 
     def test_touchid_release_inventory_covers_every_swift_source(self):
         source_root = REPO / "macos/TouchIDAuthorization"
+        project = (
+            source_root
+            / "SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj"
+        ).read_text(encoding="utf-8")
+        sources_phase = re.search(
+            r"/\* Begin PBXSourcesBuildPhase section \*/(.*?)"
+            r"/\* End PBXSourcesBuildPhase section \*/",
+            project,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(sources_phase)
         for path in sorted((source_root / "Sources").rglob("*.swift")):
             relative = path.relative_to(source_root).as_posix()
             self.assertEqual(
@@ -67,6 +78,13 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
                 3,
                 f"release inventory must record, snapshot, and attest {relative}",
             )
+            self.assertIn(f"path = {relative};", project)
+            build_file = re.search(
+                rf"([A-F0-9]{{24}}) /\* {re.escape(path.name)} in Sources \*/",
+                project,
+            )
+            self.assertIsNotNone(build_file, f"missing build file for {relative}")
+            self.assertIn(build_file.group(1), sources_phase.group(1))
 
     def test_touchid_release_selects_and_proves_exact_leaf(self):
         required = (

@@ -168,8 +168,48 @@ The apparent Host-pair terminal concern was ruled out: both independent
 manager verification and the installed broker validate the canonical immutable
 terminal and its self-digest; the retained `host_pair_terminal_invalid` lines
 were emitted during the completed pair transition, before stable publication,
-and the KeepAlive broker is now running. A new signed/notarized Host release
-and fresh authorization request are required before VM creation resumes.
+and the KeepAlive broker is now running. The strict compatibility repair was
+published as `4ca4ab6`, passed a sealed zero-finding Codex Security diff scan,
+was signed and notarized, and was installed and independently verified on the
+Neo. Its cancellation-only ceremony passed. A following fresh real ceremony
+accepted Touch ID and created all three exact stopped VMs; independent readback
+verified their UUIDs, CPU, memory, disk, private-network attachments, shared
+adapter, and device hardening with no residual maintenance transaction.
+
+The first lifecycle start then correctly started only Gateway and stopped when
+the fresh guest did not become control-reachable. The Ubuntu installer reached
+its final privileged-control late command and failed there, leaving Gateway's
+partial disk and the stopped Research and Target shells intact. The console's
+Subiquity recovery input path stopped accepting Return and virtual-terminal
+events. Parallels was therefore shut down, all three VMs independently read
+back as stopped, and an APFS copy-on-write clone of the failed Gateway was made
+before further diagnosis. The clone's transferred Parallels extent matched its
+source byte length and SHA-256; conversion to a sparse raw image exposed a
+valid GPT and ext4 target without mutating the retained original.
+
+Offline inspection proved the complete control payload, `securectl` account,
+authorized key, sudoers policy, role, and SSH policy were installed. Booting
+only the copied image under a restricted local ARM64 QEMU overlay then produced
+a verified `control-self-check` through the installed forced-command channel.
+The failure was the install-time service-state probe: in Curtin's offline
+chroot, `systemctl is-active ssh.service` returns exit zero, emits no stdout,
+and writes `Running in chroot, ignoring command 'is-active'` to stderr. The
+installer discarded stderr and rejected the resulting `0:` state. The repair
+now accepts only an independent successful `systemd-detect-virt --chroot`
+determination as the offline case; a non-chroot retains the exact active reload
+and repeated active readback, inactive case, and fail-closed rejection of
+unknown detector or service states. Executable regressions cover chroot,
+inactive, active/reload, empty state outside chroot, detector failure, and
+post-reload regression. Focused privileged-control, seed, VM-maintenance, and
+acceptance-contract suites pass 119 tests.
+
+During serial-console diagnosis, the existing Gateway password was
+unintentionally echoed into a local diagnostic transcript. It was immediately
+treated as compromised and replaced using 1Password's in-vault password
+generator without exposing the replacement. The failed disk remains retained
+evidence only and must not be promoted or reused; the next signed seed must be
+built from the rotated credential before the exact three-VM set is
+reprovisioned through its protected maintenance path.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

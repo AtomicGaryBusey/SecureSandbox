@@ -603,6 +603,20 @@ in ignored local records, not in this file.
   `memory size=<MiB>Mb` rather than the older `memory <MiB>Mb` form. Publish
   and install the exact strict-parser compatibility repair, then issue a fresh
   cancellation-only request before the next real VM-create request.
+  The strict-parser repair is now published and installed; its cancellation
+  and real VM-create ceremonies passed, and all three exact stopped VMs read
+  back correctly. Gateway's first Ubuntu install instead failed in the final
+  privileged-control late command. A byte-verified clone and restricted local
+  QEMU overlay proved the installed control-plane self-check passes and
+  localized the defect to Curtin's chroot behavior: `systemctl is-active`
+  returns zero with empty stdout when it ignores the command. The staged repair
+  accepts only an independently verified `systemd-detect-virt --chroot` state,
+  preserves the live active/reload/readback path, and rejects every unknown
+  detector or service state. Build, review, sign, notarize, publish, and install
+  that repair, then use protected VM reprovisioning for the retained partial
+  Gateway and pristine Research/Target shells. The Gateway password exposed by
+  serial diagnostic echo was immediately rotated in the restricted Agents
+  vault; no seed containing the retired credential may be promoted.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

@@ -132,6 +132,21 @@ without mutation. The recovery allowlist now admits its exact output hash only
 after the successor manager validates the complete candidate and reconstructs
 the same authorized target plan; arbitrary manifest failures remain closed.
 
+The first fresh request for that recovery repair launched the signed
+authorization process on the Neo, but macOS 27.2 retained zero windows. Unified
+logging and process readback proved the process was foreground-registered while
+AppKit reported `No windows open yet`; terminating the UI produced a terminal
+`touchid_ui_result_missing` failure, left the installed pair unchanged, and
+spent that request without recovery or mutation. LaunchServices can complete
+application launch while the request-bound broker challenge is still being
+parsed, before the delegate observes `applicationDidFinishLaunching`. The UI
+now idempotently schedules its one presentation before entering
+`NSApplication.run()`, retains the delegate callback as a second trigger, and
+reasserts the same window after foreground registration with content-free
+lifecycle telemetry. A local signed visibility probe proves one on-screen
+window; exact Developer ID/notarized validation on the Neo remains required
+before another real authorization request.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

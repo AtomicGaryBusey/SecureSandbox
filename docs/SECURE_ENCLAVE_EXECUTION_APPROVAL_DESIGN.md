@@ -442,12 +442,16 @@ The initially activated generation was bound to a signed app bundle whose
 executable was spawned directly. macOS 27 could start that process without
 granting it a foreground application/window, so authorization timed out even
 though the process existed. The corrected UI uses a real `NSApplication`
-delegate lifecycle, presents only from `applicationDidFinishLaunching`, owns
-and explicitly fronts its modal window, and writes an O_EXCL 0600 canonical
-result sidecar binding the request UUID, request digest, and exit status. The
-request wrapper registers and opens the exact protected bundle through
-LaunchServices and treats missing, malformed, substituted, or late results as
-failure.
+delegate lifecycle, idempotently schedules presentation both before entering
+the application run loop and from `applicationDidFinishLaunching`, owns and
+explicitly fronts its modal window, and emits content-free lifecycle telemetry.
+The pre-run schedule closes the observed macOS 27.2 race in which
+LaunchServices completed application launch while the request-bound broker
+challenge was still being parsed and before the delegate could observe the
+notification. The UI writes an O_EXCL 0600 canonical result sidecar binding the
+request UUID, request digest, and exit status. The request wrapper registers
+and opens the exact protected bundle through LaunchServices and treats missing,
+malformed, substituted, or late results as failure.
 
 The already-active predecessor cannot be silently rebound to that corrected
 Host release: its Host release identity is part of both Host and Research

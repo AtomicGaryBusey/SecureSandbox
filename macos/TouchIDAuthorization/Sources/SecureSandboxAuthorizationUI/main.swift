@@ -5,6 +5,7 @@ import AuthorizationCore
 import Darwin
 import Foundation
 import LocalAuthentication
+import OSLog
 import Security
 
 private let passwordFallbackExit: Int32 = 10
@@ -12,6 +13,10 @@ private let cancelledExit: Int32 = 20
 private let rejectedExit: Int32 = 21
 private let expiredExit: Int32 = 22
 private let responseLimit = 16 * 1024 * 1024
+private let lifecycleLogger = Logger(
+    subsystem: "org.zebeth.SecureSandbox.AuthorizationUI",
+    category: "lifecycle"
+)
 
 private struct SubmissionResult {
     let status: Int32
@@ -145,6 +150,7 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
     private(set) var response: NSApplication.ModalResponse?
     private(set) var expired = false
     private var presentedAlert: NSAlert?
+    private var presentationScheduled = false
 
     init(request: AuthorizationRequest, authority: String) {
         self.request = request
@@ -158,28 +164,73 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
         alert.window.orderOut(nil)
     }
 
+    @objc private func reassertWindowFront(_ timer: Timer) {
+        guard response == nil else { return }
+        frontPresentedWindow(origin: "post-launch-reassertion")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Present only after AppKit has completed the real application launch.
-        // Directly calling finishLaunching() followed by runModal() can leave a
-        // freshly rebooted Mac with a running-but-NotVisible process.
+        lifecycleLogger.info("application_did_finish_launching")
+        schedulePresentation(origin: "application-did-finish-launching")
+        frontPresentedWindow(origin: "application-did-finish-launching")
+    }
+
+    private func frontPresentedWindow(origin: String) {
+        guard let window = presentedAlert?.window else {
+            lifecycleLogger.info("window_front_deferred origin=\(origin, privacy: .public)")
+            return
+        }
+        let application = NSApplication.shared
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        application.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(
+            options: [.activateAllWindows, .activateIgnoringOtherApps]
+        )
+        application.arrangeInFront(nil)
+        lifecycleLogger.info("window_front_asserted origin=\(origin, privacy: .public) visible=\(window.isVisible, privacy: .public)")
+    }
+
+    func schedulePresentation(origin: String) {
+        guard !presentationScheduled else {
+            lifecycleLogger.info("presentation_already_scheduled")
+            return
+        }
+        presentationScheduled = true
+        lifecycleLogger.info("presentation_scheduled origin=\(origin, privacy: .public)")
+        // Queue presentation onto the application run loop. LaunchServices can
+        // finish launching this command-line AppKit entry point before its
+        // delegate is installed; the explicit pre-run schedule below closes
+        // that missed-notification race. The delegate callback remains a
+        // second, idempotent trigger for the ordinary lifecycle.
         DispatchQueue.main.async { [self] in
             let application = NSApplication.shared
+            guard response == nil, presentedAlert == nil else {
+                lifecycleLogger.error("presentation_state_conflict")
+                application.stop(nil)
+                return
+            }
+            lifecycleLogger.info("presentation_started")
             let alert = approvalAlert(for: request, authority: authority)
+            presentedAlert = alert
             let window = alert.window
             window.collectionBehavior.insert(.moveToActiveSpace)
             window.level = .modalPanel
             window.center()
-            application.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-            NSRunningApplication.current.activate(
-                options: [.activateAllWindows, .activateIgnoringOtherApps]
+            frontPresentedWindow(origin: "initial-presentation")
+            // A LaunchServices-started application can accept its first
+            // activation request before AppKit has completed foreground
+            // registration. Reassert once from the modal run loop; this moves
+            // the same window and never creates a second ceremony.
+            let foregroundTimer = Timer(
+                timeInterval: 0.25, target: self,
+                selector: #selector(reassertWindowFront(_:)),
+                userInfo: nil, repeats: false
             )
-            application.arrangeInFront(nil)
+            RunLoop.main.add(foregroundTimer, forMode: .modalPanel)
             let remaining = max(
                 0, TimeInterval(request.expiresAt) - Date().timeIntervalSince1970
             )
-            presentedAlert = alert
             let expiryTimer = Timer(
                 timeInterval: remaining, target: self,
                 selector: #selector(expireAuthorization(_:)),
@@ -187,6 +238,7 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
             )
             RunLoop.main.add(expiryTimer, forMode: .modalPanel)
             response = alert.runModal()
+            foregroundTimer.invalidate()
             expiryTimer.invalidate()
             presentedAlert = nil
             alert.window.orderOut(nil)
@@ -214,7 +266,14 @@ private func approvalChoice(for request: AuthorizationRequest, authority: String
     }
     let delegate = AuthorizationApplicationDelegate(request: request, authority: authority)
     application.delegate = delegate
+    // Do not rely solely on applicationDidFinishLaunching: LaunchServices may
+    // have emitted it while the request-bound broker challenge was still being
+    // parsed. This only schedules work; application.run() still owns the real
+    // AppKit lifecycle and drains the presentation after launch completion.
+    delegate.schedulePresentation(origin: "pre-run-fallback")
+    lifecycleLogger.info("application_run_entering")
     application.run()
+    lifecycleLogger.info("application_run_returned")
     application.delegate = nil
     guard let response = delegate.response else {
         fail("authorization_window_not_presented")

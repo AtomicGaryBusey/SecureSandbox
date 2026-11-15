@@ -112,7 +112,7 @@ PAYLOAD_SOURCES = {
     "seed_gateway": Path("seeds/gateway-cidata.iso"),
     "seed_research": Path("seeds/research-cidata.iso"),
     "seed_target": Path("seeds/target-cidata.iso"),
-    "ssh_config": Path("config/ssh_config"),
+    "ssh_config": Path("config/ssh_config.example"),
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
 }
 UNTRACKED_PAYLOAD_NAMES = {
@@ -121,7 +121,7 @@ UNTRACKED_PAYLOAD_NAMES = {
     "native_credential_helper_bundle", "native_host_products_container",
     "native_host_products_manifest", "native_host_products_notarization",
     "native_host_products_notarization_signature", "seed_gateway",
-    "seed_research", "seed_target", "ssh_config",
+    "seed_research", "seed_target",
 }
 NATIVE_HOST_GENERATION_PAYLOAD_NAMES = {
     "authorization_ui_bundle", "authorization_ui_sources",
@@ -1687,11 +1687,7 @@ def native_host_release_preimage_archive(
     private_seed_identities: dict[str, tuple[int, ...]] = {}
     private_seed_sources: dict[str, bytes] = {}
     if _validate_private_seeds or _seed_validator is not None:
-        private_seed_relatives = (
-            Path("runs/control_key.pub"),
-            *(Path(f"config/netplan-{role}.yaml")
-              for role in ("gateway", "research", "target")),
-        )
+        private_seed_relatives = (Path("runs/control_key.pub"),)
         private_seed_identities = {
             relative.as_posix(): mutable_source_input_identity(repo, relative)
             for relative in private_seed_relatives

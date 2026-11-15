@@ -2223,7 +2223,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         return
     if operation in {"vm-create", "vm-reprovision"}:
         if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
-                               "network_config", "network_config_sha256", "layout_profile", "layout",
+                               "network_config", "network_config_sha256", "network_macs",
+                               "network_macs_sha256", "layout_profile", "layout",
                                "host_memory_bytes"}:
             raise AuthorizationError("operation_parameters_invalid")
         repo = Path(parameters["repo"])
@@ -2271,6 +2272,22 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 raise AuthorizationError("vm_network_config_invalid")
         if networks["control-net"]["uuid"] == networks["lab-net"]["uuid"]:
             raise AuthorizationError("vm_network_config_invalid")
+        expected_macs = {
+            "SecureSandbox-Gateway": {
+                "net0": "001C42BC794F", "net1": "001C4292EA7F",
+            },
+            "SecureSandbox-Research": {
+                "net1": "001C429945C7", "net2": "001C420B2402",
+            },
+            "SecureSandbox-Target": {"net1": "001C4249D2AA"},
+        }
+        macs = parameters["network_macs"]
+        if (macs != expected_macs
+                or not isinstance(parameters["network_macs_sha256"], str)
+                or SHA256.fullmatch(parameters["network_macs_sha256"]) is None
+                or hashlib.sha256(canonical(macs)).hexdigest()
+                    != parameters["network_macs_sha256"]):
+            raise AuthorizationError("vm_network_identity_invalid")
         if parameters["installer_sha256"] != AUTOINSTALL_INSTALLER_SHA256:
             raise AuthorizationError("installer_expected_sha256_invalid")
         seeds = parameters["seed_sha256"]
@@ -3501,6 +3518,7 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--expected-plan-sha256", parameters["plan_sha256"],
             "--expected-prlctl-sha256", parameters["prlctl_sha256"],
             "--expected-network-config-sha256", parameters["network_config_sha256"],
+            "--expected-network-macs-sha256", parameters["network_macs_sha256"],
             "--expected-installer-sha256", parameters["installer_sha256"],
             "--expected-seed-gateway-sha256", parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256", parameters["seed_sha256"]["research"],
@@ -10517,6 +10535,17 @@ def operation_details(value: dict[str, Any]) -> list[str]:
                     for name in ("control-net", "lab-net")
                 ) + "; DHCPv4/DHCPv6/NAT/Mac attachment/host IPv6 assignment disabled",
                 f"Network configuration SHA-256: {parameters['network_config_sha256']}",
+                "VM network identities: " + "; ".join(
+                    f"{name}=" + ",".join(
+                        f"{device}:{parameters['network_macs'][name][device]}"
+                        for device in sorted(parameters["network_macs"][name])
+                    )
+                    for name in (
+                        "SecureSandbox-Gateway", "SecureSandbox-Research",
+                        "SecureSandbox-Target",
+                    )
+                ),
+                f"VM network identities SHA-256: {parameters['network_macs_sha256']}",
                 f"Installer SHA-256: {parameters['installer_sha256']}",
                 "Seed SHA-256 values: " + ", ".join(
                     f"{role}={parameters['seed_sha256'][role]}" for role in ("gateway", "research", "target")

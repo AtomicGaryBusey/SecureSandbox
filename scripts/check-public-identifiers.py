@@ -19,6 +19,14 @@ MAC_HOME = re.compile(r"/" + r"Users/[^/\s]+/")
 TILDE_HOME = re.compile(r"(?:^|[\s=:'\"])(?:~" + r"/SecureSandbox)(?:/|\b)")
 AGE_RECIPIENT = re.compile(r"\bage1[023456789acdefghjklmnpqrstuvwxyz]{50,}\b")
 MAC_ADDRESS = re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b")
+ALLOWED_MAC_ADDRESSES = {
+    # Public protocol identities for the one admitted SecureSandbox VM set.
+    "00:1c:42:0b:24:02",
+    "00:1c:42:49:d2:aa",
+    "00:1c:42:92:ea:7f",
+    "00:1c:42:99:45:c7",
+    "00:1c:42:bc:79:4f",
+}
 UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b")
 LONG_HEX_ID = re.compile(r"(?i)\b(?:[0-9a-f]{40}|[0-9a-f]{64})\b")
 DEPLOYMENT_GENERATION = re.compile(r"\b[a-z][a-z0-9-]+-20\d{6}(?:T\d{6}Z(?:-\d+)?)?\b")
@@ -153,7 +161,9 @@ def inspect_identifier_value(label: str, value: str,
             findings.append(f"{label}: concrete operational UUID")
     if LONG_HEX_ID.search(value): findings.append(f"{label}: concrete revision or digest")
     if DEPLOYMENT_GENERATION.search(value): findings.append(f"{label}: concrete deployment generation")
-    if MAC_ADDRESS.search(value): findings.append(f"{label}: literal MAC address")
+    if any(match.group(0).lower() not in ALLOWED_MAC_ADDRESSES
+           for match in MAC_ADDRESS.finditer(value)):
+        findings.append(f"{label}: literal MAC address")
     for match in EMAIL.finditer(value):
         if match.group(1).lower() not in ALLOWED_EMAIL_DOMAINS:
             findings.append(f"{label}: non-placeholder email address")
@@ -248,7 +258,9 @@ def inspect_text(path: str, text: str, deny_patterns: list[str]) -> list[str]:
         if DEPLOYMENT_GENERATION.search(line) and markdown:
             findings.append(f"{prefix}: concrete deployment generation in documentation")
         for match in MAC_ADDRESS.finditer(line):
-            if not (example and match.group(0).lower().startswith("02:00:00:")):
+            normalized = match.group(0).lower()
+            if (normalized not in ALLOWED_MAC_ADDRESSES
+                    and not (example and normalized.startswith("02:00:00:"))):
                 findings.append(f"{prefix}: literal MAC address")
         for match in EMAIL.finditer(line):
             if match.group(1).lower() not in ALLOWED_EMAIL_DOMAINS:

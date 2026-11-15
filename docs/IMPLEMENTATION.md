@@ -630,10 +630,13 @@ SecureSandbox uses three isolated Linux guests on an operator-controlled host:
   network, a read-only root filesystem, a fixed unprivileged identity, and hard
   CPU, memory, process, time, and output limits.
 
-The internal subnet layout in the design is a protocol convention, not a record
-of a public installation. Host-facing addresses, interface MACs, SSH routes,
-archive recipients, retention names, and secret-store selections live only in
-ignored local configuration copied from `config/*.example.*`.
+The internal subnet layout, canonical per-device MAC identities, and Host SSH
+aliases are tracked protocol and release authority.  The portable SSH payload
+uses OpenSSH `%d` paths beneath the admitted operator's home and the fixed
+Parallels Shared-network Gateway address.  Physical acceptance must still prove
+that address on each clean Mac.  Private keys, `known_hosts`, archive
+recipients, retention names, provider credential references, model profiles,
+and persona selections remain ignored machine-local state.
 
 ## Host control plane
 
@@ -787,15 +790,17 @@ bounded, explicitly untrusted memory proposal for independent review. Candidate
 security findings are likewise append-only hypotheses; operator adjudication is
 a separate root-owned authority.
 
-## Local configuration
+## Canonical and local configuration
 
-Copy and edit the relevant examples without adding the live copies to Git:
+The first four files below are tracked canonical release inputs and must not be
+copied into ignored overrides.  Copy and edit only the remaining examples,
+without adding their live copies to Git:
 
 ```text
-config/ssh_config.example                     -> config/ssh_config
-config/netplan-gateway.example.yaml           -> config/netplan-gateway.yaml
-config/netplan-research.example.yaml          -> config/netplan-research.yaml
-config/netplan-target.example.yaml            -> config/netplan-target.yaml
+config/ssh_config.example                     -> signed portable Host payload (`%d/SecureSandbox/...`)
+config/netplan-gateway.example.yaml           -> signed Gateway seed netplan
+config/netplan-research.example.yaml          -> signed Research seed netplan
+config/netplan-target.example.yaml            -> signed Target seed netplan
 config/conversation-age-recipient.example.txt -> config/conversation-age-recipient.txt
 config/snapshot-retention.example.json        -> config/snapshot-retention.json
 config/provider-credential-reference.example.txt -> config/provider-credential-reference.txt

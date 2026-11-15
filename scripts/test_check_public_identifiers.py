@@ -185,6 +185,26 @@ class PublicIdentifierCheckerTests(unittest.TestCase):
         text = "OPENAI_API_KEY=REPLACE_ME\nAccountKey=REPLACE_ME\n"
         self.assertEqual(checker.inspect_text("config.example", text, []), [])
 
+    def test_only_canonical_public_vm_macs_are_publishable(self):
+        for value in sorted(checker.ALLOWED_MAC_ADDRESSES):
+            self.assertEqual(
+                checker.inspect_text("config/netplan.example.yaml", value + "\n", []),
+                [],
+            )
+            self.assertEqual(
+                checker.inspect_identifier_value("value", value, []),
+                [],
+            )
+        private_value = ":".join(("00", "1c", "42", "de", "ad", "be"))
+        self.assertTrue(any(
+            "literal MAC address" in item
+            for item in checker.inspect_text("config/netplan.example.yaml", private_value + "\n", [])
+        ))
+        self.assertTrue(any(
+            "literal MAC address" in item
+            for item in checker.inspect_identifier_value("value", private_value, [])
+        ))
+
     def test_unsupported_blob_classes_fail_closed(self):
         self.assertTrue(checker.inspect_raw("binary.dat", b"a\0b", []))
         self.assertTrue(checker.inspect_raw("legacy.txt", b"\xff", []))

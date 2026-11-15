@@ -7813,6 +7813,18 @@ raise SystemExit(child.wait())
 
 
 class NativeHostSourceProvenanceTests(unittest.TestCase):
+    def test_host_ssh_config_is_tracked_and_operator_portable(self):
+        self.assertEqual(
+            MANAGER.PAYLOAD_SOURCES["ssh_config"],
+            Path("config/ssh_config.example"),
+        )
+        self.assertNotIn("ssh_config", MANAGER.UNTRACKED_PAYLOAD_NAMES)
+        text = (REPO / MANAGER.PAYLOAD_SOURCES["ssh_config"]).read_text(encoding="utf-8")
+        self.assertIn("IdentityFile %d/SecureSandbox/runs/control_key.pub", text)
+        self.assertIn("UserKnownHostsFile %d/SecureSandbox/runs/known_hosts", text)
+        self.assertNotIn("REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH", text)
+        self.assertNotIn("/" + "Users/aharmon/", text)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.repo = Path(self.temporary.name) / "repo"

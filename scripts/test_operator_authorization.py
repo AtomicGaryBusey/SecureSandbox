@@ -2898,6 +2898,15 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "prlctl_sha256": "b" * 64,
             "network_config": networks,
             "network_config_sha256": hashlib.sha256(AUTH.canonical(networks)).hexdigest(),
+            "network_macs": {
+                "SecureSandbox-Gateway": {
+                    "net0": "001C42BC794F", "net1": "001C4292EA7F",
+                },
+                "SecureSandbox-Research": {
+                    "net1": "001C429945C7", "net2": "001C420B2402",
+                },
+                "SecureSandbox-Target": {"net1": "001C4249D2AA"},
+            },
             "installer_sha256": AUTH.AUTOINSTALL_INSTALLER_SHA256,
             "seed_sha256": {"gateway": "c" * 64, "research": "d" * 64, "target": "e" * 64},
             "layout_profile": "neo-8gb",
@@ -2906,6 +2915,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
                        "target": {"cpus": 1, "memory_mib": 1536, "disk_mib": 40960}},
             "host_memory_bytes": 8 * 1024**3,
         }
+        parameters["network_macs_sha256"] = hashlib.sha256(
+            AUTH.canonical(parameters["network_macs"])
+        ).hexdigest()
         AUTH.validate_parameters("vm-reprovision", parameters, self.home)
         with self.assertRaisesRegex(AUTH.AuthorizationError, "vm_network_config_invalid"):
             AUTH.validate_parameters(
@@ -2931,6 +2943,11 @@ class OperatorAuthorizationTests(unittest.TestCase):
             with self.assertRaisesRegex(AUTH.AuthorizationError, "vm_network_config_invalid"):
                 AUTH.validate_parameters("vm-reprovision", changed_parameters, self.home)
         for changed in (
+            {**parameters, "network_macs": {
+                **parameters["network_macs"],
+                "SecureSandbox-Target": {"net1": "001C4249D2AB"},
+            }},
+            {**parameters, "network_macs_sha256": "f" * 64},
             {**parameters, "layout_profile": "standard"},
             {**parameters, "layout": {**parameters["layout"], "research": {
                 **parameters["layout"]["research"], "memory_mib": 6144}}},
@@ -2944,6 +2961,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "--expected-plan-sha256": parameters["plan_sha256"],
             "--expected-prlctl-sha256": parameters["prlctl_sha256"],
             "--expected-network-config-sha256": parameters["network_config_sha256"],
+            "--expected-network-macs-sha256": parameters["network_macs_sha256"],
             "--expected-installer-sha256": parameters["installer_sha256"],
             "--expected-seed-gateway-sha256": parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256": parameters["seed_sha256"]["research"],
@@ -2959,6 +2977,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn(networks["control-net"]["uuid"], details)
         self.assertIn("disabled-range=172.30.20.1-172.30.20.30", details)
         self.assertIn(parameters["network_config_sha256"], details)
+        self.assertIn("net0:001C42BC794F", details)
+        self.assertIn(parameters["network_macs_sha256"], details)
 
     def test_legacy_preservation_request_is_strictly_typed_and_forwarded(self):
         uuid_value = "{00000000-0000-4000-8000-000000000001}"

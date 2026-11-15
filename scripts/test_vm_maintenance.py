@@ -270,6 +270,80 @@ class VmMaintenanceTests(unittest.TestCase):
                 )
         cleanup.assert_not_called()
 
+    def test_vm_network_macs_are_exact_and_device_bound(self):
+        with mock.patch.object(VM, "set_vm") as set_vm:
+            VM.set_vm_network_macs("gateway-id", VM.NAMES[0])
+            VM.set_vm_network_macs("research-id", VM.NAMES[1])
+            VM.set_vm_network_macs("target-id", VM.NAMES[2])
+        self.assertEqual(
+            set_vm.call_args_list,
+            [
+                mock.call("gateway-id", "--device-set", "net0", "--mac", "001C42BC794F"),
+                mock.call("gateway-id", "--device-set", "net1", "--mac", "001C4292EA7F"),
+                mock.call("research-id", "--device-set", "net1", "--mac", "001C429945C7"),
+                mock.call("research-id", "--device-set", "net2", "--mac", "001C420B2402"),
+                mock.call("target-id", "--device-set", "net1", "--mac", "001C4249D2AA"),
+            ],
+        )
+
+    def test_vm_network_macs_match_tracked_seed_netplans(self):
+        repo = SCRIPT.parent.parent
+        expected = {
+            "gateway": {
+                "net0": "001C42BC794F", "net1": "001C4292EA7F",
+            },
+            "research": {
+                "net1": "001C429945C7", "net2": "001C420B2402",
+            },
+            "target": {"net1": "001C4249D2AA"},
+        }
+        for role, name in zip(VM.ROLES, VM.NAMES):
+            self.assertEqual(VM.NETWORK_MACS[name], expected[role])
+            netplan = (
+                repo / f"config/netplan-{role}.example.yaml"
+            ).read_text(encoding="utf-8")
+            for mac in expected[role].values():
+                colon_mac = ":".join(
+                    mac[index:index + 2] for index in range(0, len(mac), 2)
+                ).lower()
+                self.assertIn(f"macaddress: {colon_mac}", netplan)
+
+    def test_post_create_readback_rejects_seed_mac_mismatch(self):
+        identity = {
+            "name": VM.NAMES[0],
+            "uuid": "{11111111-1111-4111-8111-111111111111}",
+            "expected_home": "/repo/vms/SecureSandbox-Gateway.pvm",
+            "state": "stopped", "bundle_device": 1, "bundle_inode": 2,
+        }
+        hardware = {
+            "cdrom0": {"image": "/installer"},
+            "cdrom1": {"image": "/release/seed_gateway"},
+            "net0": {"enabled": True, "type": "shared", "mac": "001C42FFFFFF"},
+            "net1": {"enabled": True, "type": "host", "iface": "control-net",
+                     "mac": VM.NETWORK_MACS[VM.NAMES[0]]["net1"]},
+        }
+        value = {
+            "State": "stopped", "Hardware": hardware,
+            "USB and Bluetooth": {
+                "Automatic sharing cameras": "off",
+                "Automatic sharing bluetooth": "off",
+                "Automatic sharing smart cards": "off",
+                "Automatic sharing gamepads": "off",
+                "Support USB 3.0": "off",
+            },
+        }
+        with (mock.patch.object(VM, "vm_cpu_memory", return_value=(1, 1536)),
+              mock.patch.object(VM, "vm_disk_size", return_value=12288),
+              mock.patch.object(VM, "vm_identity", return_value=identity),
+              mock.patch.object(VM, "protected_seed_paths",
+                                return_value={"gateway": Path("/release/seed_gateway")}),
+              mock.patch.object(VM, "run", return_value=json.dumps([value]))):
+            with self.assertRaisesRegex(VM.MaintenanceError, "effective_configuration_invalid"):
+                VM.verify_created(
+                    Path("/repo"), Path("/installer"),
+                    {VM.NAMES[0]: identity}, VM.LAYOUTS["neo-8gb"],
+                )
+
     def test_privilege_drop_must_be_irreversible(self):
         account = mock.Mock(pw_name="operator", pw_gid=20, pw_dir="/Users/operator")
         with (mock.patch.object(VM.os, "geteuid", side_effect=[0, 501]),

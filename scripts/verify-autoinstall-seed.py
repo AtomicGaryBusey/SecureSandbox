@@ -26,7 +26,7 @@ PAYLOADS = {
     "privileged-control.sudoers": Path("config/privileged-control.sudoers"),
     "sshd-control.conf": Path("config/sshd-control.conf"),
 }
-NETPLANS = {role: Path(f"config/netplan-{role}.yaml") for role in ROLES}
+NETPLANS = {role: Path(f"config/netplan-{role}.example.yaml") for role in ROLES}
 EMBEDDED = re.compile(
     r"^    - /bin/sh -c \"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "
     r"/target/root/secure-sandbox-control-bootstrap/([A-Za-z0-9._-]+) && chmod ([0-7]{4}) "

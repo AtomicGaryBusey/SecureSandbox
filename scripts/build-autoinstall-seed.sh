@@ -84,7 +84,7 @@ for item in \
   "$workspace_dir/scripts/install-privileged-control.sh:install-privileged-control.sh:0755" \
   "$workspace_dir/config/privileged-control.sudoers:privileged-control.sudoers:0600" \
   "$workspace_dir/config/sshd-control.conf:sshd-control.conf:0600" \
-  "$workspace_dir/config/netplan-$role.yaml:netplan.yaml:0600"; do
+  "$workspace_dir/config/netplan-$role.example.yaml:netplan.yaml:0600"; do
   source="${item%%:*}"; remainder="${item#*:}"; name="${remainder%%:*}"; mode="${remainder##*:}"
   encoded="$(base64 < "$source" | tr -d '\n')"
   print "    - /bin/sh -c \"printf '%s' '$encoded' | base64 -d > /target/root/secure-sandbox-control-bootstrap/$name && chmod $mode /target/root/secure-sandbox-control-bootstrap/$name\"" >> "$work_dir/user-data"

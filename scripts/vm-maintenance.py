@@ -30,6 +30,19 @@ SCHEMA = "secure-sandbox-vm-maintenance-plan-v1"
 TRANSACTION_SCHEMA = "secure-sandbox-vm-reprovision-transaction-v1"
 NAMES = ("SecureSandbox-Gateway", "SecureSandbox-Research", "SecureSandbox-Target")
 ROLES = ("gateway", "research", "target")
+NETWORK_MACS = {
+    "SecureSandbox-Gateway": {
+        "net0": "001C42BC794F",
+        "net1": "001C4292EA7F",
+    },
+    "SecureSandbox-Research": {
+        "net1": "001C429945C7",
+        "net2": "001C420B2402",
+    },
+    "SecureSandbox-Target": {
+        "net1": "001C4249D2AA",
+    },
+}
 LAYOUTS = {
     "standard": {
         "gateway": {"cpus": 1, "memory_mib": 2048, "disk_mib": 12288},
@@ -655,7 +668,7 @@ def build_plan(repo_value: str, operation: str, uid: int,
         "repo": str(repo), "installer_path": str(installer),
         "installer_sha256": INSTALLER_SHA256, "prlctl_path": str(PRLCTL),
         "prlctl_sha256": prlctl_hash(), "seed_sha256": seeds, "vms": vms,
-        "network_config": networks,
+        "network_config": networks, "network_macs": NETWORK_MACS,
     }
     if transaction is not None:
         plan["recovery_transaction_sha256"] = hashlib.sha256(canonical(transaction)).hexdigest()
@@ -692,6 +705,15 @@ def drop_privileges(uid: int) -> None:
 
 def set_vm(identifier: str, *arguments: str) -> None:
     run([str(PRLCTL), "set", identifier, *arguments])
+
+
+def set_vm_network_macs(identifier: str, name: str) -> None:
+    try:
+        expected = NETWORK_MACS[name]
+    except KeyError as error:
+        raise MaintenanceError(f"vm_network_identity_invalid:{name}") from error
+    for device, mac in expected.items():
+        set_vm(identifier, "--device-set", device, "--mac", mac)
 
 
 def remove_present_devices(identifier: str, *device_names: str) -> None:
@@ -782,6 +804,7 @@ def create_all(repo: Path, installer: Path,
                              layout["gateway"]["disk_mib"], seeds["gateway"], installer, created, on_created)
         revalidate_networks()
         set_vm(gateway, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
+        set_vm_network_macs(gateway, NAMES[0])
         research = create_one(repo, NAMES[1], layout["research"]["cpus"], layout["research"]["memory_mib"],
                               layout["research"]["disk_mib"], seeds["research"], installer, created, on_created)
         revalidate_networks()
@@ -789,11 +812,13 @@ def create_all(repo: Path, installer: Path,
         revalidate_networks()
         set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(research, "--device-del", "net0")
+        set_vm_network_macs(research, NAMES[1])
         target = create_one(repo, NAMES[2], layout["target"]["cpus"], layout["target"]["memory_mib"],
                             layout["target"]["disk_mib"], seeds["target"], installer, created, on_created)
         revalidate_networks()
         set_vm(target, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(target, "--device-del", "net0")
+        set_vm_network_macs(target, NAMES[2])
         for identifier in (gateway, research, target):
             set_vm(identifier, "--auto-share-gamepad", "off")
         identities = {identity["name"]: identity for identity in created}
@@ -818,9 +843,17 @@ def create_all(repo: Path, installer: Path,
 def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, Any]],
                    layout: dict[str, dict[str, int]]) -> None:
     expected_networks = {
-        NAMES[0]: ["host:control-net", "shared:"],
-        NAMES[1]: ["host:control-net", "host:lab-net"],
-        NAMES[2]: ["host:lab-net"],
+        NAMES[0]: [
+            {"key": "net0", "type": "shared", "iface": "", "mac": NETWORK_MACS[NAMES[0]]["net0"]},
+            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[0]]["net1"]},
+        ],
+        NAMES[1]: [
+            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[1]]["net1"]},
+            {"key": "net2", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[1]]["net2"]},
+        ],
+        NAMES[2]: [
+            {"key": "net1", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[2]]["net1"]},
+        ],
     }
     for name, role in zip(NAMES, ROLES):
         identity = identities[name]
@@ -837,11 +870,16 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
             raise MaintenanceError(f"effective_configuration_invalid:{name}")
         value = values[0]
         hardware = value.get("Hardware", {})
-        networks = sorted(
-            f"{device.get('type', '')}:{device.get('iface') or ''}"
+        networks = sorted([
+            {
+                "key": key,
+                "type": device.get("type", ""),
+                "iface": device.get("iface") or "",
+                "mac": str(device.get("mac", "")).upper(),
+            }
             for key, device in hardware.items()
             if key.startswith("net") and isinstance(device, dict) and device.get("enabled", True)
-        )
+        ], key=lambda item: item["key"])
         sharing = value.get("USB and Bluetooth", {})
         expected_seed = str(protected_seed_paths()[role])
         if (value.get("State") != "stopped" or networks != expected_networks[name]
@@ -1045,6 +1083,7 @@ def main() -> int:
     parser.add_argument("--expected-plan-sha256")
     parser.add_argument("--expected-prlctl-sha256")
     parser.add_argument("--expected-network-config-sha256")
+    parser.add_argument("--expected-network-macs-sha256")
     parser.add_argument("--expected-installer-sha256")
     parser.add_argument("--expected-seed-gateway-sha256")
     parser.add_argument("--expected-seed-research-sha256")
@@ -1121,6 +1160,7 @@ def main() -> int:
         if (not args.expected_plan_sha256
                 or any(value is None for value in (
                     args.expected_prlctl_sha256, args.expected_network_config_sha256,
+                    args.expected_network_macs_sha256,
                     args.expected_installer_sha256,
                     args.expected_seed_gateway_sha256, args.expected_seed_research_sha256,
                     args.expected_seed_target_sha256,
@@ -1135,6 +1175,9 @@ def main() -> int:
         if (hashlib.sha256(canonical(plan_network_config)).hexdigest()
                 != args.expected_network_config_sha256):
             raise MaintenanceError("vm_network_config_changed")
+        if (hashlib.sha256(canonical(plan["network_macs"])).hexdigest()
+                != args.expected_network_macs_sha256):
+            raise MaintenanceError("vm_network_identity_changed")
         if hashlib.sha256(canonical(plan["layout"])).hexdigest() != args.expected_layout_sha256:
             raise MaintenanceError("vm_layout_changed")
         validate_plan_bindings(plan, args.expected_plan_sha256, expected_components)

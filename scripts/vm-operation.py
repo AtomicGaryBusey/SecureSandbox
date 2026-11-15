@@ -78,6 +78,11 @@ def main() -> int:
                 (json.dumps(plan["network_config"], separators=(",", ":"), sort_keys=True)
                  + "\n").encode()
             ).hexdigest(),
+            "network_macs": plan["network_macs"],
+            "network_macs_sha256": hashlib.sha256(
+                (json.dumps(plan["network_macs"], separators=(",", ":"), sort_keys=True)
+                 + "\n").encode()
+            ).hexdigest(),
             "installer_sha256": plan["installer_sha256"], "seed_sha256": plan["seed_sha256"],
             "layout_profile": plan["layout_profile"], "layout": plan["layout"],
             "host_memory_bytes": plan["host_memory_bytes"],

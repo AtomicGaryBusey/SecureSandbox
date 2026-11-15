@@ -12,6 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReprovisionScriptTests(unittest.TestCase):
+    def test_seed_builder_and_verifier_use_tracked_canonical_netplans(self):
+        builder = (ROOT / "scripts/build-autoinstall-seed.sh").read_text(encoding="utf-8")
+        verifier = (ROOT / "scripts/verify-autoinstall-seed.py").read_text(encoding="utf-8")
+        self.assertIn('config/netplan-$role.example.yaml:netplan.yaml:0600', builder)
+        self.assertIn('Path(f"config/netplan-{role}.example.yaml")', verifier)
+        self.assertNotIn('config/netplan-$role.yaml:netplan.yaml:0600', builder)
+        for role in ("gateway", "research", "target"):
+            canonical = (ROOT / f"config/netplan-{role}.example.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("02:00:00:", canonical)
+
     def test_conversation_archive_activation_installs_shared_azure_transport_first(self):
         text = (ROOT / "scripts/activate-conversation-archive.sh").read_text(encoding="utf-8")
         installer = text.index("/tmp/install-azure-shipper.sh")

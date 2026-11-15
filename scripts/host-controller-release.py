@@ -623,6 +623,7 @@ PRE_AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES = {
     "Info.plist",
     "SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj",
     "Sources/AuthorizationCore/AuthorizationRequest.swift",
+    "Sources/AuthorizationCore/CanonicalJSON.swift",
     "Sources/AuthorizationCore/ExecutionApprovalCrypto.swift",
     "Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift",
     "Sources/SecureSandboxAuthorizationUI/main.swift",

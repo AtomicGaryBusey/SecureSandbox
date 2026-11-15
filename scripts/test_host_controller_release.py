@@ -104,6 +104,24 @@ def inactive_launchd_snapshot(
 
 
 class NativeCredentialPackagingContractTests(unittest.TestCase):
+    def test_touchid_payload_verifier_covers_complete_shipping_source_tree(self):
+        root = REPO / "macos/TouchIDAuthorization"
+        expected = {
+            "Package.swift",
+            "AuthorizationUI.entitlements",
+            "Info.plist",
+            "SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj",
+            "Artwork/AppIcon.icon/icon.json",
+            "Artwork/AppIcon.icon/Assets/AuthorizationLock.svg",
+            "Artwork/AppIcon.icon/Assets/ControlStack.svg",
+            "Artwork/AppIcon.icon/Assets/DiagonalAccent.svg",
+        }
+        expected.update(
+            path.relative_to(root).as_posix()
+            for path in (root / "Sources").rglob("*.swift")
+        )
+        self.assertEqual(MANAGER.AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES, expected)
+
     def test_gpgv_runtime_dependency_closure_is_exact(self):
         libraries = {
             name: (name + "\n").encode("ascii")
@@ -7981,20 +7999,9 @@ class HostControllerReleaseTests(unittest.TestCase):
         }) + "\n", encoding="ascii")
         (self.repo / ".private/secure-enclave-ddd.json").chmod(0o600)
         touchid_sources = [
-            Path("macos/TouchIDAuthorization/Package.swift"),
-            Path("macos/TouchIDAuthorization/AuthorizationUI.entitlements"),
-            Path("macos/TouchIDAuthorization/Info.plist"),
-            Path("macos/TouchIDAuthorization/Artwork/AppIcon.icon/icon.json"),
-            Path("macos/TouchIDAuthorization/Artwork/AppIcon.icon/Assets/AuthorizationLock.svg"),
-            Path("macos/TouchIDAuthorization/Artwork/AppIcon.icon/Assets/ControlStack.svg"),
-            Path("macos/TouchIDAuthorization/Artwork/AppIcon.icon/Assets/DiagonalAccent.svg"),
-            Path("macos/TouchIDAuthorization/Signing.example.xcconfig"),
-            Path("macos/TouchIDAuthorization/SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj"),
-            Path("macos/TouchIDAuthorization/Sources/AuthorizationCore/AuthorizationRequest.swift"),
-            Path("macos/TouchIDAuthorization/Sources/AuthorizationCore/ExecutionApprovalCrypto.swift"),
-            Path("macos/TouchIDAuthorization/Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift"),
-            Path("macos/TouchIDAuthorization/Sources/SecureSandboxAuthorizationUI/main.swift"),
-        ]
+            Path("macos/TouchIDAuthorization") / name
+            for name in sorted(MANAGER.AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES)
+        ] + [Path("macos/TouchIDAuthorization/Signing.example.xcconfig")]
         deployment_sources = sorted({
             Path(relative)
             for role in NATIVE_DEPLOYMENT_PAYLOAD.CONTAINER_MEMBERS.values()

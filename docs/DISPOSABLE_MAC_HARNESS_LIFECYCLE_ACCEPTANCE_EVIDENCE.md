@@ -122,7 +122,8 @@ are spent and will not be replayed. The first release build failed closed
 before signing because its intentionally closed source inventory had not added
 the new encoder file. The inventory now records, snapshots, and attests every
 Swift source, with a regression requiring each source to occur in all three
-closed lists and in the Xcode compile phase before another release can be built.
+closed lists, in the Xcode compile phase, and in the Host payload verifier's
+complete shipping-source set before another release can be built or selected.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

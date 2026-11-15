@@ -582,7 +582,9 @@ in ignored local records, not in this file.
   first release build correctly stopped before signing when its closed source
   inventory omitted the new encoder; the builder and regression suite now
   require every Swift source in the record, snapshot, and attestation lists and
-  in the Xcode target's compile phase.
+  in the Xcode target's compile phase. Candidate selection then exposed the
+  independent Host payload verifier's stale source set; it now derives a tested
+  complete shipping-source contract that includes every Swift source.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

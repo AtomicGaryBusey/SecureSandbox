@@ -4,8 +4,11 @@
 
 Implemented and deployed. Adversarial fault-injection tests, the reviewed live
 stop/start and idempotent-recovery sequence, and complete boundary verification
-pass. A Parallels 27.1 stopped-service bootstrap extension is implemented and
-source-tested; publication and physical Neo execution are pending.
+pass. The first published Parallels 27.1 stopped-service bootstrap reached and
+proved its Gateway-only state on the Neo, then rejected because Parallels
+vetoed both its Apple-event quit and SIGTERM while Gateway remained running.
+An exact-PID termination repair is implemented and source-tested; publication
+and physical replay are pending.
 Deployment-specific state, VM identities, and acceptance transcripts remain
 private.
 
@@ -68,7 +71,8 @@ remains a separate and stronger requirement after startup.
   GUI PID and either the exact all-stopped inventory or the exact recovery
   inventory Gateway running/Research stopped/Target stopped. While holding the
   ordinary lifecycle lock, it may start only the Gateway. It verifies that
-  exact intermediate state and the unchanged GUI PID, quits the GUI, proves
+  exact intermediate state and the unchanged GUI PID, terminates only that
+  bound PID, proves
   the GUI absent, and proves the same intermediate inventory is still readable.
   Only then does it transfer the already-held lock and its recorded outcome to
   the ordinary closed-GUI start controller. Adapter mutation, Research and
@@ -94,6 +98,14 @@ closed before a new mutation. A residual guest, inaccessible control endpoint,
 clock failure, or failed boundary gate produces a rejected final record. A
 retry after controller or GUI failure derives work only from fresh state; it
 does not replay a remembered command.
+
+Parallels physically returned Apple-event error `User canceled (-128)` and
+left the same GUI PID resident after SIGTERM. Exact-PID SIGKILL removed only
+the GUI; the service remained available and independently reported the
+unchanged Gateway-only inventory. The controller therefore sends TERM first,
+repeatedly requires either absence or that same sole PID during a bounded grace
+period, and permits KILL only while the exact PID remains unchanged. A new,
+missing, or additional PID rejects rather than broadening the signal target.
 
 The service bootstrap rejects multiple or changing GUI PIDs, every other mixed
 VM state, failed Gateway readback, failed GUI quit, service loss after quit, and
@@ -153,9 +165,10 @@ and the complete boundary verifier passes.
   mutating command. The explicit stopped-service bootstrap instead binds one
   stable GUI PID under that lock and removes the GUI before transferring to the
   ordinary mutation path.
-- The bootstrap's GUI probes and quit operation have short deadlines and
-  bounded output. It runs as the login user, never invokes `prlctl` as root,
-  and cannot select a VM, adapter, or executable path at runtime.
+- The bootstrap's GUI probes and termination grace periods are bounded. TERM
+  and any KILL fallback target only the previously bound PID after exact
+  process-list readback. It runs as the login user, never invokes `prlctl` as
+  root, and cannot select a VM, adapter, or executable path at runtime.
 - `panic` remains an independent emergency containment path and does not depend
   on guest cooperation.
 
@@ -184,7 +197,7 @@ Automated tests must prove:
     restore produces no Parallels action.
 12. the explicit stopped-service bootstrap starts only Gateway from exact
     all-stopped state, accepts only the exact Gateway-only recovery state,
-    rejects GUI PID change and post-quit service loss, and delegates through the
+    rejects GUI PID change and post-termination service loss, and delegates through the
     same already-held lock only after an exact closed-GUI readback.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or

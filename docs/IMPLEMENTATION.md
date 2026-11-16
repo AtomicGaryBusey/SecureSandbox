@@ -259,12 +259,17 @@ ordinary controller remains strict and still refuses every GUI-present
 mutation. An explicit `labctl start --bootstrap-parallels-service` path handles
 only this deadlock: under the ordinary lifecycle lock it binds exactly one GUI
 PID, accepts only all-stopped or the exact Gateway-only recovery inventory,
-starts at most the fixed Gateway, verifies that state, quits the GUI, and
+starts at most the fixed Gateway, verifies that state, terminates only the
+bound GUI PID, and
 requires the same inventory to remain readable. It then hands the lock and
 bootstrap outcome to the ordinary controller, which performs all adapter work,
 remaining starts, readiness, time synchronization, and boundary verification
 with the GUI closed. PID change, any other partial state, failed quit, service
-loss, or changed readback rejects without fallback.
+loss, or changed readback rejects without fallback. Physical Neo execution
+proved Parallels vetoes both its Apple-event quit and SIGTERM while Gateway is
+running. The corrected path waits a bounded TERM grace period, requires every
+intermediate process probe to remain exactly that sole PID, then permits an
+exact-PID KILL fallback. It never uses a process-name-wide signal.
 
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from

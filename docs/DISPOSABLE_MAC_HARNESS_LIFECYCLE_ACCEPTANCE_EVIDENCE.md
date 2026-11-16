@@ -26,8 +26,17 @@ service absent, and `prl_bglaunch` unsuitable because it launches the GUI
 client. The source repair adds only an explicit Gateway-first service bootstrap
 under the existing lifecycle lock, then requires GUI absence and exact
 Gateway-only readback before the ordinary closed-GUI controller can continue.
-Publication and physical execution of that path remain pending. The protected
-collector has not been invoked and its raw destination remains absent.
+The first published physical execution started only Gateway and proved the
+exact intermediate inventory, then rejected because Parallels returned
+`User canceled (-128)` to its Apple-event quit. SIGTERM also left the bound PID
+resident. Exact-PID SIGKILL removed only that GUI and independent `prlctl`
+readback proved the service plus unchanged Gateway-only state survived. The
+ordinary controller then started Research and Target and proved authenticated
+reachability plus zero clock skew, but correctly rejected when the broader
+production boundary verifier found this factory-reset acceptance baseline is
+not a deployed production lab. That rejection is retained and must not be
+relabelled as acceptance evidence. The protected collector has not been
+invoked and its raw destination remains absent.
 
 The fresh replacement-campaign preflight exposed a Parallels 27.2.1 platform
 boundary: `prlctl` becomes unavailable immediately after `prl_client_app`

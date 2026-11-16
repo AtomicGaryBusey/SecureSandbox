@@ -584,11 +584,16 @@ in ignored local records, not in this file.
   The current live campaign is bound to exact source `35dd424` with zero raw
   reservations and zero observations; its next case remains
   `bootstrap-clean-install`. Before collecting it, publish and physically
-  exercise the explicit Parallels 27.1 stopped-service bootstrap. Accept only a
-  final verified lifecycle record with all three VMs running, authenticated
-  guest reachability, connected Gateway uplink, trusted time, and the complete
-  boundary verifier. Never invoke the one-shot collector on a rejected or
-  partially recovered startup.
+  exercise the corrected explicit Parallels 27.1 stopped-service bootstrap.
+  Its first physical run proved the Gateway-only service strategy but also
+  proved Parallels vetoes Apple-event quit and SIGTERM once Gateway runs. Use
+  only bounded exact-PID TERM/KILL with repeated identity readback. The ordinary
+  production controller must retain its complete boundary verifier; do not
+  weaken it to fit the campaign's deliberately narrower
+  `factory-reset-test-account` baseline. Define and verify a distinct
+  acceptance-start prerequisite contract from the already suite-fixed Host and
+  Research boundaries before invoking the one-shot collector. Never collect on
+  an ambiguous or partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

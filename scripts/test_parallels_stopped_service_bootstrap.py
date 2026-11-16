@@ -62,8 +62,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             mock.patch.object(
                 bootstrap, "gui_process_ids", side_effect=gui_ids,
             ),
-            mock.patch.object(bootstrap, "quit_gui"),
-            mock.patch.object(bootstrap, "wait_gui_absent"),
+            mock.patch.object(bootstrap, "terminate_gui"),
             mock.patch.object(bootstrap.LIFECYCLE, "emit"),
         )
 
@@ -73,7 +72,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             [(41,), (41,), (41,)],
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6] as quit_gui, patches[7] as wait_absent, patches[8], \
+                patches[5], patches[6] as terminate_gui, patches[7], \
                 mock.patch.object(
                     bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
                 ) as mutate, mock.patch.object(
@@ -86,8 +85,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(mutate.call_args.args[1:3], (
             "parallels_service_bootstrap", "gateway",
         ))
-        quit_gui.assert_called_once()
-        wait_absent.assert_called_once()
+        terminate_gui.assert_called_once_with(41)
         self.assertEqual(start.call_args.kwargs["prior_outcomes"], [{
             "action": "parallels_service_bootstrap",
             "target": "gateway", "result": "succeeded",
@@ -100,7 +98,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             [(52,), (52,), (52,)],
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6], patches[7], patches[8], mock.patch.object(
+                patches[5], patches[6], patches[7], mock.patch.object(
                     bootstrap.LIFECYCLE, "mutate",
                 ) as mutate, mock.patch.object(
                     bootstrap.LIFECYCLE, "start", return_value=0,
@@ -114,7 +112,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
         invalid = dict(self.intermediate, research="running")
         patches = self.common([(invalid, {}), (invalid, {})], [(61,)])
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6], patches[7], patches[8] as emit, mock.patch.object(
+                patches[5], patches[6], patches[7] as emit, mock.patch.object(
                     bootstrap.LIFECYCLE, "mutate",
                 ) as mutate, mock.patch.object(
                     bootstrap.LIFECYCLE, "start",
@@ -131,14 +129,14 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             [(71,), (71,), (72,)],
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6] as quit_gui, patches[7], patches[8] as emit, \
+                patches[5], patches[6] as terminate_gui, patches[7] as emit, \
                 mock.patch.object(
                     bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
                 ), mock.patch.object(
                     bootstrap.LIFECYCLE, "wait_vm", return_value=True,
                 ), mock.patch.object(bootstrap.LIFECYCLE, "start") as start:
             self.assertEqual(bootstrap.run(), 1)
-        quit_gui.assert_not_called()
+        terminate_gui.assert_not_called()
         start.assert_not_called()
         self.assertIn("parallels_gui_session_changed", emit.call_args.args[4])
 
@@ -153,7 +151,7 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             [(81,), (81,), (81,)],
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6], patches[7], patches[8] as emit, mock.patch.object(
+                patches[5], patches[6], patches[7] as emit, mock.patch.object(
                     bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
                 ), mock.patch.object(
                     bootstrap.LIFECYCLE, "wait_vm", return_value=True,
@@ -182,6 +180,42 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             bootstrap.run()
         gui.assert_not_called()
         acquire.assert_not_called()
+
+    def test_gui_termination_uses_only_term_when_pid_exits(self):
+        killer = mock.Mock()
+        with mock.patch.object(
+            bootstrap, "gui_process_ids", return_value=(),
+        ):
+            bootstrap.terminate_gui(91, now=mock.Mock(return_value=0),
+                                    sleep=mock.Mock(), killer=killer)
+        killer.assert_called_once_with(91, bootstrap.signal.SIGTERM)
+
+    def test_gui_termination_escalates_only_unchanged_pid(self):
+        killer = mock.Mock()
+        with mock.patch.object(
+            bootstrap, "gui_process_ids", side_effect=[(92,), ()],
+        ):
+            bootstrap.terminate_gui(
+                92, now=mock.Mock(side_effect=[0, 3, 3]),
+                sleep=mock.Mock(), killer=killer,
+            )
+        self.assertEqual(killer.call_args_list, [
+            mock.call(92, bootstrap.signal.SIGTERM),
+            mock.call(92, bootstrap.signal.SIGKILL),
+        ])
+
+    def test_gui_termination_rejects_changed_pid_without_kill(self):
+        killer = mock.Mock()
+        with mock.patch.object(
+            bootstrap, "gui_process_ids", return_value=(94,),
+        ), self.assertRaisesRegex(
+            bootstrap.ServiceBootstrapError, "parallels_gui_session_changed",
+        ):
+            bootstrap.terminate_gui(
+                93, now=mock.Mock(return_value=0),
+                sleep=mock.Mock(), killer=killer,
+            )
+        killer.assert_called_once_with(93, bootstrap.signal.SIGTERM)
 
 
 if __name__ == "__main__":

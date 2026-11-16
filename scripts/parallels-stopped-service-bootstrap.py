@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -78,32 +79,47 @@ def gui_process_ids(
     return values
 
 
-def quit_gui(*, runner: Callable[..., Any] = subprocess.run) -> None:
-    try:
-        result = runner(
-            ["/usr/bin/osascript", "-e",
-             'tell application "Parallels Desktop" to quit'], cwd=Path("/"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=20,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ServiceBootstrapError("parallels_gui_quit_failed") from error
-    if (result.returncode != 0 or result.stderr
-            or len(result.stdout) > MAX_OUTPUT):
-        raise ServiceBootstrapError("parallels_gui_quit_failed")
-
-
-def wait_gui_absent(
-    *, now: Callable[[], float] = time.monotonic,
+def terminate_gui(
+    pid: int, *,
+    now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     runner: Callable[..., Any] = subprocess.run,
+    killer: Callable[[int, int], None] = os.kill,
 ) -> None:
-    deadline = now() + 20
-    while gui_process_ids(runner=runner):
-        if now() >= deadline:
-            raise ServiceBootstrapError("parallels_gui_remains")
-        sleep(0.25)
+    """Terminate only the bound GUI PID, escalating after exact readback.
+
+    Parallels 27.1 vetoes both its Apple-event quit and SIGTERM while a VM is
+    running.  SIGKILL is therefore permitted only after a bounded TERM grace
+    period in which every process probe still returns the same sole PID.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise ServiceBootstrapError("parallels_gui_session_invalid")
+
+    def send(value: int) -> None:
+        try:
+            killer(pid, value)
+        except ProcessLookupError:
+            return
+        except OSError as error:
+            raise ServiceBootstrapError("parallels_gui_termination_failed") from error
+
+    def wait_until(deadline: float) -> bool:
+        while True:
+            current = gui_process_ids(runner=runner)
+            if not current:
+                return True
+            if current != (pid,):
+                raise ServiceBootstrapError("parallels_gui_session_changed")
+            if now() >= deadline:
+                return False
+            sleep(0.25)
+
+    send(signal.SIGTERM)
+    if wait_until(now() + 3):
+        return
+    send(signal.SIGKILL)
+    if not wait_until(now() + 10):
+        raise ServiceBootstrapError("parallels_gui_remains")
 
 
 def exact_intermediate(value: dict[str, str]) -> bool:
@@ -182,8 +198,7 @@ def run() -> int:
                 ["parallels_gui_session_changed"],
             )
             return 1
-        quit_gui()
-        wait_gui_absent()
+        terminate_gui(gui_pid)
         closed, _ = LIFECYCLE.observe()
         if not exact_intermediate(closed):
             LIFECYCLE.emit(

@@ -579,9 +579,9 @@ def validated_receipt_source_commit(
                     or not protected_ready
                     and all(state == "absent" for state in vm_states.values()))
             or inventory_source == "closed-stopped-inventory-receipt"
-            and (not protected_ready or vm_states != {
+            and vm_states != {
                 "gateway": "stopped", "research": "stopped", "target": "stopped",
-            })
+            }
             or not exact_integer(value.get("source_driver_count"))
             or value["source_driver_count"] != len(DRIVER_ENTRYPOINTS)
             or value.get("source_closure_complete") is not True

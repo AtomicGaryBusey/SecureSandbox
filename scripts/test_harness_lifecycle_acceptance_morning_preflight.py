@@ -190,7 +190,14 @@ class MorningPreflightTests(unittest.TestCase):
         ), mock.patch.object(
             preflight, "production_material_absent", return_value="absent",
         ), mock.patch.object(
-            preflight, "trusted_bootstrap_hierarchy", return_value=[],
+            preflight, "trusted_bootstrap_hierarchy",
+            return_value=[
+                {"path": path, "device": 1, "inode": inode, "uid": 0,
+                 "gid": 0, "mode": 0o755, "acl_present": False}
+                for inode, path in enumerate(
+                    ("/", "/private", "/private/var", "/private/var/db"), 1,
+                )
+            ],
         ), mock.patch.object(
             preflight.ACCEPTANCE_CLI, "driver_readiness",
             side_effect=(self.source, self.installed(10, None)),
@@ -225,7 +232,14 @@ class MorningPreflightTests(unittest.TestCase):
         ), mock.patch.object(
             preflight, "production_material_absent", return_value="absent",
         ), mock.patch.object(
-            preflight, "trusted_bootstrap_hierarchy", return_value=[],
+            preflight, "trusted_bootstrap_hierarchy",
+            return_value=[
+                {"path": path, "device": 1, "inode": inode, "uid": 0,
+                 "gid": 0, "mode": 0o755, "acl_present": False}
+                for inode, path in enumerate(
+                    ("/", "/private", "/private/var", "/private/var/db"), 1,
+                )
+            ],
         ), mock.patch.object(
             preflight.ACCEPTANCE_CLI, "driver_readiness",
             side_effect=(
@@ -252,6 +266,16 @@ class MorningPreflightTests(unittest.TestCase):
             value["vm_inventory_source"], "closed-stopped-inventory-receipt",
         )
         self.assertEqual(set(value["vm_states"].values()), {"stopped"})
+        preinstall = self.root / "preinstall.json"
+        preflight.write_preflight_receipt(preinstall, value)
+        self.assertEqual(
+            preflight.validated_receipt_source_commit(
+                preinstall,
+                "bootstrap-root-owned-exact-commit-host-installer",
+                now=NOW,
+            ),
+            COMMIT,
+        )
 
     def test_fresh_preflight_rebinds_historical_clean_machine_enrollment(self):
         self.enrollment["observed_at"] = NOW - 3 * 86400

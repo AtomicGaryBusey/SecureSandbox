@@ -1,12 +1,25 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: the latest exact-commit campaign on the disposable Neo completed its
-first protected collection, then exposed an authority-boundary defect in the
-source projector. The raw records and three owner-mode projected observations
-remain preserved in place; no acceptance verdict has been issued.
-The protected Host bootstrap, three-VM installation, host-key
-enrollment, protected acceptance-driver installation, and retained fail-closed
-upgrade attempts are physical preparation evidence.
+Status: every superseded or failed exact-commit campaign on the disposable Neo
+is retained without deletion, including the historical protected collection
+and its unchanged raw bytes. No replacement campaign is currently live and no
+acceptance verdict has been issued. The complete protected `dac1f642` driver
+release, Host bootstrap, three-VM installation, host-key enrollment, and
+retained fail-closed upgrade attempts are physical preparation evidence.
+
+The fresh replacement-campaign preflight exposed a Parallels 27.2.1 platform
+boundary: `prlctl` becomes unavailable immediately after `prl_client_app`
+exits, even while the dispatcher remains resident. Repeated read-only trials
+proved the inverse as well: the exact stopped three-VM inventory is readable
+while the GUI session exists and unavailable immediately after that client
+terminates. No post-install preflight receipt or replacement campaign was
+published. The source repair adds an explicit stopped-only bridge with a
+120-second canonical receipt binding the exact commit and public tip, enrolled
+machine, operator, stable GUI PID, all three stopped VMs, clean GUI exit, and
+absent VM runtime processes. Morning preflight never silently falls back to
+the bridge and independently revalidates its bindings and process absence.
+Physical execution of the repaired boundary remains pending publication and
+installation of its exact release.
 
 The first `bootstrap-clean-install` collector rejected during preflight before
 reserving its raw-evidence destination. Decomposition proved the campaign and

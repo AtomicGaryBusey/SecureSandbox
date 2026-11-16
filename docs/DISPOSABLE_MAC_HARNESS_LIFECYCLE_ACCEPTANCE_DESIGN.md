@@ -483,7 +483,24 @@ production material and fails closed. Enrollment remains stricter and accepts
 no such pre-existing path. The gate also requires the complete source closure, absence of known
 provider/production material and
 the Agents service credential, a closed Parallels GUI, and readable fixed VM
-states. It distinguishes the expected complete absence of a protected release
+states. Parallels Desktop 27.2.1 on macOS 27.2.1 removes the login-user API
+session used by `prlctl` when its GUI exits, so the two observations cannot be
+made simultaneously on that platform. The stopped-only closed-inventory bridge
+is the narrow alternative. While one stable `prl_client_app` PID exists, it
+binds the exact clean commit and public tip, enrolled machine, operator UID,
+and exact stopped Gateway/Research/Target inventory; proves the same GUI PID
+survived the readback; quits Parallels normally; and then proves both the GUI
+and every `prl_vm_app` runtime absent. It publishes one canonical, private,
+self-digested, zero-authority receipt. The morning preflight never discovers or
+falls back to that receipt: the caller must name it explicitly, it expires in
+120 seconds, it is valid only with all three VMs stopped and a complete
+protected release, and the consumer rebinds the commit, remote tip, machine,
+operator and digest before re-observing both process absences. Running, absent,
+mixed, stale, extended, cross-commit, cross-machine, cross-operator, replaced-
+GUI, or lingering-runtime states fail closed. Platforms retaining a usable API
+session with the GUI closed continue through the ordinary live inventory path.
+The resulting preflight records which of those two exact inventory sources it
+used. It distinguishes the expected complete absence of a protected release
 from any partial or invalid installation. Only the former may name the exact
 root installation as the next ceremony. A complete protected ten-driver
 release instead names unauthenticated campaign initialization; the preflight

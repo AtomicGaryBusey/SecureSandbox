@@ -86,6 +86,29 @@ class MorningPreflightTests(unittest.TestCase):
             "drivers": [{"installation_error": error} for _ in range(10)],
         }
 
+    def closed_inventory_value(self, **changes) -> dict:
+        value = {
+            "schema": preflight.CLOSED_STOPPED_INVENTORY_SCHEMA,
+            "status": "verified",
+            "inventory_observed_at": NOW - 2,
+            "observed_at": NOW - 1,
+            "source_commit": COMMIT,
+            "branch": preflight.PUBLIC_BRANCH,
+            "remote_tips": {"origin": COMMIT},
+            "machine_identity_sha256": "b" * 64,
+            "operator_uid": os.geteuid(),
+            "parallels_gui_pid": 1234,
+            "parallels_gui_closed": True,
+            "vm_runtime_processes_absent": True,
+            "vm_states": {
+                "gateway": "stopped", "research": "stopped", "target": "stopped",
+            },
+            "authority": "none",
+        }
+        value.update(changes)
+        value["receipt_sha256"] = acceptance.digest(value)
+        return value
+
     def execute(self, installed: dict, vm_states: dict[str, str] | None = None):
         if vm_states is None:
             vm_states = {"gateway": "stopped", "research": "stopped", "target": "stopped"}
@@ -151,6 +174,42 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertEqual(value["next_authorization"], "none")
         self.assertEqual(value["next_action"], "initialize-exact-commit-campaign")
         self.assertFalse(value["touch_id_authorization_ready"])
+        self.assertEqual(value["vm_inventory_source"], "live-closed-parallels-api")
+
+    def test_explicit_closed_stopped_inventory_bridges_only_complete_install(self):
+        receipt = self.root / "closed-stopped.json"
+        preflight.write_preflight_receipt(receipt, self.closed_inventory_value())
+        absent = subprocess.CompletedProcess([], 1, b"", b"")
+        with mock.patch.object(
+            preflight, "source_checkout", return_value=(COMMIT, {"origin": COMMIT}),
+        ), mock.patch.object(
+            preflight.ACCEPTANCE_CLI, "trusted_json",
+            side_effect=(self.enrollment, self.closed_inventory_value()),
+        ), mock.patch.object(
+            preflight.ENROLLER, "machine_identity", return_value="b" * 64,
+        ), mock.patch.object(
+            preflight, "production_material_absent", return_value="absent",
+        ), mock.patch.object(
+            preflight, "trusted_bootstrap_hierarchy", return_value=[],
+        ), mock.patch.object(
+            preflight.ACCEPTANCE_CLI, "driver_readiness",
+            side_effect=(self.source, self.installed(10, None)),
+        ), mock.patch.object(
+            preflight.SUPERVISOR, "require_gui_closed",
+        ), mock.patch.object(
+            preflight.SUPERVISOR, "vm_inventory",
+        ) as live_inventory:
+            value = preflight.run_preflight(
+                self.enrollment_path, now=NOW, home=self.root, environment={},
+                expected_install_uid=0, effective_uid=os.geteuid(),
+                closed_vm_inventory_receipt=receipt,
+                probe_runner=mock.Mock(return_value=absent),
+            )
+        live_inventory.assert_not_called()
+        self.assertEqual(
+            value["vm_inventory_source"], "closed-stopped-inventory-receipt",
+        )
+        self.assertEqual(set(value["vm_states"].values()), {"stopped"})
 
     def test_fresh_preflight_rebinds_historical_clean_machine_enrollment(self):
         self.enrollment["observed_at"] = NOW - 3 * 86400
@@ -324,6 +383,15 @@ class MorningPreflightTests(unittest.TestCase):
             "unsafe-bootstrap-mode": lambda value: value["bootstrap_trust_root"][0].update(
                 {"mode": 0o777},
             ),
+            "unknown-inventory-source": lambda value: value.update(
+                {"vm_inventory_source": "implicit-fallback"},
+            ),
+            "closed-source-running-state": lambda value: value.update({
+                "vm_inventory_source": "closed-stopped-inventory-receipt",
+                "vm_states": {
+                    "gateway": "stopped", "research": "running", "target": "stopped",
+                },
+            }),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -341,6 +409,60 @@ class MorningPreflightTests(unittest.TestCase):
                         "bootstrap-root-owned-exact-commit-host-installer",
                         now=NOW,
                     )
+
+    def test_closed_stopped_inventory_is_exact_fresh_and_process_closed(self):
+        original = self.closed_inventory_value()
+        receipt = self.root / "closed.json"
+        preflight.write_preflight_receipt(receipt, original)
+        absent = mock.Mock(return_value=subprocess.CompletedProcess([], 1, b"", b""))
+        self.assertEqual(
+            preflight.validated_closed_stopped_vm_inventory(
+                receipt, expected_commit=COMMIT,
+                expected_remote_tips={"origin": COMMIT},
+                expected_machine_identity="b" * 64,
+                expected_uid=os.geteuid(), now=NOW, runner=absent,
+            ),
+            {"gateway": "stopped", "research": "stopped", "target": "stopped"},
+        )
+        self.assertEqual(absent.call_count, 2)
+
+        mutations = {
+            "running": lambda value: value["vm_states"].update({"research": "running"}),
+            "wrong-commit": lambda value: value.update({"source_commit": "c" * 40}),
+            "stale": lambda value: value.update({"observed_at": NOW - 121}),
+            "wrong-machine": lambda value: value.update(
+                {"machine_identity_sha256": "c" * 64},
+            ),
+            "extra": lambda value: value.update({"unexpected": True}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                value = json.loads(acceptance.canonical(original))
+                value.pop("receipt_sha256")
+                mutate(value)
+                value["receipt_sha256"] = acceptance.digest(value)
+                path = self.root / f"closed-{name}.json"
+                preflight.write_preflight_receipt(path, value)
+                with self.assertRaisesRegex(
+                    preflight.PreflightError, "closed_vm_inventory_invalid",
+                ):
+                    preflight.validated_closed_stopped_vm_inventory(
+                        path, expected_commit=COMMIT,
+                        expected_remote_tips={"origin": COMMIT},
+                        expected_machine_identity="b" * 64,
+                        expected_uid=os.geteuid(), now=NOW, runner=absent,
+                    )
+
+        live = mock.Mock(return_value=subprocess.CompletedProcess([], 0, b"99\n", b""))
+        with self.assertRaisesRegex(
+            preflight.PreflightError, "closed_vm_inventory_invalid",
+        ):
+            preflight.validated_closed_stopped_vm_inventory(
+                receipt, expected_commit=COMMIT,
+                expected_remote_tips={"origin": COMMIT},
+                expected_machine_identity="b" * 64,
+                expected_uid=os.geteuid(), now=NOW, runner=live,
+            )
 
     def test_receipt_writer_requires_private_real_parent(self):
         parent = self.root / "public"

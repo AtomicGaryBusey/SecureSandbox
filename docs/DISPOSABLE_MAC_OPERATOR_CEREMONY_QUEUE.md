@@ -99,6 +99,17 @@ wrong-commit protected release queues nothing. A complete ten-driver release
 queues campaign initialization with `next_authorization: none`; it never
 preauthorizes any Touch ID case.
 
+On Parallels Desktop 27.2.1, `prlctl` loses its login-user API session when
+the GUI exits. For the post-install all-stopped boundary only, first open
+Parallels and wait for its exact stopped three-VM inventory to be available,
+then run the closed-inventory helper immediately followed by morning preflight.
+The helper requires one stable GUI PID across readback, quits Parallels,
+proves both the GUI and all VM runtimes absent, and publishes a 120-second
+canonical receipt bound to the clean commit, public tip, machine, and operator.
+Preflight consumes it only through the explicit argument below and repeats the
+absence probes. It never discovers the receipt automatically, and the bridge
+cannot represent a running, absent, partial, or mixed VM set.
+
 If an honest rejected Host bootstrap created only
 `~/Library/Application Support/SecureSandbox/controller-state`, do not remove
 it. Preflight accepts and records `bootstrap_controller_state:
@@ -572,8 +583,13 @@ the password.
      "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \
      "$source_commit"
    /usr/bin/python3 -I \
+     scripts/harness-lifecycle-acceptance-parallels-closed-inventory.py \
+     --output "$handoff_root/closed-stopped-vm-inventory.json"
+   /usr/bin/python3 -I \
      scripts/harness-lifecycle-acceptance-morning-preflight.py \
      --enrollment "$handoff_root/enrollment.json" \
+     --closed-stopped-vm-inventory \
+       "$handoff_root/closed-stopped-vm-inventory.json" \
      --expect-next-action initialize-exact-commit-campaign \
      --output "$handoff_root/preflight-after-install.json"
    ```

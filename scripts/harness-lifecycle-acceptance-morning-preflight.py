@@ -38,6 +38,17 @@ AUTHORIZED_REMOTES = (
 )
 MAX_OUTPUT = 1024 * 1024
 TOUCH_ID_CASE_COUNT = 11
+CLOSED_STOPPED_INVENTORY_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-closed-stopped-vm-inventory-v1"
+)
+CLOSED_STOPPED_INVENTORY_MAX_AGE = 120
+CLOSED_STOPPED_INVENTORY_KEYS = {
+    "schema", "status", "inventory_observed_at", "observed_at",
+    "source_commit", "branch", "remote_tips",
+    "machine_identity_sha256", "operator_uid", "parallels_gui_pid",
+    "parallels_gui_closed", "vm_runtime_processes_absent", "vm_states",
+    "authority", "receipt_sha256",
+}
 NEXT_ACTIONS = (
     "bootstrap-root-owned-exact-commit-host-installer",
     "initialize-exact-commit-campaign",
@@ -48,6 +59,7 @@ PREFLIGHT_RECEIPT_KEYS = {
     "enrollment_sha256", "production_material_absent",
     "bootstrap_controller_state",
     "bootstrap_trust_root", "parallels_gui_closed", "vm_states",
+    "vm_inventory_source",
     "source_driver_count", "source_closure_complete",
     "protected_driver_count", "protected_installation_ready",
     "touch_id_cases_queued", "touch_id_authorization_ready",
@@ -537,6 +549,7 @@ def validated_receipt_source_commit(
     enrollment_digest = value.get("enrollment_sha256")
     observed_at = value.get("observed_at")
     vm_states = value.get("vm_states")
+    inventory_source = value.get("vm_inventory_source")
     if (set(value) != PREFLIGHT_RECEIPT_KEYS
             or value.get("schema") != SCHEMA or value.get("status") != "ready"
             or value.get("next_action") != expected_action
@@ -556,12 +569,19 @@ def validated_receipt_source_commit(
             or value.get("bootstrap_controller_state") not in BOOTSTRAP_CONTROLLER_STATES
             or not bootstrap_valid
             or value.get("parallels_gui_closed") is not True
+            or inventory_source not in {
+                "live-closed-parallels-api", "closed-stopped-inventory-receipt",
+            }
             or not isinstance(vm_states, dict)
             or set(vm_states) != {"gateway", "research", "target"}
             or not (all(state in {"running", "stopped"}
                         for state in vm_states.values())
                     or not protected_ready
                     and all(state == "absent" for state in vm_states.values()))
+            or inventory_source == "closed-stopped-inventory-receipt"
+            and (not protected_ready or vm_states != {
+                "gateway": "stopped", "research": "stopped", "target": "stopped",
+            })
             or not exact_integer(value.get("source_driver_count"))
             or value["source_driver_count"] != len(DRIVER_ENTRYPOINTS)
             or value.get("source_closure_complete") is not True
@@ -583,6 +603,75 @@ def validated_receipt_source_commit(
     return source_commit
 
 
+def _process_absent(
+    name: str, *, runner: Callable[..., Any] = subprocess.run,
+) -> bool:
+    try:
+        result = runner(
+            ["/usr/bin/pgrep", "-x", name], cwd=Path("/"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PreflightError("preflight_closed_vm_inventory_invalid") from error
+    if (result.returncode not in {0, 1} or len(result.stdout) > 4096
+            or len(result.stderr) > 4096):
+        raise PreflightError("preflight_closed_vm_inventory_invalid")
+    return result.returncode == 1 and not result.stdout and not result.stderr
+
+
+def validated_closed_stopped_vm_inventory(
+    path: Path, *, expected_commit: str,
+    expected_remote_tips: dict[str, str], expected_machine_identity: str,
+    expected_uid: int, now: int,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, str]:
+    """Consume one explicit, short-lived bridge across Parallels GUI closure."""
+    try:
+        value = ACCEPTANCE_CLI.trusted_json(path, expected_uid=expected_uid)
+    except (AcceptanceError, OSError) as error:
+        raise PreflightError("preflight_closed_vm_inventory_invalid") from error
+    claimed = value.get("receipt_sha256")
+    unsigned = dict(value)
+    unsigned.pop("receipt_sha256", None)
+    inventory_observed_at = value.get("inventory_observed_at")
+    observed_at = value.get("observed_at")
+    gui_pid = value.get("parallels_gui_pid")
+    vm_states = value.get("vm_states")
+    if (set(value) != CLOSED_STOPPED_INVENTORY_KEYS
+            or value.get("schema") != CLOSED_STOPPED_INVENTORY_SCHEMA
+            or value.get("status") != "verified"
+            or not exact_integer(inventory_observed_at)
+            or not exact_integer(observed_at)
+            or inventory_observed_at <= 0
+            or observed_at < inventory_observed_at
+            or observed_at - inventory_observed_at > 30
+            or observed_at > now + 5
+            or now - observed_at > CLOSED_STOPPED_INVENTORY_MAX_AGE
+            or value.get("source_commit") != expected_commit
+            or value.get("branch") != PUBLIC_BRANCH
+            or value.get("remote_tips") != expected_remote_tips
+            or value.get("machine_identity_sha256") != expected_machine_identity
+            or not exact_integer(value.get("operator_uid"))
+            or value.get("operator_uid") != expected_uid
+            or not exact_integer(gui_pid) or gui_pid <= 0
+            or value.get("parallels_gui_closed") is not True
+            or value.get("vm_runtime_processes_absent") is not True
+            or vm_states != {
+                "gateway": "stopped", "research": "stopped", "target": "stopped",
+            }
+            or value.get("authority") != "none"
+            or not isinstance(claimed, str) or claimed != digest(unsigned)):
+        raise PreflightError("preflight_closed_vm_inventory_invalid")
+    # The bridge is stopped-only.  Re-observe both absence claims immediately
+    # before allowing the state to cross into the ordinary preflight receipt.
+    if (not _process_absent("prl_client_app", runner=runner)
+            or not _process_absent("prl_vm_app", runner=runner)):
+        raise PreflightError("preflight_closed_vm_inventory_invalid")
+    return dict(vm_states)
+
+
 def run_preflight(
     enrollment_path: Path, *, now: int, home: Path,
     environment: dict[str, str], git_runner: Callable[..., Any] = subprocess.run,
@@ -590,6 +679,7 @@ def run_preflight(
     protected_root: Path = ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
     expected_install_uid: int = 0,
     effective_uid: int | None = None,
+    closed_vm_inventory_receipt: Path | None = None,
 ) -> dict[str, Any]:
     operator_uid = os.geteuid() if effective_uid is None else effective_uid
     if operator_uid == 0:
@@ -630,7 +720,21 @@ def run_preflight(
 
     try:
         SUPERVISOR.require_gui_closed()
-        vm_states = SUPERVISOR.vm_inventory(allow_all_absent=installed_count == 0)
+        if closed_vm_inventory_receipt is None:
+            vm_states = SUPERVISOR.vm_inventory(
+                allow_all_absent=installed_count == 0,
+            )
+            vm_inventory_source = "live-closed-parallels-api"
+        else:
+            if installed_count != len(DRIVER_ENTRYPOINTS):
+                raise PreflightError("preflight_closed_vm_inventory_invalid")
+            vm_states = validated_closed_stopped_vm_inventory(
+                closed_vm_inventory_receipt,
+                expected_commit=commit, expected_remote_tips=remote_tips,
+                expected_machine_identity=identity, expected_uid=operator_uid,
+                now=now, runner=probe_runner,
+            )
+            vm_inventory_source = "closed-stopped-inventory-receipt"
     except SUPERVISOR.SupervisorError as error:
         raise PreflightError("preflight_vm_boundary_invalid") from error
     if (set(vm_states) != {"gateway", "research", "target"}
@@ -655,6 +759,7 @@ def run_preflight(
         "bootstrap_trust_root": bootstrap_trust_root,
         "parallels_gui_closed": True,
         "vm_states": vm_states,
+        "vm_inventory_source": vm_inventory_source,
         "source_driver_count": len(DRIVER_ENTRYPOINTS),
         "source_closure_complete": True,
         "protected_driver_count": installed_count,
@@ -681,13 +786,15 @@ def parser() -> argparse.ArgumentParser:
     source.add_argument("--source-commit-from-receipt", type=Path)
     value.add_argument("--expect-next-action", choices=NEXT_ACTIONS)
     value.add_argument("--output", type=Path)
+    value.add_argument("--closed-stopped-vm-inventory", type=Path)
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
     if args.source_commit_from_receipt is not None:
-        if args.expect_next_action is None or args.output is not None:
+        if (args.expect_next_action is None or args.output is not None
+                or args.closed_stopped_vm_inventory is not None):
             raise PreflightError("preflight_receipt_request_invalid")
         print(validated_receipt_source_commit(
             args.source_commit_from_receipt, args.expect_next_action,
@@ -698,6 +805,7 @@ def main(arguments: list[str] | None = None) -> int:
     result = run_preflight(
         args.enrollment, now=int(time.time()), home=Path.home(),
         environment=dict(os.environ),
+        closed_vm_inventory_receipt=args.closed_stopped_vm_inventory,
     )
     if (args.expect_next_action is not None
             and result["next_action"] != args.expect_next_action):

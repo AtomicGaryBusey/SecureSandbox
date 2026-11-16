@@ -804,6 +804,15 @@ in ignored local records, not in this file.
   retained absence, boundary, driver, or Touch ID facts. Root installation and
   campaign initialization consume that commit, so neither transition relies
   on terminal scrollback or a newly resolved checkout state.
+  Parallels Desktop 27.2.1 tears down `prlctl`'s login-user API session when
+  its GUI closes. For the post-install, all-stopped boundary only, an explicit
+  short-lived bridge now binds the clean commit and public tip, enrolled Neo,
+  operator, one stable GUI PID, and exact stopped three-VM readback before it
+  quits Parallels and proves the GUI and all VM runtimes absent. Morning
+  preflight accepts the canonical zero-authority receipt only when named,
+  within 120 seconds, with the complete protected release, and after rechecking
+  process absence. It never falls back to this path, never represents running
+  VMs, and records its inventory source in the resulting preflight receipt.
   A physical scheduling audit found that the immutable factory-reset
   enrollment had correctly become older than its former 24-hour consumption
   limit while expected SecureSandbox state made safe re-enrollment impossible.

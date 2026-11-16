@@ -56,7 +56,8 @@ MORNING_PREFLIGHT_KEYS = {
     "remote_tips", "machine_identity_sha256", "operator_uid",
     "enrollment_sha256", "production_material_absent",
     "bootstrap_controller_state", "bootstrap_trust_root",
-    "parallels_gui_closed", "vm_states", "source_driver_count",
+    "parallels_gui_closed", "vm_states", "vm_inventory_source",
+    "source_driver_count",
     "source_closure_complete", "protected_driver_count",
     "protected_installation_ready", "touch_id_cases_queued",
     "touch_id_authorization_ready", "next_authorization", "next_action",
@@ -432,6 +433,7 @@ def initialization_preflight(
     unsigned.pop("preflight_sha256", None)
     observed = value.get("observed_at")
     states = value.get("vm_states")
+    inventory_source = value.get("vm_inventory_source")
     bootstrap = value.get("bootstrap_trust_root")
     expected_bootstrap_paths = ["/", "/private", "/private/var", "/private/var/db"]
     bootstrap_keys = {
@@ -481,10 +483,17 @@ def initialization_preflight(
                }
             or not bootstrap_valid
             or value.get("parallels_gui_closed") is not True
+            or inventory_source not in {
+                "live-closed-parallels-api", "closed-stopped-inventory-receipt",
+            }
             or not isinstance(states, dict)
             or set(states) != {"gateway", "research", "target"}
             or not all(state in {"running", "stopped"}
                        for state in states.values())
+            or inventory_source == "closed-stopped-inventory-receipt"
+            and states != {
+                "gateway": "stopped", "research": "stopped", "target": "stopped",
+            }
             or not exact_integer(value.get("source_driver_count"))
             or value.get("source_driver_count") != len(DRIVER_ENTRYPOINTS)
             or value.get("source_closure_complete") is not True

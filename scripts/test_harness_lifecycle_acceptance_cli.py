@@ -127,6 +127,7 @@ class AcceptanceCLITests(unittest.TestCase):
             "vm_states": {
                 "gateway": "stopped", "research": "stopped", "target": "stopped",
             },
+            "vm_inventory_source": "live-closed-parallels-api",
             "source_driver_count": 10, "source_closure_complete": True,
             "protected_driver_count": 10,
             "protected_installation_ready": True,
@@ -286,6 +287,16 @@ class AcceptanceCLITests(unittest.TestCase):
                     {"source_commit": "c" * 40,
                      "remote_tips": {"origin": "c" * 40}}
                 ),
+                "inventory-source": lambda value: value.update(
+                    {"vm_inventory_source": "implicit-fallback"}
+                ),
+                "bridged-running": lambda value: value.update({
+                    "vm_inventory_source": "closed-stopped-inventory-receipt",
+                    "vm_states": {
+                        "gateway": "stopped", "research": "running",
+                        "target": "stopped",
+                    },
+                }),
             }.items():
                 with self.subTest(name=name):
                     value = self.preflight_value(enrollment_value)
@@ -305,6 +316,25 @@ class AcceptanceCLITests(unittest.TestCase):
                             driver_root=checkout, protected_root=protected,
                             expected_install_uid=os.geteuid(),
                         )
+
+    def test_initialization_accepts_only_all_stopped_bridged_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            enrollment_value = self.enrollment_value()
+            value = self.preflight_value(enrollment_value)
+            value["vm_inventory_source"] = "closed-stopped-inventory-receipt"
+            value["preflight_sha256"] = cli.digest({
+                key: item for key, item in value.items()
+                if key != "preflight_sha256"
+            })
+            path = root / "preflight-bridged.json"
+            self.write(path, value)
+            self.assertEqual(
+                cli.initialization_preflight(
+                    path, enrollment_value, "b" * 40, NOW, os.geteuid(),
+                ),
+                value,
+            )
 
     def test_readiness_reports_source_complete_but_uninstalled_inventory(self):
         value = cli.driver_readiness(ROOT)

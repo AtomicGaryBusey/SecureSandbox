@@ -40,6 +40,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.morning_preflight = (
             ROOT / "scripts/harness-lifecycle-acceptance-morning-preflight.py"
         ).read_text()
+        cls.closed_inventory = (
+            ROOT / "scripts/harness-lifecycle-acceptance-parallels-closed-inventory.py"
+        ).read_text()
         cls.bootstrap_diagnostics = (
             ROOT / "scripts/run-host-bootstrap-with-diagnostics.sh"
         ).read_text()
@@ -177,7 +180,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '"bootstrap_trust_root": bootstrap_trust_root',
             'preflight_bootstrap_trust_root_invalid',
             'SUPERVISOR.require_gui_closed()',
-            'vm_states = SUPERVISOR.vm_inventory(allow_all_absent=installed_count == 0)',
+            'vm_states = SUPERVISOR.vm_inventory(',
+            'closed_vm_inventory_receipt=args.closed_stopped_vm_inventory',
+            'validated_closed_stopped_vm_inventory(',
+            '"closed-stopped-inventory-receipt"',
             '"touch_id_authorization_ready": False',
             '"next_authorization": "none" if protected_ready else "root-password"',
             '"bootstrap-root-owned-exact-commit-host-installer"',
@@ -188,6 +194,17 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             "prlctl start", "prlctl stop", "subprocess.Popen",
         ):
             self.assertNotIn(forbidden, self.morning_preflight)
+        for phrase in (
+            'PREFLIGHT.source_checkout(runner=runner)',
+            'initial_pids = process_ids("prl_client_app", runner=runner)',
+            'if process_ids("prl_client_app", runner=runner) != (gui_pid,):',
+            'vm_states != {',
+            '"gateway": "stopped", "research": "stopped", "target": "stopped"',
+            'process_ids("prl_vm_app", runner=runner)',
+            '"authority": "none"',
+            'PREFLIGHT.write_preflight_receipt(',
+        ):
+            self.assertIn(phrase, self.closed_inventory)
 
     def test_operator_handoff_is_collision_closed_and_queries_next_before_auth(self):
         for phrase in (

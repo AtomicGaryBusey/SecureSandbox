@@ -136,6 +136,16 @@ class RollbackReleaseBinding(NamedTuple):
     authorized_target_plan_sha256: str
 
 
+def retained_candidate_residue_name(name: str) -> bool:
+    """Recognize only inert build custody left by our bounded builders."""
+    return (
+        re.fullmatch(r"\.candidate\.[A-Za-z0-9]{6}", name) is not None
+        or re.fullmatch(
+            r"\.secure-sandbox-retained-[0-9]+-[0-9a-f]{24}", name,
+        ) is not None
+    )
+
+
 def prepare_touchid_ui(*, require_developer_id: bool = False) -> None:
     if require_developer_id and not os.environ.get(
         "SECURE_SANDBOX_DEVELOPER_ID"
@@ -340,12 +350,13 @@ def retained_native_host_candidate_product(
             raise RuntimeError(
                 "native_host_candidate_replay_inventory_invalid"
             ) from error
-        if re.fullmatch(r"\.candidate\.[A-Za-z0-9]{6}", retained.name):
+        if retained_candidate_residue_name(retained.name):
             # Power loss can strand mktemp build custody before the driver's
-            # trap runs.  The exact trusted temp-directory class is inert
-            # retained evidence: it is never parsed as candidate authority and
-            # is never deleted by replay.  Anything outside this narrow class
-            # remains a closed-inventory failure.
+            # trap runs, while safe cleanup deliberately preserves a captured
+            # tree under the exact retained-evidence name. These two narrow
+            # directory classes are inert: neither is parsed as candidate
+            # authority nor deleted by replay. Anything else remains a
+            # closed-inventory failure.
             if (not stat.S_ISDIR(retained_info.st_mode)
                     or stat.S_ISLNK(retained_info.st_mode)
                     or retained_info.st_uid != os.geteuid()
@@ -517,7 +528,7 @@ def unbound_native_host_candidate_product() -> NativeHostCandidate | None:
             raise RuntimeError(
                 "native_host_candidate_import_inventory_invalid"
             ) from error
-        if re.fullmatch(r"\.candidate\.[A-Za-z0-9]{6}", retained.name):
+        if retained_candidate_residue_name(retained.name):
             if (not stat.S_ISDIR(retained_info.st_mode)
                     or stat.S_ISLNK(retained_info.st_mode)
                     or retained_info.st_uid != os.geteuid()

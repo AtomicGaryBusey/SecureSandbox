@@ -921,15 +921,20 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(observed, candidate)
         build.assert_not_called()
 
-    def test_candidate_schema_replay_skips_trusted_power_loss_build_residue(self):
+    def test_candidate_schema_replay_skips_trusted_retained_build_residue(self):
         manager_path, _build_result, candidate = self.retained_candidate_fixture()
         repo = manager_path.parent.parent
-        residue = (
+        power_loss_residue = (
             repo / ".private/native-host-product-candidates"
             / ".candidate.7zHjFM"
         )
-        residue.mkdir(mode=0o700)
-        (residue / "incomplete-build-evidence").write_bytes(b"partial")
+        retained_evidence = (
+            repo / ".private/native-host-product-candidates"
+            / (".secure-sandbox-retained-12345-" + "a" * 24)
+        )
+        for residue in (power_loss_residue, retained_evidence):
+            residue.mkdir(mode=0o700)
+            (residue / "incomplete-build-evidence").write_bytes(b"partial")
         public = {
             "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
             "required_feature": "native-host-candidate-admission-v1",
@@ -966,7 +971,8 @@ class DeployHostControllerTests(unittest.TestCase):
         record.assert_called_once_with(
             repo, Path(candidate.generation_path),
         )
-        self.assertTrue(residue.is_dir())
+        self.assertTrue(power_loss_residue.is_dir())
+        self.assertTrue(retained_evidence.is_dir())
 
     def test_candidate_schema_replay_rejects_untrusted_build_residue(self):
         manager_path, _build_result, _candidate = self.retained_candidate_fixture()
@@ -1134,6 +1140,13 @@ class DeployHostControllerTests(unittest.TestCase):
             / ".private/native-host-product-candidates"
         )
         retained_root.chmod(0o700)
+        retained_evidence = retained_root / (
+            ".secure-sandbox-retained-12345-" + "a" * 24
+        )
+        retained_evidence.mkdir(mode=0o700)
+        (retained_evidence / "incomplete-build-evidence").write_bytes(
+            b"partial"
+        )
         values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
         with (
             mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
@@ -1171,6 +1184,7 @@ class DeployHostControllerTests(unittest.TestCase):
             expected_native_host_candidate=candidate.record(),
         )
         build.assert_not_called()
+        self.assertTrue(retained_evidence.is_dir())
 
     def test_fresh_candidate_import_rejects_ambiguous_authority(self):
         manager_path, _build_result, first = self.retained_candidate_fixture()

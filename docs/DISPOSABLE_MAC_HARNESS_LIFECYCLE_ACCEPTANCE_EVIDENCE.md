@@ -503,6 +503,24 @@ On November 16 the operator reported that the Neo had been updated to macOS
 state only; the next Neo-local continuation must independently read back and
 bind the OS build before it can become physical campaign evidence.
 
+The resumed Neo-local readback independently confirmed macOS 27.2.1 build
+`26B131`, model `Mac17,5`, the exact stopped three-VM inventory, the retained
+campaign bound to source `b3e178f`, three raw bootstrap records, and zero
+observations. The exact `6389010` replacement
+protected release installed and all ten closures verified. Its first
+no-delete retention attempt failed closed before plan publication because the
+isolated predecessor diagnostic reused the production one-hour raw freshness
+window after a roughly three-hour pause. The live campaign and every raw byte
+remain unchanged. The repair validates the canonical Host and Research
+receipts at their identical historical observation time while independently
+rejecting future or mismatched time; it does not weaken the live projector.
+The real-byte candidate diagnostic then reached the legacy readiness check and
+exposed that its unprivileged process saw all root-owned predecessor payloads
+as wrong-owner source, rather than reproducing the original root projector's
+two intentionally absent Host installers. The isolated diagnostic now fixes
+only the legacy UID probe while the current verifier still proves both actual
+root-owned manifest closures.
+
 On November 16, a release-Mac install of reviewed commit `72e625a` lost its
 caller response after publishing an exact ordinary PENDING pair, and the
 operator cancelled the subsequent administrator-password prompt. The generic

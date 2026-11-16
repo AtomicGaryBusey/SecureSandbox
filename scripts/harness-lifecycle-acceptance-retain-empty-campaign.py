@@ -269,6 +269,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 try:
     release = Path(sys.argv[1])
@@ -277,10 +278,11 @@ try:
     observations = Path(sys.argv[4])
     raw_directory = Path(sys.argv[5])
     now = int(sys.argv[6])
-    expected_case = sys.argv[7]
-    expected_error = sys.argv[8]
-    replacement_commit = sys.argv[9]
-    diagnostic_schema = sys.argv[10]
+    historical_observed_at = int(sys.argv[7])
+    expected_case = sys.argv[8]
+    expected_error = sys.argv[9]
+    replacement_commit = sys.argv[10]
+    diagnostic_schema = sys.argv[11]
 
     sys.path.insert(0, str(release / "shared"))
     entrypoint = release / "scripts/harness-lifecycle-acceptance-bootstrap.py"
@@ -296,15 +298,25 @@ try:
         module.trusted_json(campaign_path), now, allow_expired=True,
     )
     case = module.ACCEPTANCE_CLI.case_record(module.CASE_BY_ID[expected_case])
+    if not 0 < historical_observed_at <= now + 300:
+        raise RuntimeError("historical_observed_at_invalid")
+    for kind in ("host-install-readback", "research-install-readback"):
+        historical_receipt = module.trusted_json(
+            raw_directory / module.CASE_FILES[expected_case][kind],
+        )
+        if historical_receipt.get("observed_at") != historical_observed_at:
+            raise RuntimeError("historical_observed_at_mismatch")
     _paths, raw_values = module.raw_set(
-        campaign, case, raw_directory, now,
+        campaign, case, raw_directory, historical_observed_at,
     )
     if os.listdir(observations):
         raise RuntimeError("observations_not_empty")
 
-    readiness = module.ACCEPTANCE_CLI.driver_readiness(
-        release, source_commit=campaign["source_commit"],
-    )
+    with mock.patch.object(
+            module.ACCEPTANCE_CLI.os, "geteuid", return_value=0):
+        readiness = module.ACCEPTANCE_CLI.driver_readiness(
+            release, source_commit=campaign["source_commit"],
+        )
     expected_missing = {
         "host-provenance-fixture": [
             "scripts/install-harness-lifecycle-acceptance-host.sh",
@@ -849,6 +861,25 @@ def _validate_protected_projection_diagnostic(
         )
 
 
+def historical_raw_observed_at(
+        raw_directory: Path, uid: int, now: int,
+        ) -> int:
+    observed: list[int] = []
+    for kind in ("host-install-readback", "research-install-readback"):
+        value = _trusted_canonical_record(
+            raw_directory / OWNER_PROJECTION_RAW_FILES[kind],
+            uid, "retention_historical_raw",
+        )
+        timestamp = value.get("observed_at")
+        if (not isinstance(timestamp, int) or isinstance(timestamp, bool)
+                or timestamp <= 0 or timestamp > now + 300):
+            raise RetentionError("retention_historical_raw_time_invalid")
+        observed.append(timestamp)
+    if len(set(observed)) != 1:
+        raise RetentionError("retention_historical_raw_time_invalid")
+    return observed[0]
+
+
 def confirm_protected_projection_failure(
         campaign: dict[str, Any], observations: Path, now: int,
         replacement_source_commit: str,
@@ -864,6 +895,9 @@ def confirm_protected_projection_failure(
         ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
         / replacement_source_commit
     )
+    historical_observed = historical_raw_observed_at(
+        raw_directory, os.geteuid(), now,
+    )
     try:
         completed = subprocess.run(
             [
@@ -872,7 +906,8 @@ def confirm_protected_projection_failure(
                 str(release), str(replacement_release),
                 str(observations.parent / "campaign.json"),
                 str(observations), str(raw_directory), str(now),
-                RESERVED_CASE_ID, PROTECTED_PROJECTION_EXPECTED_ERROR,
+                str(historical_observed), RESERVED_CASE_ID,
+                PROTECTED_PROJECTION_EXPECTED_ERROR,
                 replacement_source_commit,
                 PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA,
             ],

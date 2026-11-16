@@ -749,6 +749,23 @@ expects root-owned observations. The self-digested plan records that diagnostic
 and atomically retains every byte. It never changes ownership or permissions,
 and it cannot accept a caller-selected case, file set, or error.
 
+The fourth literal `retain-protected-projection-rejection` command accepts only
+the physically observed three-raw/zero-observation bootstrap layout. Its
+isolated predecessor diagnostic validates those historical receipts at their
+common, campaign-bound `observed_at` rather than reusing the one-hour live
+projector window. The parent and isolated child independently require the same
+exact timestamp, reject boolean, nonpositive, mismatched, or future values,
+and then let the predecessor's unchanged receipt validators enforce campaign
+bounds and every canonical digest. This exception is retention-only: ordinary
+collection and projection keep their live one-hour freshness gate. The
+diagnostic also verifies all ten predecessor and replacement protected driver
+closures and binds both manifests before the no-overwrite move. Because the
+retention process is deliberately unprivileged, its isolated diagnostic fixes
+only the predecessor readiness function's UID observation to root to reproduce
+the original root-projector branch. It grants no filesystem authority; the
+current verifier separately requires the actual releases, payloads, and
+manifests to remain root-owned and immutable.
+
 ## Disposable recovery fixture driver
 
 `scripts/harness-lifecycle-acceptance-recovery.py` implements the recovery

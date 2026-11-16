@@ -1025,6 +1025,13 @@ in ignored local records, not in this file.
   install the repaired release and initialize a fresh campaign. Recollect the
   bootstrap case once under that replacement binding and project only through
   its exact protected release; never remove the failed zero-byte command result.
+  Physical execution confirmed the exact three-raw/zero-observation layout and
+  both protected manifests, but the first retention attempt failed before plan
+  publication because its predecessor diagnostic accidentally reused the
+  one-hour live raw freshness window. Publish the retention-only historical-time
+  repair and the isolated legacy root-UID readiness reproduction, install that
+  exact replacement manifest, retain and independently verify the still-
+  unchanged campaign, then continue with fresh initialization.
   The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

@@ -222,6 +222,18 @@ not rebound to the repaired release. A fourth retention-only ceremony instead
 preserves the exact three raw records and zero observations, reproduces the
 legacy readiness mismatch, verifies all ten protected driver closures in both
 the predecessor and replacement root-owned releases, and binds both manifests.
+Physical retention after an extended pause exposed that the first diagnostic
+still passed the current wall clock into the predecessor's one-hour live raw
+validator. The retention-only bridge now derives the exact common historical
+`observed_at` from both canonical receipts, rejects mismatched or future time,
+and makes the isolated predecessor re-read and require that same value before
+validation. Production collector and projector freshness is unchanged.
+The same physical diagnostic also showed that an unprivileged retention child
+cannot directly reproduce a root projector's source-readiness result: every
+real root-owned payload is otherwise classified as wrong-owner source. The
+isolated child now fixes only that legacy UID observation to root, while the
+current manifest verifier independently proves the actual root ownership,
+modes, inventory, and bytes of both releases. No child gains root authority.
 After independent retention verification, a fresh replacement-bound campaign
 collects again and uses only its own protected projector.
 

@@ -255,6 +255,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             path = reservation / retention.OWNER_PROJECTION_RAW_FILES[kind]
             path.write_bytes(acceptance.canonical({
                 "kind": kind, "surface": "raw",
+                "observed_at": self.campaign["created_at"],
             }))
             path.chmod(0o600)
 
@@ -653,6 +654,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
     def test_protected_projection_diagnostic_binds_both_protected_releases(self):
         now = int(time.time())
         replacement = "b" * 40
+        self.seed_protected_projection()
         value = self.protected_projection_diagnostic(
             self.campaign, self.root / "observations", now, replacement,
         )
@@ -668,6 +670,18 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         command = runner.call_args.args[0]
         protected_root = retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT
         self.assertEqual(command[:3], ["/usr/bin/python3", "-I", "-c"])
+        self.assertIn(
+            'historical_receipt = module.trusted_json(', command[3],
+        )
+        self.assertIn(
+            'historical_receipt.get("observed_at") '
+            '!= historical_observed_at',
+            command[3],
+        )
+        self.assertIn(
+            'module.ACCEPTANCE_CLI.os, "geteuid", return_value=0',
+            command[3],
+        )
         self.assertEqual(
             command[4],
             str(protected_root / "releases" / self.campaign["source_commit"]),
@@ -681,8 +695,54 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             command[8],
             str(self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID),
         )
-        self.assertEqual(command[12], replacement)
+        self.assertEqual(command[10], str(self.campaign["created_at"]))
+        self.assertEqual(command[13], replacement)
         self.assertEqual(runner.call_args.kwargs["cwd"], "/")
+
+    def test_historical_raw_time_survives_live_freshness_window(self):
+        self.seed_protected_projection()
+        raw = (
+            self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID
+        )
+        observed = retention.historical_raw_observed_at(
+            raw, os.geteuid(), self.campaign["created_at"] + 7200,
+        )
+        self.assertEqual(observed, self.campaign["created_at"])
+
+    def test_historical_raw_time_rejects_future_or_mismatched_receipts(self):
+        self.seed_protected_projection()
+        raw = (
+            self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID
+        )
+        research = (
+            raw / retention.OWNER_PROJECTION_RAW_FILES[
+                "research-install-readback"
+            ]
+        )
+        value = json.loads(research.read_bytes())
+        value["observed_at"] += 1
+        research.write_bytes(acceptance.canonical(value))
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_historical_raw_time_invalid"):
+            retention.historical_raw_observed_at(
+                raw, os.geteuid(), int(time.time()),
+            )
+
+        value["observed_at"] = int(time.time()) + 301
+        research.write_bytes(acceptance.canonical(value))
+        host = raw / retention.OWNER_PROJECTION_RAW_FILES[
+            "host-install-readback"
+        ]
+        host_value = json.loads(host.read_bytes())
+        host_value["observed_at"] = value["observed_at"]
+        host.write_bytes(acceptance.canonical(host_value))
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_historical_raw_time_invalid"):
+            retention.historical_raw_observed_at(
+                raw, os.geteuid(), int(time.time()),
+            )
 
     def test_protected_projection_diagnostic_rejects_replacement_mismatch(self):
         self.seed_protected_projection()

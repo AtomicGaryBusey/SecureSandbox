@@ -149,15 +149,122 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             )
         self.assertEqual(projected["recorded_observation_kinds"], case["evidence_kinds"])
         for kind in case["evidence_kinds"]:
-            value = json.loads(
-                (self.observations / f"{case['case_id']}.{kind}.json").read_bytes(),
-            )
+            path = self.observations / f"{case['case_id']}.{kind}.json"
+            value = json.loads(path.read_bytes())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 value["evidence"]["artifacts"][0]["authority"],
                 bootstrap.AUTHORITIES[kind],
             )
             acceptance.validate_observation(
                 value, self.campaign, acceptance.CASE_BY_ID[case["case_id"]],
+            )
+
+    def test_protected_projector_requests_root_read_only_publication(self):
+        case = self.case("bootstrap-clean-install")
+        raw_values = {
+            kind: acceptance.canonical({"kind": kind})
+            for kind in case["evidence_kinds"]
+        }
+        observations = [
+            {
+                "observation_sha256": str(index) * 64,
+            }
+            for index, _kind in enumerate(case["evidence_kinds"], start=1)
+        ]
+        with mock.patch.object(bootstrap.os, "geteuid", return_value=0), \
+                self.preflight_patch(case) as preflight, \
+                mock.patch.object(bootstrap, "raw_set_at",
+                                  return_value=raw_values) as raw_set, \
+                mock.patch.object(bootstrap, "write_snapshot"), \
+                mock.patch.object(bootstrap.OBSERVER, "observe",
+                                  side_effect=observations) as observe, \
+                mock.patch.object(bootstrap, "publish_staged_at") as publish:
+            result = bootstrap.project(
+                self.campaign_path, self.observations, case["case_id"],
+                self.raw, NOW, operator_uid=501,
+            )
+        self.assertEqual(result["recorded_observation_kinds"],
+                         case["evidence_kinds"])
+        preflight.assert_called_once_with(
+            self.campaign_path, self.observations, case["case_id"], NOW,
+            operator_uid=501, protected_projection=True,
+            observations_descriptor=mock.ANY,
+        )
+        raw_set.assert_called_once_with(
+            self.campaign, case, mock.ANY, NOW, 501,
+        )
+        self.assertTrue(observe.call_args_list)
+        self.assertTrue(all(
+            call.kwargs["output_mode"] == 0o444
+            for call in observe.call_args_list
+        ))
+        self.assertTrue(publish.call_args_list)
+        self.assertTrue(all(
+            call.kwargs["mode"] == 0o444
+            for call in publish.call_args_list
+        ))
+
+    def test_protected_publication_uses_open_directory_descriptor(self):
+        target = self.root / "published"
+        target.mkdir(mode=0o700)
+        descriptor = bootstrap.open_private_directory(
+            target, "test_observations", target.stat().st_uid,
+        )
+        try:
+            staged = self.root / "staged.json"
+            staged.write_bytes(acceptance.canonical({"status": "verified"}))
+            staged.chmod(0o600)
+            bootstrap.publish_staged_at(
+                staged, descriptor, "evidence.json", mode=0o444,
+            )
+            self.assertEqual(
+                (target / "evidence.json").read_bytes(), staged.read_bytes(),
+            )
+            self.assertEqual(
+                (target / "evidence.json").stat().st_mode & 0o777, 0o444,
+            )
+        finally:
+            bootstrap.os.close(descriptor)
+
+    def test_protected_publication_does_not_follow_substituted_parent(self):
+        original = self.root / "original-observations"
+        moved = self.root / "moved-observations"
+        substituted = self.root / "substituted-observations"
+        original.mkdir(mode=0o700)
+        substituted.mkdir(mode=0o700)
+        descriptor = bootstrap.open_private_directory(
+            original, "test_observations", original.stat().st_uid,
+        )
+        try:
+            identity = bootstrap.directory_identity(bootstrap.os.fstat(descriptor))
+            original.rename(moved)
+            original.symlink_to(substituted, target_is_directory=True)
+            staged = self.root / "staged-race.json"
+            staged.write_bytes(acceptance.canonical({"status": "verified"}))
+            staged.chmod(0o600)
+            bootstrap.publish_staged_at(
+                staged, descriptor, "evidence.json", mode=0o444,
+            )
+            self.assertTrue((moved / "evidence.json").is_file())
+            self.assertFalse((substituted / "evidence.json").exists())
+            self.assertNotEqual(
+                identity,
+                bootstrap.directory_identity(original.lstat()),
+            )
+        finally:
+            bootstrap.os.close(descriptor)
+
+    def test_operator_uid_requires_root_context(self):
+        case = self.case("bootstrap-clean-install")
+        with mock.patch.object(bootstrap.os, "geteuid", return_value=501), \
+                self.assertRaisesRegex(
+                    bootstrap.BootstrapError,
+                    "bootstrap_protected_projection_context_required",
+                ):
+            bootstrap.project(
+                self.campaign_path, self.observations, case["case_id"],
+                self.raw, NOW, operator_uid=501,
             )
 
     def test_production_scan_binds_clean_enrollment_and_projects_both_kinds(self):
@@ -250,6 +357,8 @@ class BootstrapAcceptanceTests(unittest.TestCase):
         self.assertIn("HOST_RELEASE.verify(", source)
         self.assertIn('control("harness-generation-status")', source)
         self.assertIn('control("harness-generation-verify-boundary")', source)
+        self.assertIn("bootstrap_protected_release_required", source)
+        self.assertIn('project_command.add_argument("--operator-uid"', source)
 
 
 if __name__ == "__main__":

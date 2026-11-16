@@ -997,6 +997,14 @@ in ignored local records, not in this file.
   the exact empty reservation, install the replacement protected release, and
   initialize a fresh campaign before collecting again. Never remove or reuse
   the reserved directory.
+  The replacement campaign subsequently completed that collection, but the
+  source projector produced owner-mode `0600` observations and production
+  `next` correctly rejected them. Publish the exact protected root projector
+  and the distinct `retain-owner-projected-bootstrap` no-delete continuation;
+  retain and independently verify all three raw and three projected records,
+  install the corrected release, initialize a fresh campaign, collect once,
+  and project only through the exact installed release as root. Verify all
+  three observations are root-owned mode `0444` before advancing.
   The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

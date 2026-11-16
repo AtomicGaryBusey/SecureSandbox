@@ -195,6 +195,20 @@ process with an allowlisted environment, reconstructs a live verified
 Host receipt, and requires that old validator to reproduce the exact rejection
 before the plan can be written.
 
+The next physical replay completed collection but invoked the projector from
+the source checkout. That correctly produced operator-owned mode-`0600` test
+records, which production status rejected because physical observations must
+be root-owned mode `0444`. Bootstrap projection now follows the same split as
+the other protected drivers: source projection remains explicitly untrusted,
+while the exact installed campaign release may run a root ceremony that reads
+the operator-owned inputs and publishes immutable observations. A third
+retention ceremony preserves the exact failed raw and projected bytes, proves
+the predecessor rejection in isolation, and moves the campaign without
+permission repair, overwrite, or deletion.
+Security review then closed the owner-to-root pathname race by anchoring raw
+reads and observation publication to open validated directory descriptors,
+with final named-path identity readback and a substitution regression.
+
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from
 `<repo>/shared`, while the transactional guest closure installs dependencies

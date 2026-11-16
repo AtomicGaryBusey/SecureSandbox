@@ -198,6 +198,32 @@ and replacement commits; never rerun the mutating command speculatively.
 A nonempty reservation or any projected observation remains ineligible. Stop
 and design a continuation that preserves the actual bytes.
 
+#### Retaining the exact owner-projected bootstrap failure
+
+One further fixed continuation exists only when the first collector completed
+and the source projector created exactly the three suite-assigned
+`bootstrap-clean-install` observations as operator-owned mode `0600`. Do not
+change their modes or owners, remove them, rerun collection, or invoke the
+projector again. After publishing the correction, run
+`retain-owner-projected-bootstrap` with the exact campaign UUID and source
+commit plus the literal acknowledgement shown by `--help`.
+
+The command requires exactly three canonical raw files in the fixed bootstrap
+case directory and exactly three canonical projected observations, all private
+and operator-owned, with no other raw or observation entry. In a fresh isolated
+Python process it loads the exact protected predecessor, revalidates every raw
+and observation binding, and requires production `next` to reproduce
+`input_file_untrusted`. It then writes a self-digested plan and atomically moves
+the whole campaign without deletion or overwrite. If the move is ambiguous,
+use `verify-owner-projected-bootstrap`; do not rerun retention speculatively.
+
+After the retained campaign verifies and the corrected release is installed,
+initialize a fresh campaign and collect the first case exactly once. Project
+it only through the exact installed protected release as root, passing the
+operator UID with `--operator-uid`. The source checkout command remains a
+non-authoritative mode-`0600` test surface. Read back that all three physical
+observations are root-owned mode `0444` before asking `next` to advance.
+
 Do not place Developer ID private keys, Apple notarization credentials,
 1Password service credentials, or provider credentials on the disposable Mac.
 Copy one public native-Host candidate directory exported from the trusted

@@ -705,9 +705,23 @@ observation still validates and binds the same primary and supporting raw
 digests. A rejected collection leaves its reserved raw directory intact for
 failure retention and cannot be silently reused.
 
+The normal source projector deliberately emits only owner-mode `0600` records;
+that surface is useful for source testing but is never physical acceptance
+authority. Physical bootstrap projection is a separate root ceremony. The
+exact protected release named by the campaign must run as root with the
+operator UID supplied only to locate and validate the owner-private campaign,
+raw, and observation directories. It publishes each record once as root-owned
+mode `0444`. The ordinary acceptance status path continues to require those
+root/read-only files, so invoking the source projector can never promote its
+own output into trusted evidence. The protected projector opens and validates
+the operator-owned raw and observation directories once, performs inventory
+reads, publication, and fsync relative to those descriptors, and rejects
+success unless both named paths still resolve to the same directory identities.
+It never re-resolves an operator-mutable parent for a root write.
+
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only
-tool therefore has two disjoint ceremonies. Its original command accepts only
+tool therefore has three disjoint ceremonies. Its original command accepts only
 a completely empty campaign. A separate literal
 `retain-reserved-bootstrap` command accepts only one empty private
 `raw/bootstrap/bootstrap-clean-install` reservation, zero observations, no
@@ -722,6 +736,18 @@ diagnostic, the empty-reservation state, and error, then
 atomically retains the entire campaign without deletion or overwrite. The
 ordinary command continues to reject every raw case entry; the reserved path
 cannot be generalized by caller-selected case or error fields.
+
+The third literal `retain-owner-projected-bootstrap` command exists only for
+the physically observed case in which collection succeeded but the source
+projector wrote all three clean-install observations as operator-owned mode
+`0600`. It requires the exact three suite-fixed raw files and exact three
+suite-fixed observations, with canonical JSON, private ownership and modes,
+and no other evidence. Before retention, a fresh isolated interpreter loads
+the exact installed predecessor, revalidates every raw-to-observation digest,
+and requires production `next` to reproduce `input_file_untrusted` when it
+expects root-owned observations. The self-digested plan records that diagnostic
+and atomically retains every byte. It never changes ownership or permissions,
+and it cannot accept a caller-selected case, file set, or error.
 
 ## Disposable recovery fixture driver
 

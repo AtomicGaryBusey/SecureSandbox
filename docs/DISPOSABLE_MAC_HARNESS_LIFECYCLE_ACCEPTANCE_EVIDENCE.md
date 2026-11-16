@@ -1,8 +1,9 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: the latest exact-commit campaign on the disposable Neo reached its
-first protected collector. That collector reserved the first raw case and
-rejected before writing an artifact; no acceptance verdict has been issued.
+Status: the latest exact-commit campaign on the disposable Neo completed its
+first protected collection, then exposed an authority-boundary defect in the
+source projector. The raw records and three owner-mode projected observations
+remain preserved in place; no acceptance verdict has been issued.
 The protected Host bootstrap, three-VM installation, host-key
 enrollment, protected acceptance-driver installation, and retained fail-closed
 upgrade attempts are physical preparation evidence.
@@ -94,6 +95,35 @@ Its plan embeds a diagnostic produced by rerunning, in a fresh isolated Python
 process with an allowlisted environment, the exact installed
 predecessor's read-only Host verification and reproducing the same rejection;
 the classification is therefore not based only on operator recollection.
+
+That failed campaign was retained and independently verified. A corrected
+ten-driver protected release was installed and a fresh exact-source campaign
+initialized. Its read-only Research prerequisite again proved role `research`,
+an open zero-generation store, no pending recovery, and an independently
+matching boundary. The first collector then succeeded once and wrote the exact
+three raw clean-install records. The source projector also produced all three
+validly bound observations, but—as designed for a non-authoritative source
+surface—created them operator-owned mode `0600`. Production `next` correctly
+rejected those files with `input_file_untrusted`, because physical observations
+must be root-owned mode `0444`.
+
+This is retained failure evidence, not a reason to repair permissions in
+place. The correction adds an exact-installed-release root projection ceremony
+and leaves source projection untrusted. A third no-delete retention ceremony
+accepts only this exact three-raw/three-observation layout, replays the
+predecessor's raw and observation validators in an isolated interpreter, and
+requires the same production rejection before moving the complete campaign.
+No file is overwritten, deleted, `chown`ed, or `chmod`ed. After independent
+verification, a fresh campaign can collect once and use the protected
+projector to create root/read-only observations.
+
+Security review of the first protected-projector patch found a same-UID parent
+substitution race between pathname validation and root publication. The
+projector now keeps the validated raw and observation directory descriptors
+open through inventory, creation, and fsync, uses only descriptor-relative
+file operations for protected inputs and outputs, and requires final named-path
+identity equality. A regression renames and replaces the parent after opening
+it and proves the root write remains confined to the original descriptor.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

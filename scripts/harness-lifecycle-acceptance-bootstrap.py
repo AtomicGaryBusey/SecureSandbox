@@ -121,11 +121,81 @@ ENROLLER = load_script(
 PRODUCTION_HOME_PATHS = ENROLLER.PROVIDER_HOME_PATHS
 
 
-def private_directory(path: Path, label: str) -> None:
+def private_directory(path: Path, label: str,
+                      expected_uid: int | None = None) -> None:
     info = path.lstat()
+    owner = os.geteuid() if expected_uid is None else expected_uid
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+            or info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700):
         raise BootstrapError(f"{label}_untrusted")
+
+
+def open_private_directory(path: Path, label: str, expected_uid: int) -> int:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as error:
+        raise BootstrapError(f"{label}_untrusted") from error
+    info = os.fstat(descriptor)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        os.close(descriptor)
+        raise BootstrapError(f"{label}_untrusted")
+    return descriptor
+
+
+def directory_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+
+def trusted_json_at(parent: int, name: str, *, expected_uid: int,
+                    expected_mode: int, maximum: int = MAX_JSON
+                    ) -> tuple[dict[str, Any], bytes, os.stat_result]:
+    if "/" in name or name in {"", ".", ".."}:
+        raise BootstrapError("bootstrap_input_untrusted")
+    try:
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            chunks = bytearray()
+            while len(chunks) <= maximum:
+                chunk = os.read(
+                    descriptor, min(65536, maximum + 1 - len(chunks)),
+                )
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise BootstrapError("bootstrap_input_untrusted") from error
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != expected_mode
+            or not 0 < before.st_size <= maximum
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or len(chunks) != opened.st_size or len(chunks) > maximum):
+        raise BootstrapError("bootstrap_input_untrusted")
+    raw = bytes(chunks)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BootstrapError("bootstrap_input_untrusted") from error
+    if not isinstance(value, dict) or canonical(value) != raw:
+        raise BootstrapError("bootstrap_input_untrusted")
+    return value, raw, opened
 
 
 def reserve_case(root: Path, case_id: str) -> Path:
@@ -142,17 +212,23 @@ def reserve_case(root: Path, case_id: str) -> Path:
     return destination
 
 
-def trusted_json(path: Path, maximum: int = MAX_JSON) -> dict[str, Any]:
+def trusted_json(path: Path, maximum: int = MAX_JSON,
+                 expected_uid: int | None = None) -> dict[str, Any]:
     try:
-        return SUPERVISOR.trusted_json(path, maximum)
-    except SUPERVISOR.SupervisorError as error:
+        return ACCEPTANCE_CLI.trusted_json(
+            path, maximum, expected_uid=expected_uid,
+        )
+    except AcceptanceError as error:
         raise BootstrapError("bootstrap_input_untrusted") from error
 
 
 def next_bootstrap_case(campaign: dict[str, Any], observations: Path,
-                        case_id: str) -> dict[str, Any]:
+                        case_id: str, operator_uid: int) -> dict[str, Any]:
     try:
-        value = ACCEPTANCE_CLI.next_case(campaign, observations)
+        value = ACCEPTANCE_CLI.next_case(
+            campaign, observations, observation_uid=0,
+            directory_uid=operator_uid,
+        )
     except (AcceptanceError, OSError) as error:
         raise BootstrapError("bootstrap_case_status_invalid") from error
     case = value.get("case")
@@ -168,17 +244,95 @@ def next_bootstrap_case(campaign: dict[str, Any], observations: Path,
     return case
 
 
+def next_bootstrap_case_at(campaign: dict[str, Any], observations: int,
+                           case_id: str) -> dict[str, Any]:
+    entries = set(os.listdir(observations))
+    expected = {
+        f"{case.case_id}.{kind}.json"
+        for case in ACCEPTANCE_CLI.CASES for kind in case.evidence_kinds
+    }
+    if not entries <= expected:
+        raise BootstrapError("bootstrap_case_status_invalid")
+    next_id = None
+    for suite_case in ACCEPTANCE_CLI.CASES:
+        missing = False
+        for kind in suite_case.evidence_kinds:
+            name = f"{suite_case.case_id}.{kind}.json"
+            if name not in entries:
+                missing = True
+                continue
+            value, _raw, _info = trusted_json_at(
+                observations, name, expected_uid=0, expected_mode=0o444,
+            )
+            try:
+                validate_observation(value, campaign, suite_case)
+            except AcceptanceError as error:
+                raise BootstrapError("bootstrap_case_status_invalid") from error
+            if value.get("kind") != kind:
+                raise BootstrapError("bootstrap_case_status_invalid")
+        present = any(
+            f"{suite_case.case_id}.{kind}.json" in entries
+            for kind in suite_case.evidence_kinds
+        )
+        if missing:
+            if next_id is None:
+                next_id = suite_case.case_id
+            elif present:
+                raise BootstrapError("bootstrap_case_status_invalid")
+        elif next_id is not None:
+            raise BootstrapError("bootstrap_case_status_invalid")
+    expected_case = CASE_BY_ID.get(case_id)
+    expected_record = (
+        ACCEPTANCE_CLI.case_record(expected_case)
+        if expected_case is not None else None
+    )
+    if (next_id != case_id or expected_case is None
+            or expected_case.category != "bootstrap"
+            or expected_case.expected != "passed"
+            or expected_record is None
+            or expected_record.get("procedure", {}).get("driver")
+               != "clean-machine-bootstrap"
+            or case_id not in CASE_FILES
+            or list(expected_case.evidence_kinds) != list(CASE_FILES[case_id])):
+        raise BootstrapError("bootstrap_case_not_next")
+    return expected_record
+
+
 def preflight(campaign_path: Path, observations: Path,
-              case_id: str, now: int) -> tuple[dict[str, Any], dict[str, Any]]:
+              case_id: str, now: int, *, operator_uid: int | None = None,
+              protected_projection: bool = False,
+              observations_descriptor: int | None = None,
+              ) -> tuple[dict[str, Any], dict[str, Any]]:
+    owner = os.geteuid() if operator_uid is None else operator_uid
     try:
-        campaign = validate_campaign(trusted_json(campaign_path), now)
-        SUPERVISOR.verify_source_checkout(campaign)
+        campaign = validate_campaign(
+            trusted_json(campaign_path, expected_uid=owner), now,
+        )
+        if protected_projection:
+            expected_root = (
+                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / campaign["source_commit"]
+            )
+            if (ROOT.resolve(strict=True) != expected_root
+                    or os.geteuid() != 0
+                    or ACCEPTANCE_CLI.driver_readiness(
+                        ROOT, source_commit=campaign["source_commit"],
+                    ).get("campaign_initialization_allowed") is not True):
+                raise BootstrapError("bootstrap_protected_release_required")
+        else:
+            SUPERVISOR.verify_source_checkout(campaign)
         machine = SUPERVISOR.current_machine_identity()
-    except (AcceptanceError, SUPERVISOR.SupervisorError) as error:
+    except (AcceptanceError, OSError, SUPERVISOR.SupervisorError) as error:
         raise BootstrapError("bootstrap_preflight_failed") from error
     if machine != campaign["machine_identity_sha256"]:
         raise BootstrapError("bootstrap_machine_identity_mismatch")
-    return campaign, next_bootstrap_case(campaign, observations, case_id)
+    if protected_projection:
+        if observations_descriptor is None:
+            raise BootstrapError("bootstrap_observation_directory_untrusted")
+        return campaign, next_bootstrap_case_at(
+            campaign, observations_descriptor, case_id,
+        )
+    return campaign, next_bootstrap_case(campaign, observations, case_id, owner)
 
 
 def control(operation: str) -> dict[str, Any]:
@@ -487,14 +641,20 @@ def collect(campaign_path: Path, observations: Path, case_id: str,
 
 
 def raw_set(campaign: dict[str, Any], case: dict[str, Any],
-            raw_directory: Path, now: int) -> tuple[dict[str, Path], dict[str, bytes]]:
-    private_directory(raw_directory, "bootstrap_raw_directory")
+            raw_directory: Path, now: int, *, raw_uid: int | None = None
+            ) -> tuple[dict[str, Path], dict[str, bytes]]:
+    private_directory(
+        raw_directory, "bootstrap_raw_directory", expected_uid=raw_uid,
+    )
     expected = CASE_FILES[case["case_id"]]
     entries = {item.name: item for item in raw_directory.iterdir()}
     if set(entries) != set(expected.values()):
         raise BootstrapError("bootstrap_raw_inventory_invalid")
     paths = {kind: entries[name] for kind, name in expected.items()}
-    values = {kind: trusted_json(path) for kind, path in paths.items()}
+    values = {
+        kind: trusted_json(path, expected_uid=raw_uid)
+        for kind, path in paths.items()
+    }
     if case["case_id"] == "bootstrap-clean-install":
         validate_host_receipt(
             campaign, case, values["host-install-readback"], now,
@@ -511,6 +671,35 @@ def raw_set(campaign: dict[str, Any], case: dict[str, Any],
     return paths, {kind: canonical(value) for kind, value in values.items()}
 
 
+def raw_set_at(campaign: dict[str, Any], case: dict[str, Any],
+               raw_directory: int, now: int, operator_uid: int
+               ) -> dict[str, bytes]:
+    expected = CASE_FILES[case["case_id"]]
+    if set(os.listdir(raw_directory)) != set(expected.values()):
+        raise BootstrapError("bootstrap_raw_inventory_invalid")
+    values = {
+        kind: trusted_json_at(
+            raw_directory, name, expected_uid=operator_uid,
+            expected_mode=0o600,
+        )[0]
+        for kind, name in expected.items()
+    }
+    if case["case_id"] == "bootstrap-clean-install":
+        validate_host_receipt(
+            campaign, case, values["host-install-readback"], now,
+        )
+        validate_research_receipt(
+            campaign, case, values["research-install-readback"],
+            values["boundary-readback"], now,
+        )
+    else:
+        validate_scan_receipts(
+            campaign, case, values["production-material-scan"],
+            values["machine-enrollment"], now,
+        )
+    return {kind: canonical(value) for kind, value in values.items()}
+
+
 def artifact_arguments(kind: str, paths: dict[str, Path]) -> list[list[str]]:
     return [
         [item, AUTHORITIES[item], str(paths[item]), MEDIA_TYPE]
@@ -519,17 +708,21 @@ def artifact_arguments(kind: str, paths: dict[str, Path]) -> list[list[str]]:
 
 
 def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, Any],
-                         kind: str, raw_values: dict[str, bytes]) -> str:
+                         kind: str, raw_values: dict[str, bytes], *,
+                         observation_uid: int, observation_mode: int) -> str:
     try:
-        raw = OBSERVER.trusted_read(path)
-        value = json.loads(raw)
-    except (AcceptanceError, OSError, UnicodeDecodeError,
-            json.JSONDecodeError) as error:
+        info = path.lstat()
+        value = trusted_json(path, expected_uid=observation_uid)
+        raw = canonical(value)
+    except (BootstrapError, OSError) as error:
         raise BootstrapError("bootstrap_existing_observation_invalid") from error
     expected_kinds = [kind, *SUPPORT[kind]]
     evidence = value.get("evidence") if isinstance(value, dict) else None
     artifacts = evidence.get("artifacts") if isinstance(evidence, dict) else None
-    if (not isinstance(value, dict) or canonical(value) != raw
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != observation_uid or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != observation_mode
+            or not isinstance(value, dict) or canonical(value) != raw
             or value.get("kind") != kind or not isinstance(artifacts, list)
             or [item.get("name") for item in artifacts
                 if isinstance(item, dict)] != expected_kinds
@@ -538,6 +731,33 @@ def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, A
                    or item.get("sha256")
                       != hashlib.sha256(raw_values[item_kind]).hexdigest()
                    for item, item_kind in zip(artifacts, expected_kinds))):
+        raise BootstrapError("bootstrap_existing_observation_mismatch")
+    try:
+        validate_observation(value, campaign, CASE_BY_ID[case["case_id"]])
+    except AcceptanceError as error:
+        raise BootstrapError("bootstrap_existing_observation_invalid") from error
+    return value["observation_sha256"]
+
+
+def existing_observation_at(parent: int, name: str,
+                            campaign: dict[str, Any], case: dict[str, Any],
+                            kind: str, raw_values: dict[str, bytes]) -> str:
+    value, raw, info = trusted_json_at(
+        parent, name, expected_uid=0, expected_mode=0o444,
+    )
+    expected_kinds = [kind, *SUPPORT[kind]]
+    evidence = value.get("evidence") if isinstance(value, dict) else None
+    artifacts = evidence.get("artifacts") if isinstance(evidence, dict) else None
+    if (not stat.S_ISREG(info.st_mode) or value.get("kind") != kind
+            or not isinstance(artifacts, list)
+            or [item.get("name") for item in artifacts
+                if isinstance(item, dict)] != expected_kinds
+            or any(not isinstance(item, dict)
+                   or item.get("authority") != AUTHORITIES[item_kind]
+                   or item.get("sha256")
+                      != hashlib.sha256(raw_values[item_kind]).hexdigest()
+                   for item, item_kind in zip(artifacts, expected_kinds))
+            or canonical(value) != raw):
         raise BootstrapError("bootstrap_existing_observation_mismatch")
     try:
         validate_observation(value, campaign, CASE_BY_ID[case["case_id"]])
@@ -562,27 +782,139 @@ def write_snapshot(path: Path, raw: bytes) -> None:
         os.close(descriptor)
 
 
-def publish_staged(staged: Path, destination: Path) -> None:
+def publish_staged(staged: Path, destination: Path, *, mode: int) -> None:
     value = trusted_json(staged)
     try:
-        OBSERVER.write_new(destination, value)
+        OBSERVER.write_new(destination, value, mode=mode)
     except (AcceptanceError, OSError) as error:
         raise BootstrapError("bootstrap_observation_publication_failed") from error
 
 
+def publish_staged_at(staged: Path, parent: int, name: str, *, mode: int) -> None:
+    value = trusted_json(staged)
+    payload = canonical(value)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode, dir_fd=parent,
+        )
+        try:
+            os.fchmod(descriptor, mode)
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise BootstrapError(
+                        "bootstrap_observation_publication_failed"
+                    )
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise BootstrapError(
+            "bootstrap_observation_publication_failed"
+        ) from error
+
+
 def project(campaign_path: Path, observations: Path, case_id: str,
-            raw_directory: Path, now: int) -> dict[str, Any]:
-    campaign, case = preflight(campaign_path, observations, case_id, now)
-    _, raw_values = raw_set(campaign, case, raw_directory, now)
-    private_directory(observations, "bootstrap_observation_directory")
+            raw_directory: Path, now: int, *, operator_uid: int | None = None
+            ) -> dict[str, Any]:
+    protected_projection = operator_uid is not None
+    owner = os.geteuid() if operator_uid is None else operator_uid
+    if protected_projection and (os.geteuid() != 0 or not 1 <= owner < 2 ** 31):
+        raise BootstrapError("bootstrap_protected_projection_context_required")
+    observations_descriptor = None
+    raw_descriptor = None
+    if protected_projection:
+        observations_descriptor = open_private_directory(
+            observations, "bootstrap_observation_directory", owner,
+        )
+        raw_descriptor = open_private_directory(
+            raw_directory, "bootstrap_raw_directory", owner,
+        )
+    try:
+        campaign, case = preflight(
+            campaign_path, observations, case_id, now, operator_uid=owner,
+            protected_projection=protected_projection,
+            observations_descriptor=observations_descriptor,
+        )
+        if protected_projection:
+            if raw_descriptor is None:
+                raise BootstrapError("bootstrap_raw_directory_untrusted")
+            raw_values = raw_set_at(
+                campaign, case, raw_descriptor, now, owner,
+            )
+        else:
+            _, raw_values = raw_set(
+                campaign, case, raw_directory, now, raw_uid=owner,
+            )
+            private_directory(
+                observations, "bootstrap_observation_directory",
+                expected_uid=owner,
+            )
+        result = project_bound(
+            campaign, case, observations, observations_descriptor,
+            raw_values, now, protected_projection, owner,
+        )
+        if protected_projection:
+            if observations_descriptor is None:
+                raise BootstrapError(
+                    "bootstrap_observation_directory_untrusted"
+                )
+            named = observations.lstat()
+            if (directory_identity(named)
+                    != directory_identity(os.fstat(observations_descriptor))):
+                raise BootstrapError(
+                    "bootstrap_observation_directory_identity_changed"
+                )
+            if raw_descriptor is None:
+                raise BootstrapError("bootstrap_raw_directory_untrusted")
+            named_raw = raw_directory.lstat()
+            if (directory_identity(named_raw)
+                    != directory_identity(os.fstat(raw_descriptor))):
+                raise BootstrapError("bootstrap_raw_directory_identity_changed")
+        return result
+    finally:
+        if raw_descriptor is not None:
+            os.close(raw_descriptor)
+        if observations_descriptor is not None:
+            os.close(observations_descriptor)
+
+
+def project_bound(campaign: dict[str, Any], case: dict[str, Any],
+                  observations: Path, observations_descriptor: int | None,
+                  raw_values: dict[str, bytes], now: int,
+                  protected_projection: bool, owner: int) -> dict[str, Any]:
+    case_id = case["case_id"]
+    observation_uid = 0 if protected_projection else owner
+    observation_mode = 0o444 if protected_projection else 0o600
     existing: dict[str, str] = {}
     missing: list[str] = []
     for kind in case["evidence_kinds"]:
         destination = observations / f"{case_id}.{kind}.json"
-        if os.path.lexists(destination):
-            existing[kind] = existing_observation(
-                destination, campaign, case, kind, raw_values,
-            )
+        present = (
+            f"{case_id}.{kind}.json" in os.listdir(observations_descriptor)
+            if protected_projection and observations_descriptor is not None
+            else os.path.lexists(destination)
+        )
+        if present:
+            if protected_projection:
+                if observations_descriptor is None:
+                    raise BootstrapError(
+                        "bootstrap_observation_directory_untrusted"
+                    )
+                existing[kind] = existing_observation_at(
+                    observations_descriptor, f"{case_id}.{kind}.json",
+                    campaign, case, kind, raw_values,
+                )
+            else:
+                existing[kind] = existing_observation(
+                    destination, campaign, case, kind, raw_values,
+                    observation_uid=observation_uid,
+                    observation_mode=observation_mode,
+                )
         else:
             missing.append(kind)
     projected = dict(existing)
@@ -600,16 +932,34 @@ def project(campaign_path: Path, observations: Path, case_id: str,
                 campaign=campaign, case_id=case_id, kind=kind,
                 artifact_arguments=artifact_arguments(kind, snapshot_paths),
                 output_directory=staged, now=now,
+                output_mode=observation_mode,
             )
             projected[kind] = observation["observation_sha256"]
         for kind in missing:
             name = f"{case_id}.{kind}.json"
-            publish_staged(staged / name, observations / name)
-    directory = os.open(observations, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+            if protected_projection:
+                if observations_descriptor is None:
+                    raise BootstrapError(
+                        "bootstrap_observation_directory_untrusted"
+                    )
+                publish_staged_at(
+                    staged / name, observations_descriptor, name,
+                    mode=observation_mode,
+                )
+            else:
+                publish_staged(
+                    staged / name, observations / name, mode=observation_mode,
+                )
+    if protected_projection:
+        if observations_descriptor is None:
+            raise BootstrapError("bootstrap_observation_directory_untrusted")
+        os.fsync(observations_descriptor)
+    else:
+        directory = os.open(observations, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     value = {
         "schema": SCHEMA, "status": "projected",
         "campaign_id": campaign["campaign_id"], "case_id": case_id,
@@ -642,6 +992,7 @@ def parser() -> argparse.ArgumentParser:
     collect_command.add_argument("--enrollment", type=Path)
     project_command = commands.choices["project"]
     project_command.add_argument("--raw-directory", type=Path, required=True)
+    project_command.add_argument("--operator-uid", type=int)
     return value
 
 
@@ -656,6 +1007,7 @@ def main(arguments: list[str] | None = None) -> int:
     else:
         result = project(
             args.campaign, args.observations, args.case, args.raw_directory, now,
+            operator_uid=args.operator_uid,
         )
     sys.stdout.buffer.write(canonical(result))
     return 0

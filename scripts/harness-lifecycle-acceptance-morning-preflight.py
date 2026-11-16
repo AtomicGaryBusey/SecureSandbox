@@ -726,8 +726,6 @@ def run_preflight(
             )
             vm_inventory_source = "live-closed-parallels-api"
         else:
-            if installed_count != len(DRIVER_ENTRYPOINTS):
-                raise PreflightError("preflight_closed_vm_inventory_invalid")
             vm_states = validated_closed_stopped_vm_inventory(
                 closed_vm_inventory_receipt,
                 expected_commit=commit, expected_remote_tips=remote_tips,

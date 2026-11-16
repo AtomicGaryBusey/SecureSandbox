@@ -246,10 +246,12 @@ fixed three-VM stopped inventory through one stable GUI PID, quits Parallels,
 proves both the client and VM runtimes absent, and writes a canonical private
 receipt bound to the clean public commit, remote tip, machine and operator.
 Morning preflight consumes it only through the explicit
-`--closed-stopped-vm-inventory` argument, within 120 seconds, with a complete
-protected release, and after independently rechecking both process absences.
-There is no implicit fallback and no running-VM bridge; ordinary live closed-GUI
-inventory remains the default wherever the vendor API supports it.
+`--closed-stopped-vm-inventory` argument, within 120 seconds, and after
+independently rechecking both process absences. The protected release readback
+then independently selects the missing-release bootstrap transition or the
+complete-release campaign transition. There is no implicit fallback and no
+running-VM bridge; ordinary live closed-GUI inventory remains the default
+wherever the vendor API supports it.
 
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from

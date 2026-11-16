@@ -100,7 +100,8 @@ queues campaign initialization with `next_authorization: none`; it never
 preauthorizes any Touch ID case.
 
 On Parallels Desktop 27.2.1, `prlctl` loses its login-user API session when
-the GUI exits. For the post-install all-stopped boundary only, first open
+the GUI exits. For either exact pre-install or post-install all-stopped
+boundary, first open
 Parallels and wait for its exact stopped three-VM inventory to be available,
 then run the closed-inventory helper immediately followed by morning preflight.
 The helper requires one stable GUI PID across readback, quits Parallels,
@@ -108,7 +109,9 @@ proves both the GUI and all VM runtimes absent, and publishes a 120-second
 canonical receipt bound to the clean commit, public tip, machine, and operator.
 Preflight consumes it only through the explicit argument below and repeats the
 absence probes. It never discovers the receipt automatically, and the bridge
-cannot represent a running, absent, partial, or mixed VM set.
+cannot represent a running, absent, partial, or mixed VM set. The protected
+release readback independently selects bootstrap installation when the exact
+release is absent or campaign initialization when all ten closures are valid.
 
 If an honest rejected Host bootstrap created only
 `~/Library/Application Support/SecureSandbox/controller-state`, do not remove

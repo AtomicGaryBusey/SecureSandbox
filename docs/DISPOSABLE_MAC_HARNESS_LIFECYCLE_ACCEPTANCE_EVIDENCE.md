@@ -17,7 +17,12 @@ published. The source repair adds an explicit stopped-only bridge with a
 120-second canonical receipt binding the exact commit and public tip, enrolled
 machine, operator, stable GUI PID, all three stopped VMs, clean GUI exit, and
 absent VM runtime processes. Morning preflight never silently falls back to
-the bridge and independently revalidates its bindings and process absence.
+the bridge and independently revalidates its bindings and process absence. A
+physical pre-install attempt then exposed an unnecessary post-install-only
+consumer restriction: on this Parallels version that made exact protected
+release upgrades impossible. The consumer now accepts the same zero-authority
+all-stopped receipt before or after installation and independently derives the
+only permitted next action from the exact protected-release readback.
 Physical execution of the repaired boundary remains pending publication and
 installation of its exact release.
 

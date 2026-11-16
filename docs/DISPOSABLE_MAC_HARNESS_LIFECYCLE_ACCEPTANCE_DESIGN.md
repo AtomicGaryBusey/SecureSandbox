@@ -493,9 +493,12 @@ survived the readback; quits Parallels normally; and then proves both the GUI
 and every `prl_vm_app` runtime absent. It publishes one canonical, private,
 self-digested, zero-authority receipt. The morning preflight never discovers or
 falls back to that receipt: the caller must name it explicitly, it expires in
-120 seconds, it is valid only with all three VMs stopped and a complete
-protected release, and the consumer rebinds the commit, remote tip, machine,
-operator and digest before re-observing both process absences. Running, absent,
+120 seconds, and it is valid only with all three VMs stopped. The same exact
+receipt shape may bind either a missing-release pre-install transition or a
+complete-release post-install transition; the consumer independently derives
+which transition is allowed from the protected release readback. It rebinds
+the commit, remote tip, machine, operator and digest before re-observing both
+process absences. Running, absent,
 mixed, stale, extended, cross-commit, cross-machine, cross-operator, replaced-
 GUI, or lingering-runtime states fail closed. Platforms retaining a usable API
 session with the GUI closed continue through the ordinary live inventory path.

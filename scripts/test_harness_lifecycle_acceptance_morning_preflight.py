@@ -176,7 +176,7 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertFalse(value["touch_id_authorization_ready"])
         self.assertEqual(value["vm_inventory_source"], "live-closed-parallels-api")
 
-    def test_explicit_closed_stopped_inventory_bridges_only_complete_install(self):
+    def test_explicit_closed_stopped_inventory_bridges_complete_install(self):
         receipt = self.root / "closed-stopped.json"
         preflight.write_preflight_receipt(receipt, self.closed_inventory_value())
         absent = subprocess.CompletedProcess([], 1, b"", b"")
@@ -206,6 +206,48 @@ class MorningPreflightTests(unittest.TestCase):
                 probe_runner=mock.Mock(return_value=absent),
             )
         live_inventory.assert_not_called()
+        self.assertEqual(
+            value["vm_inventory_source"], "closed-stopped-inventory-receipt",
+        )
+        self.assertEqual(set(value["vm_states"].values()), {"stopped"})
+
+    def test_preinstall_accepts_explicit_closed_stopped_inventory_receipt(self):
+        receipt = self.root / "closed-stopped-before-install.json"
+        preflight.write_preflight_receipt(receipt, self.closed_inventory_value())
+        absent = subprocess.CompletedProcess([], 1, b"", b"")
+        with mock.patch.object(
+            preflight, "source_checkout", return_value=(COMMIT, {"origin": COMMIT}),
+        ), mock.patch.object(
+            preflight.ACCEPTANCE_CLI, "trusted_json",
+            side_effect=(self.enrollment, self.closed_inventory_value()),
+        ), mock.patch.object(
+            preflight.ENROLLER, "machine_identity", return_value="b" * 64,
+        ), mock.patch.object(
+            preflight, "production_material_absent", return_value="absent",
+        ), mock.patch.object(
+            preflight, "trusted_bootstrap_hierarchy", return_value=[],
+        ), mock.patch.object(
+            preflight.ACCEPTANCE_CLI, "driver_readiness",
+            side_effect=(
+                self.source,
+                self.installed(0, "protected_driver_installation_missing"),
+            ),
+        ), mock.patch.object(
+            preflight.SUPERVISOR, "require_gui_closed",
+        ), mock.patch.object(
+            preflight.SUPERVISOR, "vm_inventory",
+        ) as live_inventory:
+            value = preflight.run_preflight(
+                self.enrollment_path, now=NOW, home=self.root, environment={},
+                expected_install_uid=0, effective_uid=os.geteuid(),
+                closed_vm_inventory_receipt=receipt,
+                probe_runner=mock.Mock(return_value=absent),
+            )
+        live_inventory.assert_not_called()
+        self.assertEqual(
+            value["next_action"],
+            "bootstrap-root-owned-exact-commit-host-installer",
+        )
         self.assertEqual(
             value["vm_inventory_source"], "closed-stopped-inventory-receipt",
         )

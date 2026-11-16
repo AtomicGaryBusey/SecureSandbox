@@ -137,9 +137,15 @@ closures. The corrected preflight validates every fixed protected-driver
 manifest and payload closure directly from the exact release instead. It does
 not weaken inventory, ownership, digest, source-commit, or root-execution
 requirements. Regression coverage proves both that build-only source is not
-required at runtime and that any invalid protected closure still rejects. The
-zero-byte failed command result and the one-shot raw reservation remain
-retained; no observation was published and collection is not repeated.
+required at runtime and that any invalid protected closure still rejects.
+Because that correction belongs to a different exact protected release, it
+does not resume the predecessor campaign. A fourth no-delete ceremony accepts
+only the exact three-raw/zero-observation layout, reproduces the predecessor's
+two missing source-only readiness dependencies, verifies all ten driver
+closures from both the predecessor and replacement root-owned releases, and
+binds both manifest digests into its plan. The failed campaign and zero-byte
+command result are retained unchanged and independently verified; a fresh
+replacement-bound campaign must recollect before protected projection.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

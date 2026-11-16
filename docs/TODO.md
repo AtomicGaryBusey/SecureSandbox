@@ -1008,10 +1008,13 @@ in ignored local records, not in this file.
   The first such protected projection failed closed before publication because
   its runtime preflight reused source-checkout readiness and therefore required
   the intentionally excluded Host installer source inside the immutable
-  release. The retained one-shot raw evidence remains valid. Publish and
-  install the repair that verifies all ten protected manifest closures
-  directly, then retry projection only; do not recollect or remove the failed
-  zero-byte command result.
+  release. Do not rebind that evidence to a different release. Publish the
+  distinct `retain-protected-projection-rejection` no-delete path, require its
+  isolated predecessor/replacement protected-manifest diagnostics, retain and
+  independently verify the exact three-raw/zero-observation campaign, then
+  install the repaired release and initialize a fresh campaign. Recollect the
+  bootstrap case once under that replacement binding and project only through
+  its exact protected release; never remove the failed zero-byte command result.
   The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

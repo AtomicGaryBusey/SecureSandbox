@@ -6,7 +6,9 @@ accepts only fixed, historically observed local campaign layouts.  The
 ordinary path requires every evidence directory to be empty.  A second literal
 ceremony accepts only an empty ``bootstrap-clean-install`` reservation.  A
 third accepts exactly the three owner-mode observations projected by the
-source driver before production status rejected them.  Every path records the
+source driver before production status rejected them.  A fourth accepts the
+three raw bootstrap records left when the predecessor protected projector
+rejected before publishing any observation.  Every path records the
 exact old and replacement source bindings and moves the complete directory
 without overwrite.  None deletes or modifies an observation.
 """
@@ -82,6 +84,14 @@ OWNER_PROJECTION_SCHEMA = (
 OWNER_PROJECTION_RESULT_SCHEMA = (
     "secure-sandbox-harness-lifecycle-owner-projection-retention-v1"
 )
+PROTECTED_PROJECTION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-protected-projection-rejection-"
+    "retention-plan-v1"
+)
+PROTECTED_PROJECTION_RESULT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-protected-projection-rejection-"
+    "retention-v1"
+)
 ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"
 RESERVED_ACKNOWLEDGEMENT = (
     "RETAIN EMPTY RESERVED BOOTSTRAP REJECTION WITHOUT DELETION"
@@ -89,14 +99,22 @@ RESERVED_ACKNOWLEDGEMENT = (
 OWNER_PROJECTION_ACKNOWLEDGEMENT = (
     "RETAIN OWNER PROJECTED BOOTSTRAP FAILURE WITHOUT DELETION"
 )
+PROTECTED_PROJECTION_ACKNOWLEDGEMENT = (
+    "RETAIN PROTECTED BOOTSTRAP PROJECTION REJECTION WITHOUT DELETION"
+)
 RESERVED_CASE_ID = "bootstrap-clean-install"
 RESERVED_EXPECTED_ERROR = "bootstrap_host_receipt_invalid"
 OWNER_PROJECTION_EXPECTED_ERROR = "input_file_untrusted"
+PROTECTED_PROJECTION_EXPECTED_ERROR = "bootstrap_protected_release_required"
 RESERVED_DIAGNOSTIC_SCHEMA = (
     "secure-sandbox-harness-lifecycle-bootstrap-rejection-diagnostic-v1"
 )
 OWNER_PROJECTION_DIAGNOSTIC_SCHEMA = (
     "secure-sandbox-harness-lifecycle-owner-projection-diagnostic-v1"
+)
+PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-protected-projection-rejection-"
+    "diagnostic-v1"
 )
 MODERN_HOST_RELEASE_FIELDS = [
     "candidate_authority_sha256", "developer_id_team_floor_release_id",
@@ -245,6 +263,121 @@ try:
 except BaseException:
     os._exit(70)
 '''
+PROTECTED_PROJECTION_DIAGNOSTIC_PROGRAM = r'''\
+import hashlib
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+try:
+    release = Path(sys.argv[1])
+    replacement_release = Path(sys.argv[2])
+    campaign_path = Path(sys.argv[3])
+    observations = Path(sys.argv[4])
+    raw_directory = Path(sys.argv[5])
+    now = int(sys.argv[6])
+    expected_case = sys.argv[7]
+    expected_error = sys.argv[8]
+    replacement_commit = sys.argv[9]
+    diagnostic_schema = sys.argv[10]
+
+    sys.path.insert(0, str(release / "shared"))
+    entrypoint = release / "scripts/harness-lifecycle-acceptance-bootstrap.py"
+    specification = importlib.util.spec_from_file_location(
+        "retention_protected_projection_diagnostic", entrypoint,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError("entrypoint_unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+
+    campaign = module.validate_campaign(
+        module.trusted_json(campaign_path), now, allow_expired=True,
+    )
+    case = module.ACCEPTANCE_CLI.case_record(module.CASE_BY_ID[expected_case])
+    _paths, raw_values = module.raw_set(
+        campaign, case, raw_directory, now,
+    )
+    if os.listdir(observations):
+        raise RuntimeError("observations_not_empty")
+
+    readiness = module.ACCEPTANCE_CLI.driver_readiness(
+        release, source_commit=campaign["source_commit"],
+    )
+    expected_missing = {
+        "host-provenance-fixture": [
+            "scripts/install-harness-lifecycle-acceptance-host.sh",
+        ],
+        "host-archive-fixture": [
+            "scripts/install-harness-lifecycle-acceptance-host.sh",
+        ],
+    }
+    unavailable = {
+        item["driver"]: item["missing"]
+        for item in readiness.get("drivers", [])
+        if not item.get("available")
+    }
+    if (readiness.get("status") != "incomplete"
+            or readiness.get("driver_count")
+               != len(module.ACCEPTANCE_CLI.DRIVER_ENTRYPOINTS)
+            or readiness.get("available_driver_count")
+               != len(module.ACCEPTANCE_CLI.DRIVER_ENTRYPOINTS) - 2
+            or unavailable != expected_missing):
+        raise RuntimeError("legacy_readiness_mismatch")
+
+    current_specification = importlib.util.spec_from_file_location(
+        "retention_current_acceptance_cli",
+        replacement_release / "scripts/harness-lifecycle-acceptance.py",
+    )
+    if current_specification is None or current_specification.loader is None:
+        raise RuntimeError("current_verifier_unavailable")
+    current = importlib.util.module_from_spec(current_specification)
+    current_specification.loader.exec_module(current)
+    predecessor_manifests = []
+    replacement_manifests = []
+    protected_root = release.parent.parent
+    for driver in current.DRIVER_ENTRYPOINTS:
+        replacement_manifests.append(current.verify_protected_driver(
+            protected_root, replacement_commit, driver, 0,
+        ))
+        predecessor_manifests.append(current.verify_protected_driver(
+            protected_root, campaign["source_commit"], driver, 0,
+        ))
+    if (not predecessor_manifests or not replacement_manifests
+            or any(item != predecessor_manifests[0]
+                   for item in predecessor_manifests[1:])
+            or any(item != replacement_manifests[0]
+                   for item in replacement_manifests[1:])):
+        raise RuntimeError("protected_manifest_mismatch")
+
+    value = {
+        "schema": diagnostic_schema,
+        "status": "confirmed",
+        "case_id": expected_case,
+        "error": expected_error,
+        "source_commit": campaign["source_commit"],
+        "replacement_source_commit": replacement_commit,
+        "observed_at": now,
+        "raw_sha256": {
+            kind: hashlib.sha256(raw_values[kind]).hexdigest()
+            for kind in case["evidence_kinds"]
+        },
+        "legacy_readiness_sha256": module.digest(readiness),
+        "legacy_unavailable_driver_missing": unavailable,
+        "predecessor_manifest_sha256": current.digest(
+            predecessor_manifests[0],
+        ),
+        "replacement_manifest_sha256": current.digest(
+            replacement_manifests[0],
+        ),
+        "verified_driver_count": len(predecessor_manifests),
+    }
+    value["diagnostic_sha256"] = module.digest(value)
+    sys.stdout.buffer.write(module.canonical(value))
+except BaseException:
+    os._exit(70)
+'''
 OWNER_PROJECTION_KINDS = (
     "host-install-readback", "research-install-readback", "boundary-readback",
 )
@@ -375,8 +508,9 @@ def _trusted_file_bytes(path: Path, uid: int, *, mode: int,
 def validate_empty_layout(root: Path, uid: int, *,
                           reserved_bootstrap: bool = False,
                           owner_projection: bool = False,
+                          protected_projection: bool = False,
                           ) -> tuple[dict[str, Any], str]:
-    if reserved_bootstrap and owner_projection:
+    if sum((reserved_bootstrap, owner_projection, protected_projection)) > 1:
         raise RetentionError("retention_mode_invalid")
     root_descriptor = _directory(root, uid)
     try:
@@ -403,7 +537,8 @@ def validate_empty_layout(root: Path, uid: int, *,
     } if owner_projection else set()
     bootstrap_entries = (
         {RESERVED_CASE_ID}
-        if reserved_bootstrap or owner_projection else set()
+        if reserved_bootstrap or owner_projection or protected_projection
+        else set()
     )
     for relative, expected in (
         (Path("observations"), projected_observations),
@@ -422,19 +557,18 @@ def validate_empty_layout(root: Path, uid: int, *,
         ".", "observations", "raw", "raw/bootstrap",
         "raw/qualification", "raw/recovery",
     ]
-    if reserved_bootstrap or owner_projection:
+    if reserved_bootstrap or owner_projection or protected_projection:
         reservation = root / "raw/bootstrap" / RESERVED_CASE_ID
         descriptor = _directory(reservation, uid)
         try:
             entries = set(os.listdir(descriptor))
-            expected = (
-                set(OWNER_PROJECTION_RAW_FILES.values())
-                if owner_projection else set()
-            )
+            expected = (set(OWNER_PROJECTION_RAW_FILES.values())
+                        if owner_projection or protected_projection else set())
             if entries != expected:
                 raise RetentionError(
-                    "retention_owner_projection_inventory_invalid"
-                    if owner_projection else "retention_reserved_case_not_empty"
+                    "retention_projection_inventory_invalid"
+                    if owner_projection or protected_projection
+                    else "retention_reserved_case_not_empty"
                 )
         finally:
             os.close(descriptor)
@@ -453,14 +587,19 @@ def validate_empty_layout(root: Path, uid: int, *,
                 raise RetentionError("retention_reserved_case_invalid")
         directories.append(f"raw/bootstrap/{RESERVED_CASE_ID}")
     files: list[Any] = ["campaign.json"]
-    if owner_projection:
+    if owner_projection or protected_projection:
         records = []
         for kind in OWNER_PROJECTION_KINDS:
-            for relative in (
+            relatives = [
                 Path("raw/bootstrap") / RESERVED_CASE_ID
                 / OWNER_PROJECTION_RAW_FILES[kind],
-                Path("observations") / f"{RESERVED_CASE_ID}.{kind}.json",
-            ):
+            ]
+            if owner_projection:
+                relatives.append(
+                    Path("observations")
+                    / f"{RESERVED_CASE_ID}.{kind}.json",
+                )
+            for relative in relatives:
                 raw_file = _trusted_file_bytes(
                     root / relative, uid, mode=0o600, maximum=64 * 1024,
                 )
@@ -643,6 +782,132 @@ def confirm_owner_projection_failure(
     return value
 
 
+def _validate_protected_projection_diagnostic(
+        value: Any, campaign: dict[str, Any],
+        replacement_source_commit: str | None = None) -> None:
+    if not isinstance(value, dict):
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_invalid"
+        )
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "diagnostic_sha256"
+    }
+    expected_missing = {
+        "host-provenance-fixture": [
+            "scripts/install-harness-lifecycle-acceptance-host.sh",
+        ],
+        "host-archive-fixture": [
+            "scripts/install-harness-lifecycle-acceptance-host.sh",
+        ],
+    }
+    expected_kinds = set(OWNER_PROJECTION_KINDS)
+    raw_sha256 = value.get("raw_sha256")
+    observed_at = value.get("observed_at")
+    if (set(value) != {
+            "schema", "status", "case_id", "error", "source_commit",
+            "replacement_source_commit",
+            "observed_at", "raw_sha256", "legacy_readiness_sha256",
+            "legacy_unavailable_driver_missing",
+            "predecessor_manifest_sha256", "replacement_manifest_sha256",
+            "verified_driver_count", "diagnostic_sha256",
+        }
+            or value.get("schema") != PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA
+            or value.get("status") != "confirmed"
+            or value.get("case_id") != RESERVED_CASE_ID
+            or value.get("error") != PROTECTED_PROJECTION_EXPECTED_ERROR
+            or value.get("source_commit") != campaign["source_commit"]
+            or (replacement_source_commit is not None
+                and value.get("replacement_source_commit")
+                    != replacement_source_commit)
+            or not isinstance(value.get("replacement_source_commit"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{40}", value["replacement_source_commit"],
+            ) is None
+            or not isinstance(observed_at, int)
+            or isinstance(observed_at, bool)
+            or observed_at < campaign["created_at"]
+            or observed_at > int(time.time())
+            or not isinstance(raw_sha256, dict)
+            or set(raw_sha256) != expected_kinds
+            or any(not isinstance(item, str)
+                   or re.fullmatch(r"[0-9a-f]{64}", item) is None
+                   for item in raw_sha256.values())
+            or value.get("legacy_unavailable_driver_missing")
+               != expected_missing
+            or value.get("verified_driver_count") != len(DRIVER_ENTRYPOINTS)
+            or any(not isinstance(value.get(name), str)
+                   or re.fullmatch(r"[0-9a-f]{64}", value[name]) is None
+                   for name in (
+                       "legacy_readiness_sha256",
+                       "predecessor_manifest_sha256",
+                       "replacement_manifest_sha256",
+                   ))
+            or value.get("diagnostic_sha256") != digest(unsigned)):
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_invalid"
+        )
+
+
+def confirm_protected_projection_failure(
+        campaign: dict[str, Any], observations: Path, now: int,
+        replacement_source_commit: str,
+        ) -> dict[str, Any]:
+    release = (
+        ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+        / campaign["source_commit"]
+    )
+    raw_directory = (
+        observations.parent / "raw/bootstrap" / RESERVED_CASE_ID
+    )
+    replacement_release = (
+        ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+        / replacement_source_commit
+    )
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3", "-I", "-c",
+                PROTECTED_PROJECTION_DIAGNOSTIC_PROGRAM,
+                str(release), str(replacement_release),
+                str(observations.parent / "campaign.json"),
+                str(observations), str(raw_directory), str(now),
+                RESERVED_CASE_ID, PROTECTED_PROJECTION_EXPECTED_ERROR,
+                replacement_source_commit,
+                PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA,
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, cwd="/", timeout=45, check=False,
+            env={
+                "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_failed"
+        ) from error
+    if (completed.returncode != 0 or completed.stderr
+            or not completed.stdout or len(completed.stdout) > 64 * 1024):
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_failed"
+        )
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_failed"
+        ) from error
+    if canonical(value) != completed.stdout:
+        raise RetentionError(
+            "retention_protected_projection_diagnostic_failed"
+        )
+    _validate_protected_projection_diagnostic(
+        value, campaign, replacement_source_commit,
+    )
+    return value
+
+
 def _write_new_at(parent_descriptor: int, name: str,
                   value: dict[str, Any]) -> None:
     raw = canonical(value)
@@ -748,6 +1013,18 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
         and value.get("expected_error") == OWNER_PROJECTION_EXPECTED_ERROR
         and value.get("evidence_state") == "owner-projected-untrusted"
     )
+    protected_projection = (
+        set(value) == common | {
+            "projected_case_id", "expected_error", "evidence_state",
+            "rejection_diagnostic",
+        }
+        and value.get("schema") == PROTECTED_PROJECTION_SCHEMA
+        and value.get("reason") == "protected-projector-rejected-before-output"
+        and value.get("projected_case_id") == RESERVED_CASE_ID
+        and value.get("expected_error")
+           == PROTECTED_PROJECTION_EXPECTED_ERROR
+        and value.get("evidence_state") == "raw-collected-no-observations"
+    )
     if reserved:
         _validate_reserved_diagnostic(
             value.get("rejection_diagnostic"), {
@@ -762,8 +1039,17 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
                 "created_at": 0,
             },
         )
+    if protected_projection:
+        _validate_protected_projection_diagnostic(
+            value.get("rejection_diagnostic"), {
+                "source_commit": value.get("campaign_source_commit"),
+                "created_at": 0,
+            },
+            value.get("replacement_source_commit"),
+        )
     if (canonical(value) != data
-            or not (ordinary or reserved or owner_projection)
+            or not (ordinary or reserved or owner_projection
+                    or protected_projection)
             or value.get("status") != "prepared"
             or not isinstance(value.get("observed_at"), int)
             or isinstance(value.get("observed_at"), bool)
@@ -858,8 +1144,9 @@ def _is_ancestor(older: str, newer: str) -> None:
 def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
                            inventory_sha256: str, uid: int, *,
                            reserved_bootstrap: bool = False,
-                           owner_projection: bool = False) -> None:
-    if reserved_bootstrap and owner_projection:
+                           owner_projection: bool = False,
+                           protected_projection: bool = False) -> None:
+    if sum((reserved_bootstrap, owner_projection, protected_projection)) > 1:
         raise RetentionError("retention_mode_invalid")
     if reserved_bootstrap:
         try:
@@ -890,6 +1177,23 @@ def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
                 == OWNER_PROJECTION_EXPECTED_ERROR
                 and plan.get("evidence_state")
                 == "owner-projected-untrusted"
+            )
+    elif protected_projection:
+        try:
+            _validate_protected_projection_diagnostic(
+                plan.get("rejection_diagnostic"), campaign,
+                plan.get("replacement_source_commit"),
+            )
+        except RetentionError:
+            mode_valid = False
+        else:
+            mode_valid = (
+                plan.get("schema") == PROTECTED_PROJECTION_SCHEMA
+                and plan.get("projected_case_id") == RESERVED_CASE_ID
+                and plan.get("expected_error")
+                == PROTECTED_PROJECTION_EXPECTED_ERROR
+                and plan.get("evidence_state")
+                == "raw-collected-no-observations"
             )
     else:
         mode_valid = plan.get("schema") == SCHEMA
@@ -970,9 +1274,11 @@ def _result(campaign: dict[str, Any], replacement: str,
     )
     reserved = plan.get("schema") == RESERVED_SCHEMA
     owner_projection = plan.get("schema") == OWNER_PROJECTION_SCHEMA
+    protected_projection = plan.get("schema") == PROTECTED_PROJECTION_SCHEMA
     value = {
         "schema": (
-            OWNER_PROJECTION_RESULT_SCHEMA if owner_projection
+            PROTECTED_PROJECTION_RESULT_SCHEMA if protected_projection
+            else OWNER_PROJECTION_RESULT_SCHEMA if owner_projection
             else RESERVED_RESULT_SCHEMA if reserved else RESULT_SCHEMA
         ),
         "status": "retained",
@@ -1003,6 +1309,14 @@ def _result(campaign: dict[str, Any], replacement: str,
             "diagnostic_sha256":
                 plan["rejection_diagnostic"]["diagnostic_sha256"],
         })
+    if protected_projection:
+        value.update({
+            "projected_case_id": RESERVED_CASE_ID,
+            "expected_error": PROTECTED_PROJECTION_EXPECTED_ERROR,
+            "evidence_state": "raw-collected-no-observations",
+            "diagnostic_sha256":
+                plan["rejection_diagnostic"]["diagnostic_sha256"],
+        })
     value["result_sha256"] = digest(value)
     return value
 
@@ -1012,6 +1326,7 @@ def verify_retained(*, expected_campaign_id: str,
                     expected_replacement_commit: str,
                     reserved_bootstrap: bool = False,
                     owner_projection: bool = False,
+                    protected_projection: bool = False,
                     home: Path | None = None,
                     source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
                     identity_probe: Callable[[], str] | None = None) -> dict[str, Any]:
@@ -1026,6 +1341,7 @@ def verify_retained(*, expected_campaign_id: str,
     campaign, inventory_sha256 = validate_empty_layout(
         destination, uid, reserved_bootstrap=reserved_bootstrap,
         owner_projection=owner_projection,
+        protected_projection=protected_projection,
     )
     if (campaign["campaign_id"] != expected_campaign_id
             or campaign["source_commit"] != expected_source_commit):
@@ -1050,6 +1366,7 @@ def verify_retained(*, expected_campaign_id: str,
         plan, campaign, inventory_sha256, uid,
         reserved_bootstrap=reserved_bootstrap,
         owner_projection=owner_projection,
+        protected_projection=protected_projection,
     )
     supersessions = _supersession_chain(
         destination, uid, plan, campaign, inventory_sha256,
@@ -1068,6 +1385,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
            acknowledgement: str, now: int | None = None,
            reserved_bootstrap: bool = False,
            owner_projection: bool = False,
+           protected_projection: bool = False,
            home: Path | None = None,
            rename: Callable[[int, str, int, str], None] = _rename_exclusive,
            source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
@@ -1076,11 +1394,15 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
                                     dict[str, Any]] | None = None,
            owner_projection_probe: Callable[[dict[str, Any], Path, int],
                                             dict[str, Any]] | None = None,
+           protected_projection_probe: Callable[
+               [dict[str, Any], Path, int, str], dict[str, Any]
+           ] | None = None,
            ) -> dict[str, Any]:
-    if reserved_bootstrap and owner_projection:
+    if sum((reserved_bootstrap, owner_projection, protected_projection)) > 1:
         raise RetentionError("retention_mode_invalid")
     expected_acknowledgement = (
-        OWNER_PROJECTION_ACKNOWLEDGEMENT if owner_projection
+        PROTECTED_PROJECTION_ACKNOWLEDGEMENT if protected_projection
+        else OWNER_PROJECTION_ACKNOWLEDGEMENT if owner_projection
         else RESERVED_ACKNOWLEDGEMENT if reserved_bootstrap
         else ACKNOWLEDGEMENT
     )
@@ -1094,6 +1416,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     campaign, inventory_sha256 = validate_empty_layout(
         root, uid, reserved_bootstrap=reserved_bootstrap,
         owner_projection=owner_projection,
+        protected_projection=protected_projection,
     )
     if (campaign["campaign_id"] != expected_campaign_id
             or campaign["source_commit"] != expected_source_commit):
@@ -1178,9 +1501,22 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             _validate_owner_projection_diagnostic(
                 rejection_diagnostic, campaign,
             )
+        if protected_projection and not os.path.lexists(plan_path):
+            probe = (
+                confirm_protected_projection_failure
+                if protected_projection_probe is None
+                else protected_projection_probe
+            )
+            rejection_diagnostic = probe(
+                campaign, root / "observations", observed_at, replacement,
+            )
+            _validate_protected_projection_diagnostic(
+                rejection_diagnostic, campaign, replacement,
+            )
         plan = {
             "schema": (
-                OWNER_PROJECTION_SCHEMA if owner_projection
+                PROTECTED_PROJECTION_SCHEMA if protected_projection
+                else OWNER_PROJECTION_SCHEMA if owner_projection
                 else RESERVED_SCHEMA if reserved_bootstrap else SCHEMA
             ),
             "status": "prepared",
@@ -1192,7 +1528,9 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             "machine_identity_sha256": campaign["machine_identity_sha256"],
             "operator_uid": uid,
             "reason": (
-                "collector-projected-owner-output" if owner_projection
+                "protected-projector-rejected-before-output"
+                if protected_projection
+                else "collector-projected-owner-output" if owner_projection
                 else "collector-rejected-after-empty-reservation"
                 if reserved_bootstrap else "preflight-failed-before-evidence"
             ),
@@ -1214,6 +1552,13 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
                 "evidence_state": "owner-projected-untrusted",
                 "rejection_diagnostic": rejection_diagnostic,
             })
+        if protected_projection:
+            plan.update({
+                "projected_case_id": RESERVED_CASE_ID,
+                "expected_error": PROTECTED_PROJECTION_EXPECTED_ERROR,
+                "evidence_state": "raw-collected-no-observations",
+                "rejection_diagnostic": rejection_diagnostic,
+            })
         plan["plan_sha256"] = digest(plan)
         if os.path.lexists(plan_path):
             plan = _trusted_plan(plan_path, uid)
@@ -1221,6 +1566,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
                 plan, campaign, inventory_sha256, uid,
                 reserved_bootstrap=reserved_bootstrap,
                 owner_projection=owner_projection,
+                protected_projection=protected_projection,
             )
         else:
             if not _remote_tips_for(replacement, remote_tips):
@@ -1302,6 +1648,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     retained_campaign, retained_inventory = validate_empty_layout(
         destination, uid, reserved_bootstrap=reserved_bootstrap,
         owner_projection=owner_projection,
+        protected_projection=protected_projection,
     )
     retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
     retained_supersessions = _supersession_chain(
@@ -1322,12 +1669,15 @@ def parser() -> argparse.ArgumentParser:
     for name in (
         "retain", "retain-reserved-bootstrap",
         "retain-owner-projected-bootstrap",
+        "retain-protected-projection-rejection",
     ):
         command = commands.add_parser(name)
         command.add_argument("--expected-campaign-id", required=True)
         command.add_argument("--expected-source-commit", required=True)
         acknowledgement = (
-            OWNER_PROJECTION_ACKNOWLEDGEMENT
+            PROTECTED_PROJECTION_ACKNOWLEDGEMENT
+            if name == "retain-protected-projection-rejection"
+            else OWNER_PROJECTION_ACKNOWLEDGEMENT
             if name == "retain-owner-projected-bootstrap"
             else RESERVED_ACKNOWLEDGEMENT
             if name == "retain-reserved-bootstrap" else ACKNOWLEDGEMENT
@@ -1339,6 +1689,7 @@ def parser() -> argparse.ArgumentParser:
     for name in (
         "verify", "verify-reserved-bootstrap",
         "verify-owner-projected-bootstrap",
+        "verify-protected-projection-rejection",
     ):
         command = commands.add_parser(name)
         command.add_argument("--expected-campaign-id", required=True)
@@ -1351,6 +1702,9 @@ def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
     reserved_bootstrap = args.command.endswith("reserved-bootstrap")
     owner_projection = args.command.endswith("owner-projected-bootstrap")
+    protected_projection = args.command.endswith(
+        "protected-projection-rejection"
+    )
     if args.command.startswith("retain"):
         result = retain(
             expected_campaign_id=args.expected_campaign_id,
@@ -1358,6 +1712,7 @@ def main(arguments: list[str] | None = None) -> int:
             acknowledgement=args.acknowledge,
             reserved_bootstrap=reserved_bootstrap,
             owner_projection=owner_projection,
+            protected_projection=protected_projection,
         )
     else:
         result = verify_retained(
@@ -1366,6 +1721,7 @@ def main(arguments: list[str] | None = None) -> int:
             expected_replacement_commit=args.expected_replacement_commit,
             reserved_bootstrap=reserved_bootstrap,
             owner_projection=owner_projection,
+            protected_projection=protected_projection,
         )
     sys.stdout.buffer.write(canonical(result))
     return 0

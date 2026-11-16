@@ -14,6 +14,13 @@ backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 restore() {
   local name="$1" destination="$2" mode="$3"
   if [[ -f "$backup/$name" && ! -L "$backup/$name" ]]; then
+    if [[ -e "$backup/$name.mode" || -L "$backup/$name.mode" ]]; then
+      [[ "$name" == privileged_workflow.py \
+         && -f "$backup/$name.mode" && ! -L "$backup/$name.mode" \
+         && "$(cat "$backup/$name.mode")" =~ ^(644|755)$ ]] \
+        || { echo "Invalid backup mode: $name" >&2; exit 2; }
+      mode="$(cat "$backup/$name.mode")"
+    fi
     install -o root -g root -m "$mode" "$backup/$name" "$destination"
   elif [[ -f "$backup/$name.absent" && ! -L "$backup/$name.absent" ]]; then
     rm -f -- "$destination"

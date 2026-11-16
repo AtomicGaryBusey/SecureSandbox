@@ -218,8 +218,12 @@ were a checkout. Protected bootstrap preflight now verifies every fixed driver
 through the release manifest and payload digests directly. Exact release path,
 root identity, complete protected inventory, and source-commit bindings remain
 mandatory. The failed command result and already-collected raw case are
-retained, and the repaired projector resumes from those bytes without a second
-collection.
+not rebound to the repaired release. A fourth retention-only ceremony instead
+preserves the exact three raw records and zero observations, reproduces the
+legacy readiness mismatch, verifies all ten protected driver closures in both
+the predecessor and replacement root-owned releases, and binds both manifests.
+After independent retention verification, a fresh replacement-bound campaign
+collects again and uses only its own protected projector.
 
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from

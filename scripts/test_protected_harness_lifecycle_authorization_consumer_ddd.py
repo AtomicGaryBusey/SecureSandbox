@@ -75,8 +75,15 @@ class ProtectedHarnessLifecycleAuthorizationConsumerDDDTests(unittest.TestCase):
         self.assertLess(self.installer.index(inspector_call),
                         self.installer.index(recovery_call))
         self.assertIn('"pending":False', self.installer)
-        self.assertIn('prior_count == 0 || prior_count == ${#destinations[@]}',
+        self.assertIn('shared_prerequisite=1', self.installer)
+        self.assertIn('cmp -s -- "$workflow" "${destinations[3]}"',
                       self.installer)
+        self.assertIn('not os.listxattr(sys.argv[1], follow_symlinks=False)',
+                      self.installer)
+        self.assertIn('prior_count != 0 && prior_count != ${#destinations[@]}',
+                      self.installer)
+        self.assertIn('name" == privileged_workflow.py', self.rollback)
+        self.assertIn('"$backup/$name.mode"', self.rollback)
         self.assertNotIn('"initialize-empty-store"', self.control)
 
         with tempfile.TemporaryDirectory() as directory:

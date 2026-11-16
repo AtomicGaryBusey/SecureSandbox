@@ -31,15 +31,22 @@ declare -a destinations=(
   /usr/local/libexec/secure-sandbox/rollback-harness-lifecycle-consumer.sh
 )
 prior_count=0
+shared_prerequisite=0
 for current in "${destinations[@]}"; do
   if [[ -e "$current" || -L "$current" ]]; then
     [[ -f "$current" && ! -L "$current" ]] || { echo "Installed lifecycle consumer is invalid." >&2; exit 1; }
     prior_count=$((prior_count + 1))
   fi
 done
-(( prior_count == 0 || prior_count == ${#destinations[@]} )) || {
-  echo "Installed lifecycle consumer is partial." >&2; exit 1;
-}
+if (( prior_count == 1 )) \
+   && [[ -f "${destinations[3]}" && ! -L "${destinations[3]}" ]] \
+   && [[ "$(stat -c '%U:%G:%a:%h' "${destinations[3]}")" =~ ^root:root:(644|755):1$ ]] \
+   && python3 -c 'import os,sys; raise SystemExit(0 if not os.listxattr(sys.argv[1], follow_symlinks=False) else 1)' "${destinations[3]}" \
+   && cmp -s -- "$workflow" "${destinations[3]}"; then
+  shared_prerequisite=1
+elif (( prior_count != 0 && prior_count != ${#destinations[@]} )); then
+  echo "Installed lifecycle consumer is partial." >&2; exit 1
+fi
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 [[ ! -e "$backup" && ! -L "$backup" ]] || { echo "Backup identity already exists." >&2; exit 1; }
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
@@ -47,6 +54,9 @@ for index in "${!names[@]}"; do
   current="${destinations[$index]}"; name="${names[$index]}"
   if [[ -f "$current" && ! -L "$current" ]]; then
     cp --no-dereference "$current" "$backup/$name"
+    if (( shared_prerequisite == 1 )) && [[ "$name" == privileged_workflow.py ]]; then
+      stat -c %a "$current" > "$backup/$name.mode"
+    fi
   else
     : > "$backup/$name.absent"
   fi
@@ -63,7 +73,7 @@ install -o root -g root -m 644 "$binding" "${destinations[4]}"
 install -o root -g root -m 755 "$rollback" "${destinations[5]}"
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox-harnesses
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/harnesses
-if (( prior_count == 0 )); then
+if (( prior_count == 0 || shared_prerequisite == 1 )); then
   initialization="$(/usr/local/libexec/secure-sandbox/harness-generation-manager.py initialize-empty-store)"
   python3 -c 'import json,sys; value=json.load(sys.stdin); boundary=value.get("boundary",{}); assert value.get("schema") == "secure-sandbox-harness-consumer-initialization-v1" and value.get("status") == "initialized" and boundary.get("status") == "verified" and boundary.get("generation_count") == 0 and boundary.get("active_generation_id") is None' <<<"$initialization"
 fi

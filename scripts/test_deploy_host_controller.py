@@ -982,8 +982,12 @@ class DeployHostControllerTests(unittest.TestCase):
             / ".candidate.7zHjFM"
         )
         residue.mkdir(mode=0o755)
-        with self.assertRaisesRegex(
-            RuntimeError, "native_host_candidate_replay_inventory_invalid",
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "native_host_candidate_replay_inventory_invalid",
+            ),
         ):
             DEPLOY.retained_native_host_candidate_product(
                 ({}, "7" * 64),

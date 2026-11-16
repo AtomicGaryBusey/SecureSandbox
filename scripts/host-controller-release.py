@@ -1484,6 +1484,10 @@ def validate_gpgv_runtime_dependency_closure(
             or any(not isinstance(value, bytes)
                    for value in libraries.values())):
         raise ReleaseFailure("native_host_release_gpgv_runtime_invalid")
+    operator_home = pwd.getpwuid(os.geteuid()).pw_dir
+    if (not os.path.isabs(operator_home)
+            or any(character in operator_home for character in "\r\n\0")):
+        raise ReleaseFailure("native_host_release_gpgv_runtime_invalid")
     with tempfile.TemporaryDirectory(
         prefix="secure-sandbox-gpgv-closure-",
     ) as directory:
@@ -1512,7 +1516,17 @@ def validate_gpgv_runtime_dependency_closure(
                     stderr=subprocess.STDOUT,
                     check=False,
                     timeout=30,
-                    env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                    env={
+                        "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                        # macOS 27.2's /usr/bin/otool developer-tool shim emits
+                        # warnings before its pathname header when it cannot
+                        # resolve the login principal's developer/cache roots.
+                        # Bind scratch space to our private directory and use
+                        # the OS account database (not caller environment) for
+                        # the login home. Dependency output remains exact.
+                        "HOME": operator_home,
+                        "TMPDIR": str(root),
+                    },
                     text=True,
                 )
             except (OSError, subprocess.SubprocessError) as error:

@@ -128,8 +128,10 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             for name in MANAGER.GPGV_RUNTIME_LIBRARY_NAMES
         }
 
-        def inspected(argv, **_kwargs):
+        def inspected(argv, **kwargs):
             path = Path(argv[2])
+            self.assertEqual(kwargs["env"]["TMPDIR"], str(path.parent))
+            self.assertTrue(Path(kwargs["env"]["HOME"]).is_absolute())
             dependencies = ["/usr/lib/libSystem.B.dylib"]
             if path.name == "gpgv":
                 dependencies.extend(

@@ -496,6 +496,30 @@ stack boot, host-key enrollment, boundary qualification, driver install, or
 | Control Center visibility | fixed-path, read-only bridge validates the suite and campaign status; GUI exposes progress with authority `none` and no enroll/run/record/assemble/admit action | live campaign progress readback during the disposable-Mac run |
 | No admission side effect | CLI contains no lifecycle mutation command and verdict authority is evidence-only | unchanged production environment and no vendor generation admission |
 
+## Interrupted ordinary Host recovery evidence
+
+On November 16, a release-Mac install of reviewed commit `72e625a` lost its
+caller response after publishing an exact ordinary PENDING pair, and the
+operator cancelled the subsequent administrator-password prompt. The generic
+wrapper had admitted only receipt-free bootstrap PENDING records, leaving the
+otherwise recoverable ordinary journal without a reusable attributed entry
+point. Its preflight now accepts install or rollback PENDING records, verifies
+the target by direct immutable release ID and v2 authority, and requires the
+exact target launcher either live or in the root-owned mode-0555 generation
+store; it never reads the private journal.
+
+Exact recovery of transition `9618bc0a...` committed release
+`1bab11df...`, removed the journal only after STABLE readback, retained
+immutable terminal `94c46a3a...` with status `target_committed`, and passed
+the complete 35-payload public signed-pair verifier. The complete
+deploy-wrapper suite passes 101 tests. This closes the reusable recovery entry
+point on the release Mac; equivalent Neo execution and retained readback remain
+physical acceptance work. Follow-up hardening makes the operator notice name
+the ordinary source release and prior STABLE digest instead of falsely calling
+it receipt-free bootstrap, and applies only the existing uniform APFS
+device-number normalization to target-tree preflight so a reboot cannot strand
+an otherwise unchanged authorized transition.
+
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical
 disposable-Mac evidence.

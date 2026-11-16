@@ -95,6 +95,8 @@ class BootstrapBinding(NamedTuple):
     host_pair_operation: str = ""
     host_pair_target_candidate_authority_sha256: str = ""
     host_pair_target_release_tree_identity_sha256: str = ""
+    host_pair_source_release_id: str = ""
+    host_pair_prior_stable_sha256: str = ""
     authorization_predecessor_release_id: str = ""
     authorization_clean_machine_bootstrap: bool = False
 
@@ -2341,7 +2343,14 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
             f"Transition ID: {binding.host_pair_transition_id}",
             f"Transition SHA-256: {binding.host_pair_transition_sha256}",
             f"Journaled operation: {binding.host_pair_operation}",
-            "Journaled source pair: absent (receipt-free bootstrap)",
+            *([
+                "Journaled source release: "
+                    f"{binding.host_pair_source_release_id}",
+                "Prior STABLE record SHA-256: "
+                    f"{binding.host_pair_prior_stable_sha256}",
+            ] if binding.host_pair_source_release_id else [
+                "Journaled source pair: absent (receipt-free bootstrap)",
+            ]),
             f"Exact target release: {binding.release_id}",
             "Exact target candidate authority SHA-256: "
                 f"{binding.host_pair_target_candidate_authority_sha256}",
@@ -2469,12 +2478,15 @@ def host_pair_transition_recovery_binding(
     manager_path: Path = MANAGER_PATH,
     expected_uid: int = 0,
 ) -> BootstrapBinding:
-    """Bind an operator prompt to one receipt-free public PENDING record.
+    """Bind an operator prompt to one exact public PENDING record.
 
     The private journal remains unreadable to the login user.  This preflight
-    therefore accepts only the narrowly identifiable bootstrap state exposed by
-    the canonical public projection.  The root manager later reopens and
-    validates the private journal and requires it to match that projection.
+    therefore binds the canonical public projection, the complete immutable
+    target release, and an exact retained target launcher generation.  The root
+    manager later reopens and validates the private journal and requires it to
+    match that projection.  This works for both receipt-free bootstrap and an
+    operator-authorized transition whose password prompt was cancelled after
+    the public PENDING record was durably published.
     """
     try:
         observed = MANAGER.host_release_launcher_pair_public(
@@ -2487,9 +2499,7 @@ def host_pair_transition_recovery_binding(
         pending, pending_sha256 = observed
         if (pending.get("schema")
                 != MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA
-                or pending.get("operation") != "install"
-                or pending.get("prior_stable_sha256") is not None
-                or pending.get("source_pair") is not None):
+                or pending.get("operation") not in {"install", "rollback"}):
             raise RuntimeError(
                 "host_pair_transition_recovery_public_pending_invalid"
             )
@@ -2505,7 +2515,9 @@ def host_pair_transition_recovery_binding(
 
     try:
         release, manifest = MANAGER.verified_release(
-            install_root, install_root / "current", expected_uid,
+            install_root,
+            install_root / "releases" / target["release_id"], expected_uid,
+            _direct_release_id=target["release_id"],
             _public_enforcement_only=True,
             _skip_pair_validation=True,
         )
@@ -2534,25 +2546,44 @@ def host_pair_transition_recovery_binding(
             raise RuntimeError(
                 "host_pair_transition_recovery_target_invalid"
             )
-        tree, tree_sha256 = (
+        tree, _tree_sha256 = (
             MANAGER.installed_native_host_release_tree_identity(
                 release, expected_uid,
             )
         )
-        if (tree != authority.get("release_tree_identity")
-                or tree_sha256
-                    != authority.get("release_tree_identity_sha256")):
+        authority_tree = authority.get("release_tree_identity")
+        if (tree != authority_tree
+                and MANAGER.comparable_native_host_release_tree_identity(
+                    tree
+                ) != MANAGER.comparable_native_host_release_tree_identity(
+                    authority_tree
+                )):
             raise RuntimeError(
                 "host_pair_transition_recovery_target_invalid"
             )
-        launcher = MANAGER.read_trusted_stable_launcher(
-            launcher_path, expected_uid,
-        )
+        try:
+            launcher = MANAGER.read_trusted_stable_launcher(
+                launcher_path, expected_uid,
+            )
+        except (OSError, MANAGER.ReleaseFailure):
+            launcher = b""
         launcher_sha256 = hashlib.sha256(launcher).hexdigest()
         if launcher_sha256 != target["launcher_sha256"]:
-            raise RuntimeError(
-                "host_pair_transition_recovery_target_invalid"
+            MANAGER.verify_launcher_migration_backup(
+                install_root, expected_uid, target["launcher_sha256"],
             )
+            launcher = MANAGER.read_acl_free_regular(
+                install_root / "launcher-backups"
+                / target["launcher_sha256"],
+                expected_uid, 0o555,
+                "launcher_migration_backup_invalid",
+                maximum=16 * 1024 * 1024,
+            )
+            launcher_sha256 = hashlib.sha256(launcher).hexdigest()
+            if launcher_sha256 != target["launcher_sha256"]:
+                raise RuntimeError(
+                    "host_pair_transition_recovery_target_invalid"
+                )
         broker = MANAGER.read_regular(release / "authorization_broker")
         broker_sha256 = hashlib.sha256(broker).hexdigest()
         if (MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY not in broker
@@ -2613,6 +2644,14 @@ def host_pair_transition_recovery_binding(
         host_pair_target_release_tree_identity_sha256=target[
             "release_tree_identity_sha256"
         ],
+        host_pair_source_release_id=(
+            "" if pending.get("source_pair") is None
+            else pending["source_pair"]["release_id"]
+        ),
+        host_pair_prior_stable_sha256=(
+            "" if pending.get("prior_stable_sha256") is None
+            else pending["prior_stable_sha256"]
+        ),
     )
 
 

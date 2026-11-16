@@ -438,6 +438,23 @@ STABLE cross-binding rather than transport success. These controls now have
 focused source evidence and protected live ordinary-install evidence; protected
 rollback execution remains a separate unverified gate.
 
+The attributed recovery wrapper also resumes an ordinary operator-authorized
+PENDING transition after its administrator-password prompt is cancelled. Its
+login-user preflight binds the exact canonical public projection, directly
+verifies the immutable target release and v2 candidate authority, and requires
+the target launcher either to be the current stable launcher or the exact
+root-owned mode-0555 retained launcher generation. It never reads the private
+journal. The digest-pinned root manager then reopens that journal and requires
+all eight public target/transition fields to match before replay. A November 16
+physical recovery converged transition `9618bc0a...` to immutable
+`target_committed` terminal `94c46a3a...`, selected release
+`1bab11df...`, removed the private journal only after STABLE readback, and
+passed the complete public signed-pair verifier. The notice distinguishes an
+absent receipt-free bootstrap source from an ordinary source release and prior
+STABLE digest. Target-tree preflight applies the same narrow uniform APFS
+device-number normalization as installed authority verification, so a reboot
+cannot strand an otherwise unchanged authorized transition.
+
 Ordinary pair activation now consumes Touch ID authority only while
 `created_at <= now < expires_at`: the manager checks before public PENDING,
 after source-prefix authentication, and directly before launcher replacement;

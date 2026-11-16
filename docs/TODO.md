@@ -414,6 +414,16 @@ in ignored local records, not in this file.
   at every pre-mutation boundary, preserves exact durable-prefix/bootstrap
   convergence, validates broker PENDING admission at completion, and vetoes
   capacity archival while any private install journal exists. Current source
+  also makes the attributed recovery entry point resumable after an ordinary
+  install or rollback password prompt is cancelled: it binds the exact public
+  PENDING projection, direct immutable target release and authority, and the
+  live or retained root-owned target launcher before invoking digest-pinned
+  root replay. Physical transition `9618bc0a...` converged to
+  `target_committed` release `1bab11df...`; the complete public signed-pair
+  verifier passed. The recovery notice now distinguishes receipt-free
+  bootstrap from an ordinary source release/prior-STABLE pair, and target-tree
+  preflight tolerates only the same uniform reboot-scoped APFS device
+  renumbering admitted by the installed authority verifier. Current source
   results are 239 of 239 Host tests with two skips, 20 of 20 isolated hostile
   pair tests, and 160 of 160 operator-authorization tests. The earlier 68 of 68
   deploy-wrapper and 12 of 12 external-containment-audit results remain

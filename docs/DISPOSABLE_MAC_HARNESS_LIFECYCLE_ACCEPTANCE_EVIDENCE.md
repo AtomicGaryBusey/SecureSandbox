@@ -498,6 +498,11 @@ stack boot, host-key enrollment, boundary qualification, driver install, or
 
 ## Interrupted ordinary Host recovery evidence
 
+On November 16 the operator reported that the Neo had been updated to macOS
+27.2.1, matching the Air. This is retained as operator-reported environment
+state only; the next Neo-local continuation must independently read back and
+bind the OS build before it can become physical campaign evidence.
+
 On November 16, a release-Mac install of reviewed commit `72e625a` lost its
 caller response after publishing an exact ordinary PENDING pair, and the
 operator cancelled the subsequent administrator-password prompt. The generic

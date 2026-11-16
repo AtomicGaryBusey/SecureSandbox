@@ -46,6 +46,7 @@ ARTIFACT_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}")
 DRIVER_ENTRYPOINTS = {
     "clean-machine-bootstrap": (
         "scripts/harness-lifecycle-acceptance-bootstrap.py",
+        "scripts/harness-lifecycle-acceptance-bootstrap-stack.py",
     ),
     "host-provenance-fixture": (
         "scripts/harness-lifecycle-acceptance-provenance.py",
@@ -99,6 +100,9 @@ PROTECTED_DRIVER_PAYLOADS = {
 }
 PROTECTED_DRIVER_PAYLOADS["clean-machine-bootstrap"] = (
     "scripts/harness-lifecycle-acceptance-bootstrap.py",
+    "scripts/harness-lifecycle-acceptance-bootstrap-stack.py",
+    "scripts/parallels-stopped-service-bootstrap.py",
+    "scripts/parallels-lifecycle.py",
     "scripts/harness-lifecycle-acceptance-supervisor.py",
     "scripts/harness-lifecycle-acceptance-observe.py",
     "scripts/harness-lifecycle-acceptance.py",

@@ -108,6 +108,70 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["prior_outcomes"][0]["result"],
                          "already_satisfied")
 
+    def test_fixed_caller_can_continue_under_same_lock(self):
+        patches = self.common(
+            [(self.intermediate, {}), (self.intermediate, {}),
+             (self.intermediate, {})],
+            [(53,), (53,), (53,)],
+        )
+        continuation = mock.Mock(return_value=7)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate",
+                ) as mutate:
+            self.assertEqual(bootstrap.run(continuation=continuation), 7)
+        mutate.assert_not_called()
+        continuation.assert_called_once_with(
+            inherited_lock=mock.ANY,
+            prior_outcomes=[{
+                "action": "parallels_service_bootstrap", "target": "gateway",
+                "result": "already_satisfied",
+            }],
+        )
+
+    def test_fixed_initial_validator_rejects_before_gateway_start(self):
+        patches = self.common([(self.initial, {}), (self.initial, {})], [(54,)])
+        validator = mock.Mock(side_effect=bootstrap.ServiceBootstrapError(
+            "acceptance_stack_uplink_must_be_disconnected_before_start"
+        ))
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7] as emit, mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate",
+                ) as mutate:
+            self.assertEqual(bootstrap.run(initial_validator=validator), 1)
+        validator.assert_called_once_with(self.initial)
+        mutate.assert_not_called()
+        self.assertIn(
+            "acceptance_stack_uplink_must_be_disconnected_before_start",
+            emit.call_args.args[4],
+        )
+
+    def test_fixed_initial_validator_rechecks_immediately_before_gateway_start(self):
+        isolated = dict(self.initial, gateway_net0="disconnected")
+        intermediate = dict(self.intermediate, gateway_net0="disconnected")
+        patches = self.common(
+            [(isolated, {}), (isolated, {}), (intermediate, {}),
+             (intermediate, {})],
+            [(55,), (55,), (55,)],
+        )
+        validator = mock.Mock()
+        continuation = mock.Mock(return_value=0)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate",
+                    side_effect=self.applied_mutation,
+                ), mock.patch.object(
+                    bootstrap.LIFECYCLE, "wait_vm", return_value=True,
+                ):
+            self.assertEqual(bootstrap.run(
+                continuation=continuation,
+                initial_validator=validator,
+            ), 0)
+        self.assertEqual(validator.call_args_list, [
+            mock.call(isolated), mock.call(isolated),
+        ])
+        continuation.assert_called_once()
+
     def test_other_partial_state_rejects_before_mutation(self):
         invalid = dict(self.intermediate, research="running")
         patches = self.common([(invalid, {}), (invalid, {})], [(61,)])

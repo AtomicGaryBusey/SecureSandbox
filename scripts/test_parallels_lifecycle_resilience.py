@@ -27,6 +27,8 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         self.assertNotIn('"$prlctl" start SecureSandbox-Gateway', labctl)
         self.assertIn("--bootstrap-parallels-service", labctl)
         self.assertIn("parallels-stopped-service-bootstrap.py", labctl)
+        self.assertIn("acceptance-bootstrap-start", labctl)
+        self.assertIn("harness-lifecycle-acceptance-bootstrap-stack.py", labctl)
 
     def test_live_ddd_requires_closed_gui_and_exact_readbacks(self):
         deploy = self.text("scripts/deploy-parallels-lifecycle-resilience-ddd.sh")
@@ -59,7 +61,7 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
     def test_mutations_restore_exact_ephemeral_identities_but_status_does_not(self):
         labctl = self.text("scripts/labctl")
         readiness = self.text("scripts/ensure-ssh-identities.sh")
-        self.assertEqual(labctl.count('"$root_dir/scripts/ensure-ssh-identities.sh"'), 2)
+        self.assertEqual(labctl.count('"$root_dir/scripts/ensure-ssh-identities.sh"'), 3)
         status = labctl[labctl.index("  status)"):labctl.index("  snapshots)")]
         self.assertNotIn("ensure-ssh-identities", status)
         self.assertIn("[[ \"$count\" == 1 && \"$actual\" == \"$expected\" ]]", readiness)

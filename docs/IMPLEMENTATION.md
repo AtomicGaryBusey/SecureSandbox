@@ -271,6 +271,26 @@ running. The corrected path waits a bounded TERM grace period, requires every
 intermediate process probe to remain exactly that sole PID, then permits an
 exact-PID KILL fallback. It never uses a process-name-wide signal.
 
+The broader production lifecycle verifier correctly rejected the Neo's
+factory-reset acceptance baseline after that bridge brought up the full stack.
+That verifier remains strict. The dedicated `acceptance-bootstrap-start` path
+instead binds the campaign's exact next clean-install case and complete
+protected ten-driver release, requires Gateway egress disconnected before
+power-on, starts only Gateway and Research, leaves Target stopped, synchronizes
+only those two guests after proving no active or unreconciled Research run,
+and applies the suite-fixed protected Host/Research readbacks without
+collecting evidence. Production `labctl stop` now disconnects and independently
+rereads Gateway `net0` before guest shutdown so the all-stopped baseline cannot
+create a transient egress window when the Parallels service is bootstrapped.
+Failure to isolate rejects before shutdown. The new controller and both
+Parallels lifecycle dependencies are included in the protected clean-machine
+driver closure. The one-shot collector independently rereads the exact
+GUI-closed Gateway/Research-running, Target-stopped, uplink-disconnected
+inventory and embeds a self-digested stack readback in its Host receipt, so the
+new startup command is not merely a procedural prerequisite. Post-power
+connected state is terminal rather than repaired, and the final emit-time
+snapshot must still match before the command returns success.
+
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from
 `<repo>/shared`, while the transactional guest closure installs dependencies

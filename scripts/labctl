@@ -173,6 +173,8 @@ Commands:
   key-load   Load the provisioning key from the Agents vault into a dedicated agent
   start [--bootstrap-parallels-service]
              Start all three VMs, reconnect Gateway uplink, and verify boundaries
+  acceptance-bootstrap-start
+             Start only the exact campaign bootstrap baseline with no new egress
   stop       Gracefully stop all three lab VMs
   status     Show VM state and guest reachability
   lifecycle-progress  Show the current Start or Stop phase while its lock is held
@@ -293,6 +295,12 @@ case "${1:-}" in
         "$root_dir/scripts/parallels-stopped-service-bootstrap.py"
     fi
     exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" start
+    ;;
+  acceptance-bootstrap-start)
+    (( $# == 1 )) || { echo "Usage: labctl acceptance-bootstrap-start" >&2; exit 2; }
+    "$root_dir/scripts/ensure-ssh-identities.sh"
+    exec /usr/bin/python3 \
+      "$root_dir/scripts/harness-lifecycle-acceptance-bootstrap-stack.py"
     ;;
   stop)
     (( $# == 1 )) || { echo "Usage: labctl stop" >&2; exit 2; }

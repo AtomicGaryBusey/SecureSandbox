@@ -131,7 +131,8 @@ def exact_intermediate(value: dict[str, str]) -> bool:
     )
 
 
-def run() -> int:
+def run(*, continuation: Callable[..., int] | None = None,
+        initial_validator: Callable[[dict[str, str]], None] | None = None) -> int:
     if os.geteuid() == 0:
         raise ServiceBootstrapError("parallels_service_bootstrap_must_not_run_as_root")
     try:
@@ -163,6 +164,8 @@ def run() -> int:
                 ["parallels_service_bootstrap_state_invalid"],
             )
             return 1
+        if initial_validator is not None:
+            initial_validator(initial)
         if gui_process_ids() != (gui_pid,):
             LIFECYCLE.emit(
                 "start", "rejected", "preflight", outcomes,
@@ -170,6 +173,8 @@ def run() -> int:
             )
             return 1
         if all_stopped:
+            if initial_validator is not None:
+                initial_validator(LIFECYCLE.observe()[0])
             if not LIFECYCLE.mutate(
                 [str(LIFECYCLE.PRLCTL), "start", GATEWAY_NAME],
                 "parallels_service_bootstrap", "gateway", outcomes,
@@ -206,7 +211,8 @@ def run() -> int:
                 ["parallels_closed_service_readback_invalid"],
             )
             return 1
-        return LIFECYCLE.start(inherited_lock=lock, prior_outcomes=outcomes)
+        starter = LIFECYCLE.start if continuation is None else continuation
+        return starter(inherited_lock=lock, prior_outcomes=outcomes)
     except (ServiceBootstrapError, LIFECYCLE.LifecycleError,
             subprocess.SubprocessError, OSError) as error:
         LIFECYCLE.emit(

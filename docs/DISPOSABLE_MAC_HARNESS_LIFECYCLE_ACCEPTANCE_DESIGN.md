@@ -739,6 +739,46 @@ reads, publication, and fsync relative to those descriptors, and rejects
 success unless both named paths still resolve to the same directory identities.
 It never re-resolves an operator-mutable parent for a root write.
 
+### Isolated acceptance bootstrap stack
+
+The production `labctl start` contract remains unchanged: it starts the full
+three-VM stack with Gateway egress and runs the complete production boundary
+verifier. A factory-reset acceptance machine intentionally does not satisfy
+that production deployment contract, so its rejection cannot be weakened or
+relabelled as acceptance evidence.
+
+`labctl acceptance-bootstrap-start` is a separate, no-argument transition for
+the suite-fixed `bootstrap-clean-install` baseline. Before mutation it binds
+the current campaign, enrolled machine, exact clean source commit, exact next
+case, and all ten protected driver closures. Its mutation controller and the
+Parallels lifecycle modules it imports are members of the protected
+clean-machine driver payload. It then uses the reviewed stopped-service bridge
+under the existing lifecycle lock, but only if Gateway `net0` was already
+disconnected before Gateway powers on. Regular `labctl stop` establishes that
+secure-at-rest state by disconnecting the uplink before any guest shutdown and
+rejects before shutdown if independent readback cannot prove disconnection.
+This prevents even a transient egress window during vendor-service bootstrap.
+
+With the Parallels GUI closed and the same lock still held, the acceptance
+transition starts only Research, leaves Target stopped, disables automatic
+gamepad sharing, and waits only for Gateway and Research protected control.
+It rejects active or unreconciled Research run markers, changes and
+independently reads back only those two guest clocks, and invokes the same
+read-only Host release, Research zero-generation store, and independent
+generation-boundary validators used by the one-shot collector. Success
+requires the exact final state Gateway running, Research running, Target
+stopped, and Gateway `net0` disconnected. The transition emits only a distinct
+lifecycle record and readback digests; it does not reserve a raw directory,
+create an observation, project evidence, or grant production authority.
+Collection remains a later one-shot operation. The collector does not trust
+that prior console result: it independently requires the GUI closed, rereads
+the same exact VM, uplink, and protected-control reachability state, and embeds
+a self-digested campaign/case/source-bound stack readback inside the Host raw
+receipt. Direct collector invocation with Target running, Gateway connected,
+or ambiguous reachability therefore rejects before producing clean-install
+artifacts. A second emit-time readback must still match the verified final
+inventory; a change or readback failure downgrades the transition to rejected.
+
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only
 tool therefore has three disjoint ceremonies. Its original command accepts only

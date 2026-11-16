@@ -109,6 +109,29 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             "generations": [], "boundary": boundary,
         }
 
+    def stack_readback(self, case: dict) -> dict:
+        value = {
+            "schema": bootstrap.STACK_SCHEMA, "status": "verified",
+            "campaign_id": self.campaign["campaign_id"],
+            "campaign_sha256": self.campaign["campaign_sha256"],
+            "source_commit": self.campaign["source_commit"],
+            "case_id": case["case_id"],
+            "procedure_sha256": case["procedure"]["procedure_sha256"],
+            "observed_at": NOW,
+            "observed": {
+                "gateway": "running", "research": "running",
+                "target": "stopped", "gateway_net0": "disconnected",
+            },
+            "reachability": {
+                "gateway": "reachable", "research": "reachable",
+                "target": "unreachable",
+            },
+            "parallels_gui_closed": True, "candidate_authority": "none",
+            "production_material_used": False,
+        }
+        value["stack_readback_sha256"] = acceptance.digest(value)
+        return value
+
     def preflight_patch(self, case: dict):
         return mock.patch.object(
             bootstrap, "preflight", return_value=(self.campaign, case),
@@ -132,6 +155,8 @@ class BootstrapAcceptanceTests(unittest.TestCase):
                 mock.patch.object(bootstrap.SUPERVISOR, "prerequisite"), \
                 mock.patch.object(bootstrap.HOST_RELEASE, "verify",
                                   return_value=self.release()), \
+                mock.patch.object(bootstrap, "stack_readback",
+                                  return_value=self.stack_readback(case)), \
                 mock.patch.object(bootstrap, "control", side_effect=control):
             result = bootstrap.collect(
                 self.campaign_path, self.observations, case["case_id"], self.raw,
@@ -159,6 +184,48 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             acceptance.validate_observation(
                 value, self.campaign, acceptance.CASE_BY_ID[case["case_id"]],
             )
+
+    def test_stack_readback_binds_exact_isolated_inventory(self):
+        case = self.case("bootstrap-clean-install")
+        observed = {
+            "gateway": "running", "research": "running",
+            "target": "stopped", "gateway_net0": "disconnected",
+        }
+        reachable = {
+            "gateway": "reachable", "research": "reachable",
+            "target": "unreachable",
+        }
+        with mock.patch.object(
+            bootstrap.LIFECYCLE, "require_mutation_prerequisites",
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "gui_running", return_value=False,
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "observe", return_value=(observed, reachable),
+        ):
+            value = bootstrap.stack_readback(self.campaign, case, NOW)
+        bootstrap.validate_stack_readback(self.campaign, case, value, NOW)
+        self.assertEqual(value["observed"], observed)
+
+    def test_stack_readback_rejects_connected_gateway(self):
+        case = self.case("bootstrap-clean-install")
+        observed = {
+            "gateway": "running", "research": "running",
+            "target": "stopped", "gateway_net0": "connected",
+        }
+        reachable = {
+            "gateway": "reachable", "research": "reachable",
+            "target": "unreachable",
+        }
+        with mock.patch.object(
+            bootstrap.LIFECYCLE, "require_mutation_prerequisites",
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "gui_running", return_value=False,
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "observe", return_value=(observed, reachable),
+        ), self.assertRaisesRegex(
+            bootstrap.BootstrapError, "bootstrap_stack_readback_invalid",
+        ):
+            bootstrap.stack_readback(self.campaign, case, NOW)
 
     def test_protected_projector_requests_root_read_only_publication(self):
         case = self.case("bootstrap-clean-install")
@@ -246,6 +313,23 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             and call.args[3] == 0
             for call in verify.call_args_list
         ))
+
+    def test_source_preflight_verifies_the_executing_checkout_not_cwd(self):
+        case = self.case("bootstrap-clean-install")
+        with mock.patch.object(
+            bootstrap.SUPERVISOR, "verify_source_checkout",
+        ) as verify, mock.patch.object(
+            bootstrap.SUPERVISOR, "current_machine_identity",
+            return_value=self.campaign["machine_identity_sha256"],
+        ), mock.patch.object(
+            bootstrap, "next_bootstrap_case", return_value=case,
+        ):
+            campaign, observed_case = bootstrap.preflight(
+                self.campaign_path, self.observations, case["case_id"], NOW,
+            )
+        self.assertEqual(campaign, self.campaign)
+        self.assertEqual(observed_case, case)
+        verify.assert_called_once_with(self.campaign, bootstrap.ROOT)
 
     def test_protected_preflight_rejects_invalid_installed_closure(self):
         case = self.case("bootstrap-clean-install")

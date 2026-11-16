@@ -583,17 +583,27 @@ in ignored local records, not in this file.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The current live campaign is bound to exact source `35dd424` with zero raw
   reservations and zero observations; its next case remains
-  `bootstrap-clean-install`. Before collecting it, publish and physically
-  exercise the corrected explicit Parallels 27.1 stopped-service bootstrap.
+  `bootstrap-clean-install`. Retain it through the existing no-delete empty-
+  campaign path before installing or initializing a replacement. Before
+  collecting, publish and physically exercise the corrected explicit Parallels
+  27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also
   proved Parallels vetoes Apple-event quit and SIGTERM once Gateway runs. Use
   only bounded exact-PID TERM/KILL with repeated identity readback. The ordinary
   production controller must retain its complete boundary verifier; do not
   weaken it to fit the campaign's deliberately narrower
-  `factory-reset-test-account` baseline. Define and verify a distinct
-  acceptance-start prerequisite contract from the already suite-fixed Host and
-  Research boundaries before invoking the one-shot collector. Never collect on
-  an ambiguous or partially recovered startup.
+  `factory-reset-test-account` baseline. The source candidate now provides a
+  no-argument `acceptance-bootstrap-start` contract that binds the exact clean
+  campaign and protected ten-driver release, requires Gateway `net0`
+  disconnected before power-on, starts only Gateway and Research, leaves
+  Target stopped, and applies the suite-fixed Host and Research readbacks
+  without collecting evidence. The collector independently enforces that
+  exact GUI-closed VM/uplink/reachability baseline and embeds a campaign-bound
+  self-digested stack readback in its Host raw receipt. Regular stop establishes the disconnected
+  all-stopped baseline and rejects before shutdown if isolation cannot be
+  proven. Finish review and publication, install the exact release, then
+  physically prove the fixed final inventory before invoking the one-shot
+  collector. Never collect on an ambiguous or partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

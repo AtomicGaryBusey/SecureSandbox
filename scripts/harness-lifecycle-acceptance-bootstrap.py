@@ -36,6 +36,7 @@ from harness_lifecycle_acceptance import (  # noqa: E402
 SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-bootstrap-v1"
 ERROR_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-bootstrap-error-v1"
 HOST_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-host-install-v1"
+STACK_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-stack-readback-v1"
 RESEARCH_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-research-install-v1"
 SCAN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-production-scan-v1"
 ENROLLMENT_READBACK_SCHEMA = (
@@ -117,6 +118,10 @@ HOST_RELEASE = load_script(
 ENROLLER = load_script(
     "harness_lifecycle_acceptance_enrollment",
     ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py",
+)
+LIFECYCLE = load_script(
+    "harness_lifecycle_acceptance_parallels_lifecycle",
+    ROOT / "scripts/parallels-lifecycle.py",
 )
 PRODUCTION_HOME_PATHS = ENROLLER.PROVIDER_HOME_PATHS
 
@@ -328,7 +333,7 @@ def preflight(campaign_path: Path, observations: Path,
         if protected_projection:
             require_protected_release(campaign)
         else:
-            SUPERVISOR.verify_source_checkout(campaign)
+            SUPERVISOR.verify_source_checkout(campaign, ROOT)
         machine = SUPERVISOR.current_machine_identity()
     except (AcceptanceError, OSError, SUPERVISOR.SupervisorError) as error:
         raise BootstrapError("bootstrap_preflight_failed") from error
@@ -370,6 +375,41 @@ def receipt(schema: str, campaign: dict[str, Any], case: dict[str, Any],
     return value
 
 
+def stack_readback(campaign: dict[str, Any], case: dict[str, Any],
+                   now: int) -> dict[str, Any]:
+    try:
+        LIFECYCLE.require_mutation_prerequisites()
+        if LIFECYCLE.gui_running():
+            raise BootstrapError("bootstrap_stack_gui_running")
+        observed, reachable = LIFECYCLE.observe(reachability=True)
+    except (LIFECYCLE.LifecycleError, subprocess.SubprocessError,
+            OSError) as error:
+        raise BootstrapError("bootstrap_stack_readback_failed") from error
+    expected_observed = {
+        "gateway": "running", "research": "running", "target": "stopped",
+        "gateway_net0": "disconnected",
+    }
+    expected_reachable = {
+        "gateway": "reachable", "research": "reachable",
+        "target": "unreachable",
+    }
+    if observed != expected_observed or reachable != expected_reachable:
+        raise BootstrapError("bootstrap_stack_readback_invalid")
+    value = {
+        "schema": STACK_SCHEMA, "status": "verified",
+        "campaign_id": campaign["campaign_id"],
+        "campaign_sha256": campaign["campaign_sha256"],
+        "source_commit": campaign["source_commit"],
+        "case_id": case["case_id"],
+        "procedure_sha256": case["procedure"]["procedure_sha256"],
+        "observed_at": now, "observed": observed,
+        "reachability": reachable, "parallels_gui_closed": True,
+        "candidate_authority": "none", "production_material_used": False,
+    }
+    value["stack_readback_sha256"] = digest(value)
+    return value
+
+
 def valid_observed_at(campaign: dict[str, Any], value: dict[str, Any], now: int) -> bool:
     observed = value.get("observed_at")
     return (isinstance(observed, int) and not isinstance(observed, bool)
@@ -383,9 +423,11 @@ def validate_host_receipt(campaign: dict[str, Any], case: dict[str, Any],
         "schema", "status", "campaign_id", "campaign_sha256",
         "machine_identity_sha256", "source_commit", "case_id",
         "procedure_sha256", "observed_at", "release", "release_sha256",
+        "stack_readback", "stack_readback_sha256",
         "candidate_authority", "production_material_used", "receipt_sha256",
     }
     release = value.get("release")
+    stack = value.get("stack_readback")
     unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
     if (set(value) != expected or value.get("schema") != HOST_SCHEMA
             or value.get("status") != "verified"
@@ -413,10 +455,50 @@ def validate_host_receipt(campaign: dict[str, Any], case: dict[str, Any],
             or release.get("developer_id_team_id")
                != HOST_RELEASE.NATIVE_HOST_PRODUCTS_TEAM_ID
             or value.get("release_sha256") != digest(release)
+            or not isinstance(stack, dict)
+            or value.get("stack_readback_sha256") != digest(stack)
             or value.get("candidate_authority") != "none"
             or value.get("production_material_used") is not False
             or value.get("receipt_sha256") != digest(unsigned)):
         raise BootstrapError("bootstrap_host_receipt_invalid")
+    validate_stack_readback(campaign, case, stack, now)
+
+
+def validate_stack_readback(campaign: dict[str, Any], case: dict[str, Any],
+                            value: dict[str, Any], now: int) -> None:
+    expected = {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "source_commit", "case_id", "procedure_sha256", "observed_at",
+        "observed", "reachability", "parallels_gui_closed",
+        "candidate_authority", "production_material_used",
+        "stack_readback_sha256",
+    }
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "stack_readback_sha256"
+    }
+    if (set(value) != expected or value.get("schema") != STACK_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != case["case_id"]
+            or value.get("procedure_sha256")
+               != case["procedure"]["procedure_sha256"]
+            or not valid_observed_at(campaign, value, now)
+            or value.get("observed") != {
+                "gateway": "running", "research": "running",
+                "target": "stopped", "gateway_net0": "disconnected",
+            }
+            or value.get("reachability") != {
+                "gateway": "reachable", "research": "reachable",
+                "target": "unreachable",
+            }
+            or value.get("parallels_gui_closed") is not True
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get("stack_readback_sha256") != digest(unsigned)):
+        raise BootstrapError("bootstrap_stack_receipt_invalid")
 
 
 def validate_research_receipt(campaign: dict[str, Any], case: dict[str, Any],
@@ -467,8 +549,9 @@ def validate_research_receipt(campaign: dict[str, Any], case: dict[str, Any],
         raise BootstrapError("bootstrap_boundary_invalid") from error
 
 
-def collect_clean_install(campaign: dict[str, Any], case: dict[str, Any],
-                          destination: Path, now: int) -> list[str]:
+def clean_install_readback(campaign: dict[str, Any], case: dict[str, Any],
+                           now: int) -> dict[str, dict[str, Any]]:
+    """Read and validate the fixed clean-install boundary without publication."""
     try:
         for path in (SUPERVISOR.CONTROL_CLIENT, SUPERVISOR.SSH_CONFIG):
             SUPERVISOR.prerequisite(path, executable=path != SUPERVISOR.SSH_CONFIG)
@@ -482,8 +565,10 @@ def collect_clean_install(campaign: dict[str, Any], case: dict[str, Any],
     control_status = control("control-status")
     store_status = control("harness-generation-status")
     boundary = control("harness-generation-verify-boundary")
+    stack = stack_readback(campaign, case, now)
     host = receipt(HOST_SCHEMA, campaign, case, now, {
         "release": release, "release_sha256": digest(release),
+        "stack_readback": stack, "stack_readback_sha256": digest(stack),
     }, "receipt_sha256")
     research = receipt(RESEARCH_SCHEMA, campaign, case, now, {
         "control_status": control_status, "store_status": store_status,
@@ -492,11 +577,16 @@ def collect_clean_install(campaign: dict[str, Any], case: dict[str, Any],
     }, "receipt_sha256")
     validate_host_receipt(campaign, case, host, now)
     validate_research_receipt(campaign, case, research, boundary, now)
-    values = {
+    return {
         "host-install-readback.json": host,
         "research-install-readback.json": research,
         "boundary-readback.json": boundary,
     }
+
+
+def collect_clean_install(campaign: dict[str, Any], case: dict[str, Any],
+                          destination: Path, now: int) -> list[str]:
+    values = clean_install_readback(campaign, case, now)
     for name, value in values.items():
         SUPERVISOR.write_new(destination / name, value)
     return list(values)

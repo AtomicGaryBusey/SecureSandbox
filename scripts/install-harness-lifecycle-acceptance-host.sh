@@ -50,6 +50,9 @@ remote_tip="$(cd / && trusted_git ls-remote --exit-code \
 # exact requested commit.
 payloads=(
   scripts/harness-lifecycle-acceptance-bootstrap.py
+  scripts/harness-lifecycle-acceptance-bootstrap-stack.py
+  scripts/parallels-stopped-service-bootstrap.py
+  scripts/parallels-lifecycle.py
   scripts/harness-lifecycle-acceptance-archive.py
   scripts/harness-lifecycle-acceptance-authorization.py
   scripts/harness-lifecycle-acceptance-authorization-observe.py

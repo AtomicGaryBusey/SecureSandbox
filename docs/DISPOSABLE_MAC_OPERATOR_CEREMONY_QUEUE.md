@@ -18,6 +18,22 @@ disposable campaign. Those actions would not produce valid physical evidence.
 No Touch ID prompt or root-password prompt is currently runnable on the
 development Mac.
 
+## Current Neo resumption
+
+The retained live Neo campaign is still the empty exact `35dd424` campaign;
+do not collect from it under newer source. After the acceptance-start repair is
+reviewed and published, wake and unlock the Neo, establish actual VM and GUI
+state read-only, and use the ordinary reviewed stop controller to reach
+all-stopped with Gateway `net0` independently proven disconnected. Retain and
+independently verify the old campaign through the existing no-delete empty-
+campaign continuation, install the exact newly published protected ten-driver
+release, and initialize a fresh exact-source campaign.
+
+Then run `labctl acceptance-bootstrap-start`. Only a verified record showing
+Gateway and Research running, Target stopped, and Gateway `net0` disconnected
+makes the separate one-shot collector eligible. The start transition does not
+itself collect an observation or request Touch ID.
+
 ## Before asking for a root password
 
 The agent must first prove and report all of the following without mutation:

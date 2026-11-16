@@ -140,8 +140,12 @@ if [[ "$1" == stop ]]; then
   exit 0
 fi
 if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --device-disconnect ]]; then
-  printf disconnected >"$MOCK_STATE_DIR/uplink"
-  printf on >"$MOCK_STATE_DIR/gamepad"
+  action=disconnect
+  if [[ "${MOCK_NO_APPLY_ACTION:-}" != "$action" ]]; then
+    printf disconnected >"$MOCK_STATE_DIR/uplink"
+    printf on >"$MOCK_STATE_DIR/gamepad"
+  fi
+  [[ "${MOCK_FAIL_RESPONSE:-}" == "$action" ]] && exit 1
   exit 0
 fi
 if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --auto-share-gamepad ]]; then
@@ -356,7 +360,10 @@ exit 2
         specification.loader.exec_module(module)
         descriptor = os.open(self.root / "restore.lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            observed = {"gateway": "stopped", "research": "stopped", "target": "stopped"}
+            observed = {
+                "gateway": "stopped", "research": "stopped",
+                "target": "stopped", "gateway_net0": "disconnected",
+            }
             with (patch.object(module, "observe", return_value=(observed, {})),
                   patch.object(module, "vm_state", return_value="stopped"),
                   patch.object(module, "emit"),
@@ -512,8 +519,20 @@ exit 2
         result = self.run_labctl("stop")
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(result)
+        uplink = next(item for item in record["action_outcomes"]
+                      if item["action"] == "gateway_uplink_disconnect")
+        self.assertEqual(uplink["result"], "succeeded")
         self.assertTrue(all(item["result"] == "already_satisfied"
-                            for item in record["action_outcomes"]))
+                            for item in record["action_outcomes"]
+                            if item["action"] == "guest_shutdown"))
+        self.assertNotIn("poweroff", self.log.read_text(encoding="utf-8"))
+
+    def test_stop_fails_closed_before_shutdown_if_uplink_cannot_disconnect(self):
+        result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="disconnect")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["observed"]["gateway_net0"], "connected")
+        self.assertIn("gateway_uplink_disconnect", record["action_failures"])
         self.assertNotIn("poweroff", self.log.read_text(encoding="utf-8"))
 
     def test_stop_rejects_residual_running_guest(self):

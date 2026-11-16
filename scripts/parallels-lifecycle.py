@@ -493,6 +493,22 @@ def stop(*, inherited_lock: int | None = None) -> int:
         if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):
             emit("stop", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
+        if initial["gateway_net0"] == "connected":
+            publish_progress("stop", "gateway_uplink", "gateway")
+            if not mutate(
+                [str(PRLCTL), "set", "SecureSandbox-Gateway",
+                 "--device-disconnect", "net0"],
+                "gateway_uplink_disconnect", "gateway", outcomes,
+                lambda: gateway_uplink_state() == "disconnected",
+            ):
+                emit("stop", "rejected", "transition", outcomes,
+                     ["gateway_uplink_disconnect"])
+                return 1
+        else:
+            outcomes.append({
+                "action": "gateway_uplink_disconnect", "target": "gateway",
+                "result": "already_satisfied",
+            })
         for key, name, host in STOP_ORDER:
             publish_progress("stop", "guest_shutdown", key)
             state = vm_state(name)

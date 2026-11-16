@@ -142,7 +142,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
 
     def test_bootstrap_driver_is_read_only_exact_source_and_fixed_authority(self):
         for phrase in (
-            "SUPERVISOR.verify_source_checkout(campaign)",
+            "SUPERVISOR.verify_source_checkout(campaign, ROOT)",
             "SUPERVISOR.current_machine_identity()",
             "ACCEPTANCE_CLI.next_case(",
             "observation_uid=0",

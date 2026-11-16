@@ -366,6 +366,34 @@ exit 2
         finally:
             os.close(descriptor)
 
+    def test_inherited_start_rechecks_prerequisites_and_closed_gui(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_inherited_start_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        descriptor = os.open(self.root / "inherited-start.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+        prior = [{"action": "parallels_service_bootstrap",
+                  "target": "gateway", "result": "succeeded"}]
+        try:
+            with (patch.object(module, "require_mutation_prerequisites") as prerequisites,
+                  patch.object(module, "gui_running", return_value=True),
+                  patch.object(module, "emit") as emit,
+                  patch.object(module, "observe") as observe,
+                  patch.object(module, "ensure_mutation_preconditions",
+                               side_effect=AssertionError("new lock"))):
+                self.assertEqual(module.start(
+                    inherited_lock=descriptor, prior_outcomes=prior,
+                ), 1)
+            prerequisites.assert_called_once()
+            observe.assert_not_called()
+            self.assertEqual(emit.call_args.args[3], prior)
+            self.assertEqual(emit.call_args.args[4], ["parallels_gui_running"])
+            os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
     def test_protected_control_calls_have_short_inner_deadlines(self):
         result = self.run_labctl("stop")
         self.assertEqual(result.returncode, 0, result.stderr)

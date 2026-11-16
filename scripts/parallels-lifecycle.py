@@ -374,9 +374,13 @@ def mutate(
     return verified
 
 
-def ensure_mutation_preconditions(operation: str) -> int:
+def require_mutation_prerequisites() -> None:
     for path, executable in ((PRLCTL, True), (CONTROL_CLIENT, True), (SSH_CONFIG, False)):
         require_regular(path, executable=executable)
+
+
+def ensure_mutation_preconditions(operation: str) -> int:
+    require_mutation_prerequisites()
     try:
         if gui_running():
             emit(operation, "rejected", "preflight", [], ["parallels_gui_running"])
@@ -391,11 +395,23 @@ def ensure_mutation_preconditions(operation: str) -> int:
         raise SystemExit(1) from error
 
 
-def start(*, inherited_lock: int | None = None) -> int:
+def start(*, inherited_lock: int | None = None,
+          prior_outcomes: list[dict[str, str]] | None = None) -> int:
     lock = ensure_mutation_preconditions("start") if inherited_lock is None else inherited_lock
-    outcomes: list[dict[str, str]] = []
+    outcomes: list[dict[str, str]] = list(prior_outcomes or [])
     failures: list[str] = []
     try:
+        if inherited_lock is not None:
+            require_mutation_prerequisites()
+            try:
+                if gui_running():
+                    emit("start", "rejected", "preflight", outcomes,
+                         ["parallels_gui_running"])
+                    return 1
+            except subprocess.TimeoutExpired:
+                emit("start", "rejected", "preflight", outcomes,
+                     ["parallels_gui_state_unavailable"])
+                return 1
         publish_progress("start", "preflight")
         initial, _ = observe()
         if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):

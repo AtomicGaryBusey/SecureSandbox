@@ -1,11 +1,33 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
 Status: every superseded or failed exact-commit campaign on the disposable Neo
-is retained without deletion, including the historical protected collection
-and its unchanged raw bytes. No replacement campaign is currently live and no
-acceptance verdict has been issued. The complete protected `dac1f642` driver
-release, Host bootstrap, three-VM installation, host-key enrollment, and
-retained fail-closed upgrade attempts are physical preparation evidence.
+is retained without deletion, including historical protected collections and
+their unchanged raw bytes. A fresh replacement campaign is now live, bound to
+the exact installed public source and canonical suite digest retained in
+private evidence. It has zero observations, zero raw reservations, and exact
+next case `bootstrap-clean-install`. No acceptance verdict has been issued.
+
+The exact `35dd424` protected ten-driver release is installed root-owned on the
+Neo. Its complete manifest passed independent readiness with ten available
+drivers and zero missing, rejected, or errored closures. Pre-install and
+post-install stopped-inventory bridge receipts passed the exact consumer, and
+all failed predecessor bridge attempts remain retained. The wiped Neo's two
+ephemeral SSH identities were restored directly into separate agents from the
+Agents vault without writing private key material to disk; public fingerprint
+readback passed before any lifecycle attempt.
+
+The first ordinary campaign startup rejected before VM mutation because the
+wiped Neo correctly lacked the local vault tooling required by `labctl
+key-load`; the in-memory identity restoration closed that prerequisite. The
+next ordinary startup also rejected before mutation because Parallels Desktop
+27.1.0 removes its per-user service when its GUI exits while all VMs are
+stopped. Independent readback proved all three VMs remain stopped, the GUI and
+service absent, and `prl_bglaunch` unsuitable because it launches the GUI
+client. The source repair adds only an explicit Gateway-first service bootstrap
+under the existing lifecycle lock, then requires GUI absence and exact
+Gateway-only readback before the ordinary closed-GUI controller can continue.
+Publication and physical execution of that path remain pending. The protected
+collector has not been invoked and its raw destination remains absent.
 
 The fresh replacement-campaign preflight exposed a Parallels 27.2.1 platform
 boundary: `prlctl` becomes unavailable immediately after `prl_client_app`

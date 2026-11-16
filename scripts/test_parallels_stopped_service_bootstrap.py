@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import importlib.util
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SPEC = importlib.util.spec_from_file_location(
+    "parallels_stopped_service_bootstrap",
+    ROOT / "scripts/parallels-stopped-service-bootstrap.py",
+)
+assert SPEC is not None and SPEC.loader is not None
+bootstrap = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(bootstrap)
+
+
+class StoppedServiceBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.progress = Path(self.temporary.name) / "progress.json"
+        self.initial = {
+            "gateway": "stopped", "research": "stopped", "target": "stopped",
+            "gateway_net0": "connected",
+        }
+        self.intermediate = {
+            "gateway": "running", "research": "stopped", "target": "stopped",
+            "gateway_net0": "connected",
+        }
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    @staticmethod
+    def descriptor() -> int:
+        return os.open("/dev/null", os.O_RDONLY)
+
+    @staticmethod
+    def applied_mutation(argv, action, target, outcomes, verify):
+        outcomes.append({"action": action, "target": target, "result": "succeeded"})
+        return verify()
+
+    def common(self, observations, gui_ids):
+        return (
+            mock.patch.object(bootstrap.os, "geteuid", return_value=501),
+            mock.patch.object(
+                bootstrap.LIFECYCLE, "acquire_lock", side_effect=self.descriptor,
+            ),
+            mock.patch.object(
+                bootstrap.LIFECYCLE, "require_mutation_prerequisites",
+            ),
+            mock.patch.object(
+                bootstrap.LIFECYCLE, "PROGRESS_PATH", self.progress,
+            ),
+            mock.patch.object(
+                bootstrap.LIFECYCLE, "observe", side_effect=observations,
+            ),
+            mock.patch.object(
+                bootstrap, "gui_process_ids", side_effect=gui_ids,
+            ),
+            mock.patch.object(bootstrap, "quit_gui"),
+            mock.patch.object(bootstrap, "wait_gui_absent"),
+            mock.patch.object(bootstrap.LIFECYCLE, "emit"),
+        )
+
+    def test_all_stopped_bootstraps_only_gateway_then_delegates_closed_start(self):
+        patches = self.common(
+            [(self.initial, {}), (self.intermediate, {}), (self.intermediate, {})],
+            [(41,), (41,), (41,)],
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6] as quit_gui, patches[7] as wait_absent, patches[8], \
+                mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
+                ) as mutate, mock.patch.object(
+                    bootstrap.LIFECYCLE, "wait_vm", return_value=True,
+                ), mock.patch.object(
+                    bootstrap.LIFECYCLE, "start", return_value=0,
+                ) as start:
+            self.assertEqual(bootstrap.run(), 0)
+        mutate.assert_called_once()
+        self.assertEqual(mutate.call_args.args[1:3], (
+            "parallels_service_bootstrap", "gateway",
+        ))
+        quit_gui.assert_called_once()
+        wait_absent.assert_called_once()
+        self.assertEqual(start.call_args.kwargs["prior_outcomes"], [{
+            "action": "parallels_service_bootstrap",
+            "target": "gateway", "result": "succeeded",
+        }])
+        self.assertGreaterEqual(start.call_args.kwargs["inherited_lock"], 0)
+
+    def test_verified_gateway_recovery_does_not_start_it_again(self):
+        patches = self.common(
+            [(self.intermediate, {}), (self.intermediate, {}), (self.intermediate, {})],
+            [(52,), (52,), (52,)],
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8], mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate",
+                ) as mutate, mock.patch.object(
+                    bootstrap.LIFECYCLE, "start", return_value=0,
+                ) as start:
+            self.assertEqual(bootstrap.run(), 0)
+        mutate.assert_not_called()
+        self.assertEqual(start.call_args.kwargs["prior_outcomes"][0]["result"],
+                         "already_satisfied")
+
+    def test_other_partial_state_rejects_before_mutation(self):
+        invalid = dict(self.intermediate, research="running")
+        patches = self.common([(invalid, {}), (invalid, {})], [(61,)])
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8] as emit, mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate",
+                ) as mutate, mock.patch.object(
+                    bootstrap.LIFECYCLE, "start",
+                ) as start:
+            self.assertEqual(bootstrap.run(), 1)
+        mutate.assert_not_called()
+        start.assert_not_called()
+        self.assertIn("parallels_service_bootstrap_state_invalid",
+                      emit.call_args.args[4])
+
+    def test_gui_pid_change_after_gateway_start_rejects_before_close(self):
+        patches = self.common(
+            [(self.initial, {}), (self.intermediate, {}), (self.intermediate, {})],
+            [(71,), (71,), (72,)],
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6] as quit_gui, patches[7], patches[8] as emit, \
+                mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
+                ), mock.patch.object(
+                    bootstrap.LIFECYCLE, "wait_vm", return_value=True,
+                ), mock.patch.object(bootstrap.LIFECYCLE, "start") as start:
+            self.assertEqual(bootstrap.run(), 1)
+        quit_gui.assert_not_called()
+        start.assert_not_called()
+        self.assertIn("parallels_gui_session_changed", emit.call_args.args[4])
+
+    def test_closed_service_loss_rejects_without_ordinary_start(self):
+        unavailable = {
+            "gateway": "unknown", "research": "unknown", "target": "unknown",
+            "gateway_net0": "unknown",
+        }
+        patches = self.common(
+            [(self.initial, {}), (self.intermediate, {}), (unavailable, {}),
+             (unavailable, {})],
+            [(81,), (81,), (81,)],
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8] as emit, mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
+                ), mock.patch.object(
+                    bootstrap.LIFECYCLE, "wait_vm", return_value=True,
+                ), mock.patch.object(bootstrap.LIFECYCLE, "start") as start:
+            self.assertEqual(bootstrap.run(), 1)
+        start.assert_not_called()
+        self.assertIn("parallels_closed_service_readback_invalid",
+                      emit.call_args.args[4])
+
+    def test_untrusted_prerequisite_rejects_before_gui_probe_or_lock(self):
+        with mock.patch.object(
+            bootstrap.os, "geteuid", return_value=501,
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "require_mutation_prerequisites",
+            side_effect=bootstrap.LIFECYCLE.LifecycleError(
+                "prerequisite_untrusted:control_client"
+            ),
+        ), mock.patch.object(
+            bootstrap, "gui_process_ids",
+        ) as gui, mock.patch.object(
+            bootstrap.LIFECYCLE, "acquire_lock",
+        ) as acquire, self.assertRaisesRegex(
+            bootstrap.ServiceBootstrapError,
+            "prerequisite_untrusted:control_client",
+        ):
+            bootstrap.run()
+        gui.assert_not_called()
+        acquire.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

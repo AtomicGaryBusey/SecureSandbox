@@ -4,8 +4,10 @@
 
 Implemented and deployed. Adversarial fault-injection tests, the reviewed live
 stop/start and idempotent-recovery sequence, and complete boundary verification
-pass. Deployment-specific state, VM identities, and acceptance transcripts
-remain private.
+pass. A Parallels 27.1 stopped-service bootstrap extension is implemented and
+source-tested; publication and physical Neo execution are pending.
+Deployment-specific state, VM identities, and acceptance transcripts remain
+private.
 
 ## Problem and evidence
 
@@ -16,6 +18,14 @@ Separately, the Parallels Desktop GUI has crashed while network state changed
 during both stack shutdown and startup. In each retained incident, command or
 transport status alone disagreed with the VM state that was subsequently read
 back from Parallels.
+
+Physical acceptance on macOS 27.2.1 with Parallels Desktop 27.1.0 exposed a
+second vendor boundary: when every VM is stopped, quitting the GUI also removes
+the per-user Parallels service that backs `prlctl`. Keeping the GUI closed makes
+inventory unavailable, while keeping it open correctly blocks ordinary
+lifecycle mutation. `prl_bglaunch` is not a headless service bootstrap on this
+release; it launches the GUI client. This creates an all-stopped service
+deadlock rather than a VM-state ambiguity.
 
 The former `labctl start` suppressed every `prlctl` failure and then continued.
 The former `labctl stop` reported expected shutdown disconnects as action
@@ -53,6 +63,17 @@ remains a separate and stronger requirement after startup.
   Gateway, Research, Target order. It repairs a disconnected Gateway uplink,
   waits for each role's authenticated control endpoint, synchronizes clocks,
   and completes the full boundary verifier.
+- `start --bootstrap-parallels-service` is an explicit, narrowly bounded
+  recovery for the all-stopped service deadlock. It requires exactly one stable
+  GUI PID and either the exact all-stopped inventory or the exact recovery
+  inventory Gateway running/Research stopped/Target stopped. While holding the
+  ordinary lifecycle lock, it may start only the Gateway. It verifies that
+  exact intermediate state and the unchanged GUI PID, quits the GUI, proves
+  the GUI absent, and proves the same intermediate inventory is still readable.
+  Only then does it transfer the already-held lock and its recorded outcome to
+  the ordinary closed-GUI start controller. Adapter mutation, Research and
+  Target startup, guest readiness, clock synchronization, and complete boundary
+  verification remain ordinary-controller operations with the GUI closed.
 - `stop` holds the same lock, refuses a running GUI, and converges in Target,
   Research, Gateway order. Already-stopped guests are not contacted. A closed
   SSH transport is recorded as `lost_response` only when independent `prlctl`
@@ -73,6 +94,12 @@ closed before a new mutation. A residual guest, inaccessible control endpoint,
 clock failure, or failed boundary gate produces a rejected final record. A
 retry after controller or GUI failure derives work only from fresh state; it
 does not replay a remembered command.
+
+The service bootstrap rejects multiple or changing GUI PIDs, every other mixed
+VM state, failed Gateway readback, failed GUI quit, service loss after quit, and
+any changed post-quit inventory. Its Gateway-only recovery state exists solely
+to resolve an interrupted prior bootstrap without issuing a duplicate start.
+Operators must inspect fresh state before retrying a rejected transition.
 
 ## Evidence contract
 
@@ -123,7 +150,12 @@ and the complete boundary verifier passes.
 - Lifecycle code never invokes `prlctl` as root and gains no new guest or host
   authority.
 - GUI detection occurs before the transition lock is allowed to issue a
-  mutating command.
+  mutating command. The explicit stopped-service bootstrap instead binds one
+  stable GUI PID under that lock and removes the GUI before transferring to the
+  ordinary mutation path.
+- The bootstrap's GUI probes and quit operation have short deadlines and
+  bounded output. It runs as the login user, never invokes `prlctl` as root,
+  and cannot select a VM, adapter, or executable path at runtime.
 - `panic` remains an independent emergency containment path and does not depend
   on guest cooperation.
 
@@ -150,6 +182,10 @@ Automated tests must prove:
 11. status never restores credentials, start and stop gate every mutation on
     identity readiness, missing agents are restored and rechecked, and a failed
     restore produces no Parallels action.
+12. the explicit stopped-service bootstrap starts only Gateway from exact
+    all-stopped state, accepts only the exact Gateway-only recovery state,
+    rejects GUI PID change and post-quit service loss, and delegates through the
+    same already-held lock only after an exact closed-GUI readback.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or
 ordinary publication gate. The operator must first quit Parallels Desktop and

@@ -581,6 +581,14 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
+  The current live campaign is bound to exact source `35dd424` with zero raw
+  reservations and zero observations; its next case remains
+  `bootstrap-clean-install`. Before collecting it, publish and physically
+  exercise the explicit Parallels 27.1 stopped-service bootstrap. Accept only a
+  final verified lifecycle record with all three VMs running, authenticated
+  guest reachability, connected Gateway uplink, trusted time, and the complete
+  boundary verifier. Never invoke the one-shot collector on a rejected or
+  partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

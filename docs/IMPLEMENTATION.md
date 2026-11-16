@@ -253,6 +253,19 @@ complete-release campaign transition. There is no implicit fallback and no
 running-VM bridge; ordinary live closed-GUI inventory remains the default
 wherever the vendor API supports it.
 
+The same physical run proved that Parallels Desktop 27.1.0 removes its
+per-user service when the GUI closes while all three VMs are stopped. The
+ordinary controller remains strict and still refuses every GUI-present
+mutation. An explicit `labctl start --bootstrap-parallels-service` path handles
+only this deadlock: under the ordinary lifecycle lock it binds exactly one GUI
+PID, accepts only all-stopped or the exact Gateway-only recovery inventory,
+starts at most the fixed Gateway, verifies that state, quits the GUI, and
+requires the same inventory to remain readable. It then hands the lock and
+bootstrap outcome to the ordinary controller, which performs all adapter work,
+remaining starts, readiness, time synchronization, and boundary verification
+with the GUI closed. PID change, any other partial state, failed quit, service
+loss, or changed readback rejects without fallback.
+
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from
 `<repo>/shared`, while the transactional guest closure installs dependencies

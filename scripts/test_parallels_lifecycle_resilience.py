@@ -25,6 +25,8 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         invocation = 'exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py"'
         self.assertEqual(labctl.count(invocation), 4)
         self.assertNotIn('"$prlctl" start SecureSandbox-Gateway', labctl)
+        self.assertIn("--bootstrap-parallels-service", labctl)
+        self.assertIn("parallels-stopped-service-bootstrap.py", labctl)
 
     def test_live_ddd_requires_closed_gui_and_exact_readbacks(self):
         deploy = self.text("scripts/deploy-parallels-lifecycle-resilience-ddd.sh")

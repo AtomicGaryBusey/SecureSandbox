@@ -21,9 +21,6 @@ done
 python3 -m py_compile "$manager" "$inspector" "$store" "$workflow" "$binding"
 bash -n "$rollback"
 
-backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
-[[ ! -e "$backup" && ! -L "$backup" ]] || { echo "Backup identity already exists." >&2; exit 1; }
-install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
 declare -a names=(harness-generation-manager.py harness-generation.py harness_generation_store.py privileged_workflow.py harness_runtime_binding.py rollback-harness-lifecycle-consumer.sh)
 declare -a destinations=(
   /usr/local/libexec/secure-sandbox/harness-generation-manager.py
@@ -33,6 +30,19 @@ declare -a destinations=(
   /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
   /usr/local/libexec/secure-sandbox/rollback-harness-lifecycle-consumer.sh
 )
+prior_count=0
+for current in "${destinations[@]}"; do
+  if [[ -e "$current" || -L "$current" ]]; then
+    [[ -f "$current" && ! -L "$current" ]] || { echo "Installed lifecycle consumer is invalid." >&2; exit 1; }
+    prior_count=$((prior_count + 1))
+  fi
+done
+(( prior_count == 0 || prior_count == ${#destinations[@]} )) || {
+  echo "Installed lifecycle consumer is partial." >&2; exit 1;
+}
+backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
+[[ ! -e "$backup" && ! -L "$backup" ]] || { echo "Backup identity already exists." >&2; exit 1; }
+install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
 for index in "${!names[@]}"; do
   current="${destinations[$index]}"; name="${names[$index]}"
   if [[ -f "$current" && ! -L "$current" ]]; then
@@ -53,8 +63,14 @@ install -o root -g root -m 644 "$binding" "${destinations[4]}"
 install -o root -g root -m 755 "$rollback" "${destinations[5]}"
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox-harnesses
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/harnesses
+if (( prior_count == 0 )); then
+  initialization="$(/usr/local/libexec/secure-sandbox/harness-generation-manager.py initialize-empty-store)"
+  python3 -c 'import json,sys; value=json.load(sys.stdin); boundary=value.get("boundary",{}); assert value.get("schema") == "secure-sandbox-harness-consumer-initialization-v1" and value.get("status") == "initialized" and boundary.get("status") == "verified" and boundary.get("generation_count") == 0 and boundary.get("active_generation_id") is None' <<<"$initialization"
+fi
 status="$(/usr/local/libexec/secure-sandbox/harness-generation.py status)"
-python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["schema"] == "secure-sandbox-harness-generation-status-v1"' <<<"$status"
+python3 -c 'import json,sys; value=json.load(sys.stdin); boundary=value.get("boundary",{}); assert value.get("schema") == "secure-sandbox-harness-generation-status-v1" and value.get("status") == "verified" and boundary.get("status") == "verified"' <<<"$status"
+recovery_status="$(/usr/local/libexec/secure-sandbox/harness-generation-manager.py recovery-status)"
+python3 -c 'import json,sys; value=json.load(sys.stdin); assert value == {"schema":"secure-sandbox-harness-consumer-recovery-v1","pending":False,"journal_sha256":None}' <<<"$recovery_status"
 printf '%s\n' "$backup_id" > /var/lib/secure-sandbox/policy-backups/harness-lifecycle-consumer-latest
 chown root:root /var/lib/secure-sandbox/policy-backups/harness-lifecycle-consumer-latest
 chmod 600 /var/lib/secure-sandbox/policy-backups/harness-lifecycle-consumer-latest

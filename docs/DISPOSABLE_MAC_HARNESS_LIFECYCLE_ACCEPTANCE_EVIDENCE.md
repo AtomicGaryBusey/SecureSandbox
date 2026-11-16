@@ -57,6 +57,17 @@ directories. Installed-layout and fail-closed dependency regressions cover the
 boundary. The campaign remains
 zero-observation and zero-raw-evidence pending exact-source repair.
 
+The replacement import repair installed and initialized a fresh exact-source
+campaign, but the next transactional Research deployment stopped before raw
+evidence reservation at its first installed inspector readback. The installer
+had created only the two top-level store directories, while the deliberately
+non-mutating inspector correctly rejected the missing canonical empty-store
+closure. The repair initializes that closure through the lifecycle manager,
+using a dedicated command that accepts only two trusted, exactly empty roots.
+It rejects any partial prior executable closure or nonempty store, reads the
+new boundary back as exactly zero-generation, then asks the read-only inspector
+for independent verification before checking that recovery is not pending.
+
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical
 launchd snapshot while the restored predecessor KeepAlive process was being

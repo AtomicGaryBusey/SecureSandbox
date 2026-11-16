@@ -38,6 +38,7 @@ SCHEMA = "secure-sandbox-harness-consumer-stage-v1"
 PLAN_WRAPPER_SCHEMA = "secure-sandbox-harness-consumer-plan-v1"
 APPLY_SCHEMA = "secure-sandbox-harness-consumer-apply-v1"
 RECOVERY_SCHEMA = "secure-sandbox-harness-consumer-recovery-v1"
+INITIALIZATION_SCHEMA = "secure-sandbox-harness-consumer-initialization-v1"
 DEFAULT_RELEASE_ROOT = Path("/usr/local/libexec/secure-sandbox-harnesses")
 DEFAULT_STATE_ROOT = Path("/var/lib/secure-sandbox/harnesses")
 DEFAULT_STAGE_ROOT = DEFAULT_STATE_ROOT / "staging"
@@ -489,6 +490,30 @@ class HarnessGenerationConsumer:
         return {"schema": RECOVERY_SCHEMA, "pending": True,
                 "journal_sha256": hashlib.sha256(raw).hexdigest()}
 
+    def initialize_empty_store(self) -> dict:
+        trusted_directory(self.store.release_root, self.uid, 0o755)
+        trusted_directory(self.store.state_root, self.uid, 0o700)
+        if (list(self.store.release_root.iterdir())
+                or list(self.store.state_root.iterdir())):
+            raise ConsumerError("initial_store_not_empty")
+        self.store.prepare()
+        with self.store.inspection_locked():
+            boundary = self.store.verify_boundary()
+        if (set(entry.name for entry in self.store.release_root.iterdir())
+                != {"releases"}
+                or set(entry.name for entry in self.store.state_root.iterdir())
+                != {".lock", "admission-floor.json", "catalog.json", "journals",
+                    "receipts", "selector.json"}
+                or boundary.get("status") != "verified"
+                or boundary.get("generation_count") != 0
+                or boundary.get("active_generation_id") is not None):
+            raise ConsumerError("initial_store_readback_failed")
+        return {
+            "schema": INITIALIZATION_SCHEMA,
+            "status": "initialized",
+            "boundary": boundary,
+        }
+
     def recover(self, expected_sha256: str) -> dict:
         require_sha(expected_sha256, "recovery_journal_sha256")
         status = self.recovery_status()
@@ -510,6 +535,7 @@ def parser() -> argparse.ArgumentParser:
     management.add_argument("generation_id"); management.add_argument("reason_sha256")
     management.add_argument("resumable_session_count", type=int)
     commands.add_parser("apply")
+    commands.add_parser("initialize-empty-store")
     commands.add_parser("recovery-status")
     recover = commands.add_parser("recover"); recover.add_argument("journal_sha256")
     return value
@@ -534,6 +560,8 @@ def main(arguments: list[str] | None = None) -> int:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ConsumerError("apply_request_invalid") from error
         result = consumer.apply(request)
+    elif args.command == "initialize-empty-store":
+        result = consumer.initialize_empty_store()
     elif args.command == "recovery-status":
         result = consumer.recovery_status()
     else:

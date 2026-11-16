@@ -979,7 +979,16 @@ in ignored local records, not in this file.
   after exposing an installed-layout import-path defect. Publish the sibling
   `shared/` fallback and regression, retain this still-empty campaign through
   the existing append-only path, install the new exact protected release, and
-  initialize the next campaign before retrying Research deployment. The deterministic
+  initialize the next campaign before retrying Research deployment. That retry
+  proved the import repair, then rolled back cleanly when the installer asked
+  the non-mutating inspector to read an incompletely initialized empty store.
+  A security diff review confirmed that naïvely reusing `recovery-status` could
+  repair missing protected records in a partial store; policy suppressed it as
+  privileged-only, but the implementation was hardened anyway. Publish the
+  dedicated exact-empty initializer, partial-closure rejection, and regression,
+  retain the still-empty replacement campaign, rebind the protected release,
+  initialize the next exact-source campaign, and retry Research deployment.
+  The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

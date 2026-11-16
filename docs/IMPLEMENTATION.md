@@ -188,6 +188,16 @@ repository layout explicitly; all other layouts require the complete,
 non-symlinked sibling closure. Installed-layout subprocess tests prove both the
 valid closure and fail-closed dependency path.
 
+Physical replay also proved a fresh Research lifecycle deployment cannot ask
+the non-mutating inspector to bootstrap its own store. The installer now calls
+the manager's dedicated `initialize-empty-store` operation only when all six
+prior installed payloads are absent and both trusted store roots are exactly
+empty. Any partial prior closure or nonempty store fails closed. It requires an
+exact zero-generation initialization readback, then independently requires the
+inspector's verified boundary before checking that recovery is not pending. An
+end-to-end temporary-store regression exercises the sequence and proves a
+second or partial-store initialization is rejected.
+
 The Native Vendor Harness + Model Stack Mode DDD now has a source implementation
 candidate. Its closed registry admits exactly two vendor tuples: unmodified
 Claude Code + Anthropic subscription OAuth + the operator's CVP Defense

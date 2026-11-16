@@ -5676,8 +5676,11 @@ RUNTIME_APP_DIRECTORY_CTIME_PATHS = frozenset({
 def comparable_native_host_release_tree_identity(
     value: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Normalize only LaunchServices-owned top-level app-directory ctime.
+    """Normalize reboot-scoped device IDs and exact OS-owned app ctime.
 
+    APFS device numbers can be reassigned across a reboot or macOS update.
+    Require every member to remain on the release root's one device, then
+    remove that uniformly changed mount-generation value from comparison.
     macOS may attach ``com.apple.macl`` and ``com.apple.provenance`` to an app
     bundle the first time LaunchServices opens it.  That operation changes the
     bundle directory's ctime without changing its contents, permissions,
@@ -5686,6 +5689,15 @@ def comparable_native_host_release_tree_identity(
     containers are runtime-mutable OS metadata boundaries.
     """
     result = validate_native_host_release_tree_identity(dict(value))
+    root_device = result["."]["dev"]
+    if any(record["dev"] != root_device for record in result.values()):
+        raise ReleaseFailure(
+            "native_host_release_tree_identity_inventory_invalid"
+        )
+    for relative, original in tuple(result.items()):
+        record = dict(original)
+        record["dev"] = 0
+        result[relative] = record
     for relative in RUNTIME_APP_DIRECTORY_CTIME_PATHS:
         record = result.get(relative)
         if record is None or record["kind"] != "directory":
@@ -5695,6 +5707,13 @@ def comparable_native_host_release_tree_identity(
         record = dict(record)
         record["ctime_ns"] = 0
         result[relative] = record
+    return result
+
+
+def comparable_stable_launcher_identity(value: object) -> dict[str, Any]:
+    """Remove only the reboot-scoped mount device from launcher identity."""
+    result = _validate_installed_identity_record(value, kind="file")
+    result["dev"] = 0
     return result
 
 
@@ -7069,7 +7088,10 @@ def verified_host_release_launcher_pair(
         launcher_path, expected_uid,
     )
     if (sha256_bytes(launcher) != pair["launcher_sha256"]
-            or launcher_identity != pair["launcher_identity"]):
+            or comparable_stable_launcher_identity(launcher_identity)
+                != comparable_stable_launcher_identity(
+                    pair["launcher_identity"]
+                )):
         raise ReleaseFailure("host_release_launcher_pair_launcher_mismatch")
     closing = host_release_launcher_pair_public(install_root, expected_uid)
     if (closing is None or closing != (stable, stable_sha256)

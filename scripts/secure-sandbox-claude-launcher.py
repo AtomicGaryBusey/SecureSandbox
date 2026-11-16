@@ -460,8 +460,15 @@ _RUNTIME_APP_DIRECTORY_CTIME_PATHS = frozenset({
 def _comparable_release_tree_identity(
     value: object,
 ) -> dict[str, dict[str, int | str]]:
-    """Ignore only LaunchServices-owned ctime on exact app containers."""
+    """Normalize one APFS mount generation and exact OS-owned app ctime."""
     result = _validate_release_tree_identity(value)
+    root_device = result["."]["dev"]
+    if any(record["dev"] != root_device for record in result.values()):
+        raise LaunchFailure("controller_pair_tree_inventory_invalid")
+    for relative, original in tuple(result.items()):
+        record = dict(original)
+        record["dev"] = 0
+        result[relative] = record
     for relative in _RUNTIME_APP_DIRECTORY_CTIME_PATHS:
         record = result.get(relative)
         if record is None or record["kind"] != "directory":
@@ -469,6 +476,13 @@ def _comparable_release_tree_identity(
         record = dict(record)
         record["ctime_ns"] = 0
         result[relative] = record
+    return result
+
+
+def _comparable_launcher_identity(value: object) -> dict[str, int | str]:
+    """Remove only the reboot-scoped mount device from launcher identity."""
+    result = _validate_identity_record(value, kind="file")
+    result["dev"] = 0
     return result
 
 
@@ -1050,7 +1064,10 @@ def load_release_snapshot(
             launcher_path, expected_uid, 0o755, maximum=16 * 1024 * 1024,
         )
         if (digest(launcher_raw) != pair["launcher_sha256"]
-                or launcher_identity != pair["launcher_identity"]):
+                or _comparable_launcher_identity(launcher_identity)
+                    != _comparable_launcher_identity(
+                        pair["launcher_identity"]
+                    )):
             raise LaunchFailure("controller_pair_launcher_mismatch")
         # A second public-record read brackets all physical validation. An
         # atomic STABLE->PENDING replacement during this interval must deny.

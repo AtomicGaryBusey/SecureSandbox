@@ -11475,6 +11475,54 @@ class HostControllerReleaseTests(unittest.TestCase):
                 release, self.uid,
             )
         )
+        renumbered = json.loads(json.dumps(actual))
+        for record in renumbered.values():
+            record["dev"] += 1
+        with mock.patch.object(
+            MANAGER, "installed_native_host_release_tree_identity",
+            return_value=(renumbered, actual_sha256),
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with mock.patch.object(
+            LAUNCHER, "_snapshot_release_tree", return_value=renumbered,
+        ):
+            loaded, release_id = LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
+        self.assertEqual(loaded, release)
+        self.assertEqual(release_id, release.name)
+
+        mixed_device = json.loads(json.dumps(actual))
+        mixed_device["controller"]["dev"] += 1
+        with (
+            mock.patch.object(
+                MANAGER, "installed_native_host_release_tree_identity",
+                return_value=(mixed_device, actual_sha256),
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_release_tree_identity_inventory_invalid",
+            ),
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with (
+            mock.patch.object(
+                LAUNCHER, "_snapshot_release_tree", return_value=mixed_device,
+            ),
+            self.assertRaisesRegex(
+                LAUNCHER.LaunchFailure,
+                "controller_pair_tree_inventory_invalid",
+            ),
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
         for relative in (
             MANAGER.AUTHORIZATION_UI_APP_NAME,
             MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
@@ -11567,6 +11615,32 @@ class HostControllerReleaseTests(unittest.TestCase):
             LAUNCHER.load_release(
                 self.install_root, self.uid, launcher_path=self.launcher,
             )
+
+    def test_launcher_identity_allows_only_mount_device_renumbering(self):
+        identity = {
+            "ctime_ns": 10, "dev": 20, "gid": self.uid, "ino": 30,
+            "kind": "file", "mode": 0o755, "mtime_ns": 40,
+            "nlink": 1, "sha256": "a" * 64, "size": 50,
+            "uid": self.uid,
+        }
+        renumbered = {**identity, "dev": 21}
+        self.assertEqual(
+            MANAGER.comparable_stable_launcher_identity(identity),
+            MANAGER.comparable_stable_launcher_identity(renumbered),
+        )
+        self.assertEqual(
+            LAUNCHER._comparable_launcher_identity(identity),
+            LAUNCHER._comparable_launcher_identity(renumbered),
+        )
+        replaced = {**renumbered, "ino": 31}
+        self.assertNotEqual(
+            MANAGER.comparable_stable_launcher_identity(identity),
+            MANAGER.comparable_stable_launcher_identity(replaced),
+        )
+        self.assertNotEqual(
+            LAUNCHER._comparable_launcher_identity(identity),
+            LAUNCHER._comparable_launcher_identity(replaced),
+        )
 
     def test_loaded_old_launcher_census_failure_restores_exact_source_pair(self):
         original = self.install()["release_id"]

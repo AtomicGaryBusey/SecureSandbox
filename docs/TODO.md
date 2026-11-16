@@ -1005,6 +1005,13 @@ in ignored local records, not in this file.
   install the corrected release, initialize a fresh campaign, collect once,
   and project only through the exact installed release as root. Verify all
   three observations are root-owned mode `0444` before advancing.
+  The first such protected projection failed closed before publication because
+  its runtime preflight reused source-checkout readiness and therefore required
+  the intentionally excluded Host installer source inside the immutable
+  release. The retained one-shot raw evidence remains valid. Publish and
+  install the repair that verifies all ten protected manifest closures
+  directly, then retry projection only; do not recollect or remove the failed
+  zero-byte command result.
   The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

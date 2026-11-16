@@ -125,6 +125,22 @@ file operations for protected inputs and outputs, and requires final named-path
 identity equality. A regression renames and replaces the parent after opening
 it and proves the root write remains confined to the original descriptor.
 
+The next exact-source campaign installed protected release `b3e178f`, passed
+its ten-driver postflight, and
+collected `bootstrap-clean-install` exactly once. Its first protected
+projection failed closed before publication with
+`bootstrap_protected_release_required`. Root-context readback isolated the
+defect: the projector reused source-checkout readiness against the immutable
+runtime release, so it demanded the Host installer source file even though
+that file is intentionally outside the provenance and archive runtime
+closures. The corrected preflight validates every fixed protected-driver
+manifest and payload closure directly from the exact release instead. It does
+not weaken inventory, ownership, digest, source-commit, or root-execution
+requirements. Regression coverage proves both that build-only source is not
+required at runtime and that any invalid protected closure still rejects. The
+zero-byte failed command result and the one-shot raw reservation remain
+retained; no observation was published and collection is not repeated.
+
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical
 launchd snapshot while the restored predecessor KeepAlive process was being

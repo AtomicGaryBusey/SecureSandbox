@@ -205,6 +205,74 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             for call in publish.call_args_list
         ))
 
+    def test_protected_preflight_validates_installed_closures_not_source_tree(self):
+        case = self.case("bootstrap-clean-install")
+        protected_root = self.root.resolve() / "protected"
+        release = protected_root / "releases" / self.campaign["source_commit"]
+        release.mkdir(parents=True)
+        with mock.patch.object(bootstrap, "ROOT", release), \
+                mock.patch.object(
+                    bootstrap.ACCEPTANCE_CLI, "PROTECTED_INSTALL_ROOT",
+                    protected_root,
+                ), \
+                mock.patch.object(bootstrap.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    bootstrap.ACCEPTANCE_CLI, "driver_readiness",
+                    side_effect=AssertionError("source readiness is forbidden"),
+                ), \
+                mock.patch.object(
+                    bootstrap.ACCEPTANCE_CLI, "verify_protected_driver",
+                ) as verify, \
+                mock.patch.object(
+                    bootstrap.SUPERVISOR, "current_machine_identity",
+                    return_value=self.campaign["machine_identity_sha256"],
+                ), \
+                mock.patch.object(
+                    bootstrap, "next_bootstrap_case_at", return_value=case,
+                ):
+            campaign, observed_case = bootstrap.preflight(
+                self.campaign_path, self.observations, case["case_id"], NOW,
+                operator_uid=self.campaign_path.stat().st_uid,
+                protected_projection=True, observations_descriptor=42,
+            )
+        self.assertEqual(campaign, self.campaign)
+        self.assertEqual(observed_case, case)
+        self.assertEqual(
+            [call.args[2] for call in verify.call_args_list],
+            list(bootstrap.ACCEPTANCE_CLI.DRIVER_ENTRYPOINTS),
+        )
+        self.assertTrue(all(
+            call.args[:2] == (protected_root, self.campaign["source_commit"])
+            and call.args[3] == 0
+            for call in verify.call_args_list
+        ))
+
+    def test_protected_preflight_rejects_invalid_installed_closure(self):
+        case = self.case("bootstrap-clean-install")
+        protected_root = self.root.resolve() / "protected"
+        release = protected_root / "releases" / self.campaign["source_commit"]
+        release.mkdir(parents=True)
+        with mock.patch.object(bootstrap, "ROOT", release), \
+                mock.patch.object(
+                    bootstrap.ACCEPTANCE_CLI, "PROTECTED_INSTALL_ROOT",
+                    protected_root,
+                ), \
+                mock.patch.object(bootstrap.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    bootstrap.ACCEPTANCE_CLI, "verify_protected_driver",
+                    side_effect=acceptance.AcceptanceError(
+                        "protected_driver_payload_mismatch",
+                    ),
+                ), self.assertRaisesRegex(
+                    bootstrap.BootstrapError,
+                    "bootstrap_protected_release_required",
+                ):
+            bootstrap.preflight(
+                self.campaign_path, self.observations, case["case_id"], NOW,
+                operator_uid=self.campaign_path.stat().st_uid,
+                protected_projection=True, observations_descriptor=42,
+            )
+
     def test_protected_publication_uses_open_directory_descriptor(self):
         target = self.root / "published"
         target.mkdir(mode=0o700)

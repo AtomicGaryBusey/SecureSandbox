@@ -298,6 +298,23 @@ def next_bootstrap_case_at(campaign: dict[str, Any], observations: int,
     return expected_record
 
 
+def require_protected_release(campaign: dict[str, Any]) -> None:
+    expected_root = (
+        ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+        / campaign["source_commit"]
+    )
+    if ROOT.resolve(strict=True) != expected_root or os.geteuid() != 0:
+        raise BootstrapError("bootstrap_protected_release_required")
+    try:
+        for driver in ACCEPTANCE_CLI.DRIVER_ENTRYPOINTS:
+            ACCEPTANCE_CLI.verify_protected_driver(
+                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
+                campaign["source_commit"], driver, 0,
+            )
+    except (AcceptanceError, FileNotFoundError, OSError) as error:
+        raise BootstrapError("bootstrap_protected_release_required") from error
+
+
 def preflight(campaign_path: Path, observations: Path,
               case_id: str, now: int, *, operator_uid: int | None = None,
               protected_projection: bool = False,
@@ -309,16 +326,7 @@ def preflight(campaign_path: Path, observations: Path,
             trusted_json(campaign_path, expected_uid=owner), now,
         )
         if protected_projection:
-            expected_root = (
-                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
-                / campaign["source_commit"]
-            )
-            if (ROOT.resolve(strict=True) != expected_root
-                    or os.geteuid() != 0
-                    or ACCEPTANCE_CLI.driver_readiness(
-                        ROOT, source_commit=campaign["source_commit"],
-                    ).get("campaign_initialization_allowed") is not True):
-                raise BootstrapError("bootstrap_protected_release_required")
+            require_protected_release(campaign)
         else:
             SUPERVISOR.verify_source_checkout(campaign)
         machine = SUPERVISOR.current_machine_identity()

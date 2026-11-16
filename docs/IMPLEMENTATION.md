@@ -209,6 +209,18 @@ Security review then closed the owner-to-root pathname race by anchoring raw
 reads and observation publication to open validated directory descriptors,
 with final named-path identity readback and a substitution regression.
 
+The first physical invocation of that protected projector exposed a separate
+source/runtime readiness mismatch before any evidence publication. The
+root-owned runtime release intentionally omits the Host installer from the
+provenance and archive execution closures, but the projector had asked the
+source-tree readiness function to validate the installed release as though it
+were a checkout. Protected bootstrap preflight now verifies every fixed driver
+through the release manifest and payload digests directly. Exact release path,
+root identity, complete protected inventory, and source-commit bindings remain
+mandatory. The failed command result and already-collected raw case are
+retained, and the repaired projector resumes from those bytes without a second
+collection.
+
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from
 `<repo>/shared`, while the transactional guest closure installs dependencies

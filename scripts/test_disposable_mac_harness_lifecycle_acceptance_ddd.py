@@ -230,10 +230,16 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.operator_queue,
         )
 
-    def test_rejected_empty_campaign_has_one_retention_only_repair_path(self):
+    def test_rejected_no_evidence_campaigns_have_closed_retention_paths(self):
         for phrase in (
             'ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"',
-            'reason": "preflight-failed-before-evidence"',
+            '"preflight-failed-before-evidence"',
+            'RESERVED_ACKNOWLEDGEMENT = (',
+            '"RETAIN EMPTY RESERVED BOOTSTRAP REJECTION WITHOUT DELETION"',
+            'RESERVED_CASE_ID = "bootstrap-clean-install"',
+            'RESERVED_EXPECTED_ERROR = "bootstrap_host_receipt_invalid"',
+            '"collector-rejected-after-empty-reservation"',
+            '"evidence_state": "empty-reservation"',
             'validate_campaign(json.loads(raw), int(time.time()), allow_expired=True)',
             'set(os.listdir(descriptor)) != expected',
             'PREFLIGHT.source_checkout',

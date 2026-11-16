@@ -180,6 +180,21 @@ artifact overrides. Partial publication can resume only from exact matching
 observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 
+Physical bootstrap later reached the first raw reservation and exposed schema
+drift in the Host receipt validator: the production Host verifier now returns
+pair, candidate-authority, release-tree, and Developer ID floor bindings that
+the acceptance collector's old five-field allowlist rejected. The collector
+now requires the complete modern closed schema and exact Developer ID team;
+it does not discard those fields for compatibility. A distinct retention
+ceremony preserves the already-created but empty `bootstrap-clean-install`
+reservation, binds its fixed rejection into a self-digested plan, and moves
+the entire campaign without deletion before a corrected exact-source campaign
+is initialized. Classification is not trusted from a CLI string: the tool
+loads the exact protected predecessor collector in a fresh isolated Python
+process with an allowlisted environment, reconstructs a live verified
+Host receipt, and requires that old validator to reproduce the exact rejection
+before the plan can be written.
+
 Physical bootstrap also proved the Research read-only harness inspector must
 resolve both layouts explicitly: repository execution imports from
 `<repo>/shared`, while the transactional guest closure installs dependencies

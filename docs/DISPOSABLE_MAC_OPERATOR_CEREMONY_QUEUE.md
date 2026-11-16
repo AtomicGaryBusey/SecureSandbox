@@ -174,6 +174,30 @@ fresh post-install preflight and initialize a new exact-commit campaign. A
 campaign with any raw or projected evidence is not eligible for this repair
 path and requires an evidence-preserving continuation design instead.
 
+#### Retaining the exact empty bootstrap reservation
+
+One narrower evidence-preserving continuation exists when
+`bootstrap-clean-install` created its private reservation and then returned the
+literal `bootstrap_host_receipt_invalid` before writing any artifact. Do not
+remove that directory and do not rerun the collector. After publishing the
+repair, run `retain-reserved-bootstrap` with the exact old campaign UUID and
+source commit plus the literal acknowledgement shown by its `--help` output.
+
+This separate ceremony requires zero observations, no other raw entry, an
+empty private `raw/bootstrap/bootstrap-clean-install` directory, and that
+case still being next. Its self-digested plan binds the fixed error and
+`empty-reservation` state before the whole campaign is atomically retained.
+Before writing that plan, it loads the exact installed predecessor driver,
+reruns only its read-only Host receipt construction, and requires the obsolete
+validator to reproduce `bootstrap_host_receipt_invalid` against the complete
+modern release field set. A caller assertion alone cannot classify the failure.
+The ordinary `retain` command intentionally continues to reject this layout.
+If the move result is ambiguous, run `verify-reserved-bootstrap` with the old
+and replacement commits; never rerun the mutating command speculatively.
+
+A nonempty reservation or any projected observation remains ineligible. Stop
+and design a continuation that preserves the actual bytes.
+
 Do not place Developer ID private keys, Apple notarization credentials,
 1Password service credentials, or provider credentials on the disposable Mac.
 Copy one public native-Host candidate directory exported from the trusted

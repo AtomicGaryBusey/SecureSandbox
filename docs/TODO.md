@@ -988,6 +988,15 @@ in ignored local records, not in this file.
   dedicated exact-empty initializer, partial-closure rejection, and regression,
   retain the still-empty replacement campaign, rebind the protected release,
   initialize the next exact-source campaign, and retry Research deployment.
+  That deployment now succeeds with a verified zero-generation boundary. The
+  first one-shot bootstrap collector then reserved its raw case and rejected
+  because its legacy Host receipt allowlist did not admit the production
+  verifier's pair, candidate-authority, release-tree, and Developer ID floor
+  bindings. Publish the full-schema validator and the distinct
+  `retain-reserved-bootstrap` no-delete path, retain and independently verify
+  the exact empty reservation, install the replacement protected release, and
+  initialize a fresh campaign before collecting again. Never remove or reuse
+  the reserved directory.
   The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

@@ -684,7 +684,13 @@ and reserves a private raw case directory before it reads protected state.
 For clean-install evidence it verifies the root-owned Host release, reads the
 protected Research control and generation status, and requires open admission,
 no pending recovery, and exact agreement with the independently verified
-boundary. For no-production-material evidence it revalidates the original
+boundary. The Host readback is closed over the modern verifier schema: in
+addition to release, launcher, and payload digests it requires the stable
+Host-release/launcher pair digest, candidate-authority digest, release-tree
+identity, exact Developer ID team, and the Developer ID floor digest and
+establishing release. Missing legacy fields, `null` pair bindings, unknown
+teams, and extra fields all reject; the collector never projects a reduced
+receipt that discards later security work. For no-production-material evidence it revalidates the original
 machine enrollment and repeats a metadata-only scan of the fixed provider
 environment names, credential-path markers, and Agents Keychain service. It
 does not read, export, or hash credential values. SecureSandbox's deliberately
@@ -698,6 +704,24 @@ Publication is non-overwriting and crash-resumable only when every existing
 observation still validates and binds the same primary and supporting raw
 digests. A rejected collection leaves its reserved raw directory intact for
 failure retention and cannot be silently reused.
+
+An initialized campaign blocks the clean-machine preflight, including after a
+collector reserves its raw case directory and then rejects. The retention-only
+tool therefore has two disjoint ceremonies. Its original command accepts only
+a completely empty campaign. A separate literal
+`retain-reserved-bootstrap` command accepts only one empty private
+`raw/bootstrap/bootstrap-clean-install` reservation, zero observations, no
+other raw entries, that case still being the suite's next case, and the exact
+historical `bootstrap_host_receipt_invalid` classification. It writes a
+read-only diagnostic first loads the exact protected predecessor collector in
+a fresh isolated Python process with an allowlisted environment,
+re-verifies the live Host release, reconstructs its campaign-bound receipt,
+and requires that exact old validator to reproduce the fixed error against the
+modern eleven-field release shape. The self-digested plan embeds that
+diagnostic, the empty-reservation state, and error, then
+atomically retains the entire campaign without deletion or overwrite. The
+ordinary command continues to reject every raw case entry; the reserved path
+cannot be generalized by caller-selected case or error fields.
 
 ## Disposable recovery fixture driver
 

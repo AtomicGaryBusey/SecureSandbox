@@ -90,6 +90,13 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             "schema": bootstrap.HOST_RELEASE.SCHEMA, "status": "verified",
             "release_id": "6" * 64, "launcher_sha256": "7" * 64,
             "payloads": {"controller": "8" * 64},
+            "host_release_launcher_pair_sha256": "9" * 64,
+            "candidate_authority_sha256": "a" * 64,
+            "release_tree_identity_sha256": "b" * 64,
+            "developer_id_team_id":
+                bootstrap.HOST_RELEASE.NATIVE_HOST_PRODUCTS_TEAM_ID,
+            "developer_id_team_floor_sha256": "c" * 64,
+            "developer_id_team_floor_release_id": "d" * 64,
         }
 
     def store_status(self, boundary: dict) -> dict:
@@ -197,6 +204,38 @@ class BootstrapAcceptanceTests(unittest.TestCase):
                 self.campaign_path, self.observations, case["case_id"], self.raw,
                 self.enrollment_path, NOW, home=self.home, environment={}, runner=runner,
             )
+
+    def test_legacy_host_release_shape_rejects_instead_of_dropping_security_bindings(self):
+        case = self.case("bootstrap-clean-install")
+        release = self.release()
+        for name in (
+            "host_release_launcher_pair_sha256", "candidate_authority_sha256",
+            "release_tree_identity_sha256", "developer_id_team_id",
+            "developer_id_team_floor_sha256",
+            "developer_id_team_floor_release_id",
+        ):
+            release.pop(name)
+        value = bootstrap.receipt(
+            bootstrap.HOST_SCHEMA, self.campaign, case, NOW,
+            {"release": release, "release_sha256": acceptance.digest(release)},
+            "receipt_sha256",
+        )
+        with self.assertRaisesRegex(
+                bootstrap.BootstrapError, "bootstrap_host_receipt_invalid"):
+            bootstrap.validate_host_receipt(self.campaign, case, value, NOW)
+
+    def test_host_release_rejects_wrong_developer_id_team(self):
+        case = self.case("bootstrap-clean-install")
+        release = self.release()
+        release["developer_id_team_id"] = "AAAAAAAAAA"
+        value = bootstrap.receipt(
+            bootstrap.HOST_SCHEMA, self.campaign, case, NOW,
+            {"release": release, "release_sha256": acceptance.digest(release)},
+            "receipt_sha256",
+        )
+        with self.assertRaisesRegex(
+                bootstrap.BootstrapError, "bootstrap_host_receipt_invalid"):
+            bootstrap.validate_host_receipt(self.campaign, case, value, NOW)
 
     def test_surface_is_read_only_and_has_no_evidence_authority_override(self):
         source = (

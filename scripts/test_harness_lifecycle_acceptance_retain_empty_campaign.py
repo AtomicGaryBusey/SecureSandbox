@@ -19,6 +19,13 @@ retention = importlib.util.module_from_spec(specification)
 assert specification.loader is not None
 specification.loader.exec_module(retention)
 acceptance = retention.sys.modules["harness_lifecycle_acceptance"]
+bootstrap_specification = importlib.util.spec_from_file_location(
+    "retention_bootstrap_contract",
+    ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py",
+)
+bootstrap = importlib.util.module_from_spec(bootstrap_specification)
+assert bootstrap_specification.loader is not None
+bootstrap_specification.loader.exec_module(bootstrap)
 
 
 class EmptyCampaignRetentionTests(unittest.TestCase):
@@ -98,6 +105,95 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
                                   return_value=readiness):
             return retention.retain(**arguments)
+
+    def reserve_bootstrap_rejection(self) -> None:
+        reservation = self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID
+        reservation.mkdir(mode=0o700)
+
+    def reserved_diagnostic(self, campaign, observations, now):
+        self.assertEqual(campaign, self.campaign)
+        self.assertEqual(observations, self.root / "observations")
+        value = {
+            "schema": retention.RESERVED_DIAGNOSTIC_SCHEMA,
+            "status": "confirmed",
+            "case_id": retention.RESERVED_CASE_ID,
+            "error": retention.RESERVED_EXPECTED_ERROR,
+            "source_commit": campaign["source_commit"],
+            "observed_at": now,
+            "host_release_fields": retention.MODERN_HOST_RELEASE_FIELDS,
+            "host_release_sha256": "9" * 64,
+        }
+        value["diagnostic_sha256"] = acceptance.digest(value)
+        return value
+
+    def test_modern_host_release_fields_match_collector_contract(self):
+        self.assertEqual(
+            retention.MODERN_HOST_RELEASE_FIELDS,
+            sorted(bootstrap.HOST_RELEASE_FIELDS),
+        )
+
+    def test_reserved_diagnostic_runs_exact_predecessor_in_isolated_python(self):
+        now = int(time.time())
+        value = self.reserved_diagnostic(
+            self.campaign, self.root / "observations", now,
+        )
+        completed = retention.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=acceptance.canonical(value), stderr=b"",
+        )
+        with mock.patch.object(
+                retention.subprocess, "run", return_value=completed) as runner:
+            observed = retention.confirm_reserved_bootstrap_failure(
+                self.campaign, self.root / "observations", now,
+            )
+        self.assertEqual(observed, value)
+        arguments, keywords = runner.call_args
+        command = arguments[0]
+        self.assertEqual(command[:3], ["/usr/bin/python3", "-I", "-c"])
+        self.assertEqual(
+            command[4],
+            str(retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / self.campaign["source_commit"]),
+        )
+        self.assertEqual(command[5], str(self.root / "campaign.json"))
+        self.assertEqual(command[6], str(self.root / "observations"))
+        self.assertEqual(keywords["cwd"], "/")
+        self.assertEqual(keywords["stdin"], retention.subprocess.DEVNULL)
+        self.assertEqual(
+            keywords["env"],
+            {
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+
+    def test_reserved_diagnostic_rejects_noncanonical_subprocess_output(self):
+        now = int(time.time())
+        value = self.reserved_diagnostic(
+            self.campaign, self.root / "observations", now,
+        )
+        completed = retention.subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps(value).encode("ascii"), stderr=b"",
+        )
+        with mock.patch.object(
+                retention.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_reserved_diagnostic_failed"):
+                retention.confirm_reserved_bootstrap_failure(
+                    self.campaign, self.root / "observations", now,
+                )
+
+    def execute_reserved(self, **overrides):
+        arguments = {
+            "acknowledgement": retention.RESERVED_ACKNOWLEDGEMENT,
+            "reserved_bootstrap": True,
+            "reserved_probe": self.reserved_diagnostic,
+        }
+        arguments.update(overrides)
+        return self.execute(**arguments)
 
     def seed_plan(self, replacement: str = "b" * 40) -> dict:
         inventory = {
@@ -214,6 +310,70 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             self.execute()
         self.assertTrue(self.root.exists())
         self.assertFalse((self.root / retention.PLAN_NAME).exists())
+
+    def test_exact_empty_bootstrap_reservation_is_retained_by_separate_ceremony(self):
+        self.reserve_bootstrap_rejection()
+        result = self.execute_reserved()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE / self.campaign["campaign_id"]
+        )
+        self.assertEqual(result["schema"], retention.RESERVED_RESULT_SCHEMA)
+        self.assertEqual(result["reserved_case_id"], retention.RESERVED_CASE_ID)
+        self.assertEqual(result["expected_error"],
+                         retention.RESERVED_EXPECTED_ERROR)
+        self.assertEqual(result["evidence_state"], "empty-reservation")
+        self.assertTrue(
+            (destination / "raw/bootstrap" / retention.RESERVED_CASE_ID).is_dir(),
+        )
+        plan = json.loads((destination / retention.PLAN_NAME).read_bytes())
+        self.assertEqual(plan["schema"], retention.RESERVED_SCHEMA)
+        self.assertEqual(plan["evidence_state"], "empty-reservation")
+        self.assertEqual(
+            result["diagnostic_sha256"],
+            plan["rejection_diagnostic"]["diagnostic_sha256"],
+        )
+
+        readiness = {
+            "status": "ready",
+            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
+        }
+        with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
+                mock.patch.object(retention, "acl_absent", return_value=True), \
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
+                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
+                                  return_value=readiness):
+            verified = retention.verify_retained(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                expected_replacement_commit="b" * 40,
+                reserved_bootstrap=True,
+                home=self.home,
+                source_probe=lambda: (
+                    "b" * 40, {"origin": "b" * 40},
+                ),
+                identity_probe=lambda: self.campaign["machine_identity_sha256"],
+            )
+        self.assertEqual(verified, result)
+
+    def test_reserved_bootstrap_ceremony_rejects_nonempty_reservation(self):
+        self.reserve_bootstrap_rejection()
+        artifact = (
+            self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID / "artifact"
+        )
+        artifact.write_text("must not be discarded")
+        artifact.chmod(0o600)
+        with self.assertRaisesRegex(
+                retention.RetentionError, "retention_reserved_case_not_empty"):
+            self.execute_reserved()
+        self.assertTrue(self.root.exists())
+        self.assertFalse((self.root / retention.PLAN_NAME).exists())
+
+    def test_reserved_bootstrap_ceremony_requires_distinct_acknowledgement(self):
+        self.reserve_bootstrap_rejection()
+        with self.assertRaisesRegex(
+                retention.RetentionError, "retention_acknowledgement_required"):
+            self.execute_reserved(acknowledgement=retention.ACKNOWLEDGEMENT)
+        self.assertTrue(self.root.exists())
 
     def test_existing_plan_is_preserved_and_superseded_append_only(self):
         plan = self.seed_plan()

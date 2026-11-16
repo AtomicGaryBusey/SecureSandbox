@@ -1,8 +1,9 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: the exact-commit campaign has been initialized on the disposable Neo,
-but its first case has not produced raw evidence and no acceptance verdict has
-been issued. The protected Host bootstrap, three-VM installation, host-key
+Status: the latest exact-commit campaign on the disposable Neo reached its
+first protected collector. That collector reserved the first raw case and
+rejected before writing an artifact; no acceptance verdict has been issued.
+The protected Host bootstrap, three-VM installation, host-key
 enrollment, protected acceptance-driver installation, and retained fail-closed
 upgrade attempts are physical preparation evidence.
 
@@ -67,6 +68,32 @@ using a dedicated command that accepts only two trusted, exactly empty roots.
 It rejects any partial prior executable closure or nonempty store, reads the
 new boundary back as exactly zero-generation, then asks the read-only inspector
 for independent verification before checking that recovery is not pending.
+
+The published ten-driver correction passed the
+complete local release gate (2,639 tests, three expected skips), reached both
+authorized `public-release` tips, and was installed as a new protected
+ten-driver release on the Neo. Its fresh campaign was initialized with zero
+observations. Transactional Research deployment then succeeded: protected
+readback reported control role `research`, a verified zero-generation store,
+open admission, no pending recovery, and an independently matching verified
+boundary.
+
+The first one-shot `bootstrap-clean-install` collection reserved its private
+raw case directory and rejected with `bootstrap_host_receipt_invalid` before
+writing an artifact. Source and live shape analysis found no Host verification
+failure: the production verifier returns six security bindings added after the
+collector's obsolete five-field release allowlist—stable pair, candidate
+authority, release-tree identity, Developer ID team, Developer ID floor, and
+the floor's establishing release. The repair requires all of those fields and
+the exact authorized team instead of weakening the production receipt. The
+reserved directory remains untouched and the collector has not been retried.
+The new reserved-bootstrap retention ceremony admits only that exact empty
+reservation and fixed error, retains the whole failed campaign without
+deletion, and must be independently verified before another campaign starts.
+Its plan embeds a diagnostic produced by rerunning, in a fresh isolated Python
+process with an allowlisted environment, the exact installed
+predecessor's read-only Host verification and reproducing the same rejection;
+the classification is therefore not based only on operator recollection.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

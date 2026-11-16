@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Atomically retain an empty rejected campaign before an exact-source repair.
+"""Atomically retain a no-evidence rejected campaign before a source repair.
 
 This is deliberately narrower than a general archive or reset command.  It
-accepts only the fixed local campaign layout, requires every evidence
-directory to be empty, records the exact old and replacement source bindings,
-and moves the complete directory without overwrite.  It never deletes or
-modifies an observation.
+accepts only the fixed local campaign layout.  The ordinary path requires
+every evidence directory to be empty.  One separate, literal ceremony accepts
+only an empty ``bootstrap-clean-install`` reservation left by the historically
+observed ``bootstrap_host_receipt_invalid`` rejection.  Both paths record the
+exact old and replacement source bindings and move the complete directory
+without overwrite.  Neither deletes or modifies an observation.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import os
 import platform
 import re
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -61,12 +64,105 @@ SUPERVISOR = _load(
 
 
 SCHEMA = "secure-sandbox-harness-lifecycle-empty-campaign-retention-plan-v1"
+RESERVED_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-empty-reservation-retention-plan-v1"
+)
 SUPERSESSION_SCHEMA = (
     "secure-sandbox-harness-lifecycle-empty-campaign-retention-"
     "supersession-v1"
 )
 RESULT_SCHEMA = "secure-sandbox-harness-lifecycle-empty-campaign-retention-v2"
+RESERVED_RESULT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-empty-reservation-retention-v1"
+)
 ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"
+RESERVED_ACKNOWLEDGEMENT = (
+    "RETAIN EMPTY RESERVED BOOTSTRAP REJECTION WITHOUT DELETION"
+)
+RESERVED_CASE_ID = "bootstrap-clean-install"
+RESERVED_EXPECTED_ERROR = "bootstrap_host_receipt_invalid"
+RESERVED_DIAGNOSTIC_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-bootstrap-rejection-diagnostic-v1"
+)
+MODERN_HOST_RELEASE_FIELDS = [
+    "candidate_authority_sha256", "developer_id_team_floor_release_id",
+    "developer_id_team_floor_sha256", "developer_id_team_id",
+    "host_release_launcher_pair_sha256", "launcher_sha256", "payloads",
+    "release_id", "release_tree_identity_sha256", "schema", "status",
+]
+RESERVED_DIAGNOSTIC_PROGRAM = r'''\
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    release = Path(sys.argv[1])
+    campaign_path = Path(sys.argv[2])
+    observations = Path(sys.argv[3])
+    now = int(sys.argv[4])
+    expected_case = sys.argv[5]
+    expected_error = sys.argv[6]
+    diagnostic_schema = sys.argv[7]
+
+    sys.path.insert(0, str(release / "shared"))
+    entrypoint = release / "scripts/harness-lifecycle-acceptance-bootstrap.py"
+    specification = importlib.util.spec_from_file_location(
+        "retention_installed_bootstrap_diagnostic", entrypoint,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError("entrypoint_unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+
+    campaign = module.validate_campaign(
+        module.trusted_json(campaign_path), now, allow_expired=True,
+    )
+    next_value = module.ACCEPTANCE_CLI.next_case(
+        campaign, observations, observation_uid=os.geteuid(),
+        directory_uid=os.geteuid(),
+    )
+    case = next_value.get("case")
+    if (next_value.get("status") != "pending"
+            or not isinstance(case, dict)
+            or case.get("case_id") != expected_case):
+        raise RuntimeError("case_invalid")
+
+    live_release = module.HOST_RELEASE.verify(
+        module.ROOT, module.INSTALL_ROOT, module.STABLE_LAUNCHER, 0,
+        module.HOST_RELEASE.DEFAULT_OP_BINARY,
+        module.INSTALL_ROOT / "current/gpgv",
+    )
+    host = module.receipt(
+        module.HOST_SCHEMA, campaign, case, now,
+        {"release": live_release,
+         "release_sha256": module.digest(live_release)},
+        "receipt_sha256",
+    )
+    try:
+        module.validate_host_receipt(campaign, case, host, now)
+    except module.BootstrapError as error:
+        if str(error) != expected_error:
+            raise RuntimeError("error_mismatch") from error
+    else:
+        raise RuntimeError("error_not_reproduced")
+
+    value = {
+        "schema": diagnostic_schema,
+        "status": "confirmed",
+        "case_id": expected_case,
+        "error": expected_error,
+        "source_commit": campaign["source_commit"],
+        "observed_at": now,
+        "host_release_fields": sorted(live_release),
+        "host_release_sha256": module.digest(live_release),
+    }
+    value["diagnostic_sha256"] = module.digest(value)
+    sys.stdout.buffer.write(module.canonical(value))
+except BaseException:
+    os._exit(70)
+'''
 CAMPAIGN_RELATIVE = Path("Library/Application Support/SecureSandbox/harness-acceptance")
 RETAINED_RELATIVE = Path("SecureSandbox-Acceptance-Handoff/retired-campaigns")
 PLAN_NAME = "retention-plan.json"
@@ -151,7 +247,9 @@ def _campaign_bytes(root: Path, uid: int) -> bytes:
     return raw
 
 
-def validate_empty_layout(root: Path, uid: int) -> tuple[dict[str, Any], str]:
+def validate_empty_layout(root: Path, uid: int, *,
+                          reserved_bootstrap: bool = False
+                          ) -> tuple[dict[str, Any], str]:
     root_descriptor = _directory(root, uid)
     try:
         entries = set(os.listdir(root_descriptor))
@@ -171,10 +269,13 @@ def validate_empty_layout(root: Path, uid: int) -> tuple[dict[str, Any], str]:
         raise RetentionError("retention_campaign_invalid") from error
     if canonical(campaign) != raw:
         raise RetentionError("retention_campaign_invalid")
+    bootstrap_entries = (
+        {RESERVED_CASE_ID} if reserved_bootstrap else set()
+    )
     for relative, expected in (
         (Path("observations"), set()),
         (Path("raw"), EXPECTED_RAW),
-        (Path("raw/bootstrap"), set()),
+        (Path("raw/bootstrap"), bootstrap_entries),
         (Path("raw/qualification"), set()),
         (Path("raw/recovery"), set()),
     ):
@@ -184,15 +285,108 @@ def validate_empty_layout(root: Path, uid: int) -> tuple[dict[str, Any], str]:
                 raise RetentionError("retention_campaign_not_empty")
         finally:
             os.close(descriptor)
+    directories = [
+        ".", "observations", "raw", "raw/bootstrap",
+        "raw/qualification", "raw/recovery",
+    ]
+    if reserved_bootstrap:
+        reservation = root / "raw/bootstrap" / RESERVED_CASE_ID
+        descriptor = _directory(reservation, uid)
+        try:
+            if os.listdir(descriptor):
+                raise RetentionError("retention_reserved_case_not_empty")
+        finally:
+            os.close(descriptor)
+        try:
+            next_value = ACCEPTANCE_CLI.next_case(
+                campaign, root / "observations",
+                observation_uid=uid, directory_uid=uid,
+            )
+        except (AcceptanceError, OSError) as error:
+            raise RetentionError("retention_reserved_case_invalid") from error
+        next_case = next_value.get("case")
+        if (next_value.get("status") != "pending"
+                or not isinstance(next_case, dict)
+                or next_case.get("case_id") != RESERVED_CASE_ID):
+            raise RetentionError("retention_reserved_case_invalid")
+        directories.append(f"raw/bootstrap/{RESERVED_CASE_ID}")
     inventory = {
         "campaign_sha256": hashlib.sha256(raw).hexdigest(),
-        "directories": [
-            ".", "observations", "raw", "raw/bootstrap",
-            "raw/qualification", "raw/recovery",
-        ],
+        "directories": directories,
         "files": ["campaign.json"],
     }
     return campaign, digest(inventory)
+
+
+def _validate_reserved_diagnostic(value: Any,
+                                  campaign: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise RetentionError("retention_reserved_diagnostic_invalid")
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "diagnostic_sha256"
+    }
+    observed_at = value.get("observed_at")
+    if (set(value) != {
+            "schema", "status", "case_id", "error", "source_commit",
+            "observed_at", "host_release_fields", "host_release_sha256",
+            "diagnostic_sha256",
+        }
+            or value.get("schema") != RESERVED_DIAGNOSTIC_SCHEMA
+            or value.get("status") != "confirmed"
+            or value.get("case_id") != RESERVED_CASE_ID
+            or value.get("error") != RESERVED_EXPECTED_ERROR
+            or value.get("source_commit") != campaign["source_commit"]
+            or not isinstance(observed_at, int)
+            or isinstance(observed_at, bool)
+            or observed_at < campaign["created_at"]
+            or observed_at > int(time.time())
+            or value.get("host_release_fields") != MODERN_HOST_RELEASE_FIELDS
+            or not isinstance(value.get("host_release_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["host_release_sha256"])
+               is None
+            or value.get("diagnostic_sha256") != digest(unsigned)):
+        raise RetentionError("retention_reserved_diagnostic_invalid")
+
+
+def confirm_reserved_bootstrap_failure(
+        campaign: dict[str, Any], observations: Path, now: int
+        ) -> dict[str, Any]:
+    release = (
+        ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+        / campaign["source_commit"]
+    )
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3", "-I", "-c",
+                RESERVED_DIAGNOSTIC_PROGRAM,
+                str(release), str(observations.parent / "campaign.json"),
+                str(observations), str(now), RESERVED_CASE_ID,
+                RESERVED_EXPECTED_ERROR, RESERVED_DIAGNOSTIC_SCHEMA,
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, cwd="/", timeout=45, check=False,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RetentionError("retention_reserved_diagnostic_failed") from error
+    if (completed.returncode != 0 or completed.stderr
+            or not completed.stdout or len(completed.stdout) > 64 * 1024):
+        raise RetentionError("retention_reserved_diagnostic_failed")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError("retention_reserved_diagnostic_failed") from error
+    if canonical(value) != completed.stdout:
+        raise RetentionError("retention_reserved_diagnostic_failed")
+    _validate_reserved_diagnostic(value, campaign)
+    return value
 
 
 def _write_new_at(parent_descriptor: int, name: str,
@@ -267,13 +461,37 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RetentionError("retention_plan_invalid")
     unsigned = {key: item for key, item in value.items() if key != "plan_sha256"}
-    if (canonical(value) != data or set(value) != {
+    common = {
         "schema", "status", "campaign_id", "campaign_sha256",
         "campaign_source_commit", "replacement_source_commit", "remote_tips",
         "machine_identity_sha256", "operator_uid", "reason", "observed_at",
         "inventory_sha256", "destination_name", "plan_sha256",
-    } or value.get("schema") != SCHEMA or value.get("status") != "prepared"
-            or value.get("reason") != "preflight-failed-before-evidence"
+    }
+    ordinary = (
+        set(value) == common
+        and value.get("schema") == SCHEMA
+        and value.get("reason") == "preflight-failed-before-evidence"
+    )
+    reserved = (
+        set(value) == common | {
+            "reserved_case_id", "expected_error", "evidence_state",
+            "rejection_diagnostic",
+        }
+        and value.get("schema") == RESERVED_SCHEMA
+        and value.get("reason") == "collector-rejected-after-empty-reservation"
+        and value.get("reserved_case_id") == RESERVED_CASE_ID
+        and value.get("expected_error") == RESERVED_EXPECTED_ERROR
+        and value.get("evidence_state") == "empty-reservation"
+    )
+    if reserved:
+        _validate_reserved_diagnostic(
+            value.get("rejection_diagnostic"), {
+                "source_commit": value.get("campaign_source_commit"),
+                "created_at": 0,
+            },
+        )
+    if (canonical(value) != data or not (ordinary or reserved)
+            or value.get("status") != "prepared"
             or not isinstance(value.get("observed_at"), int)
             or isinstance(value.get("observed_at"), bool)
             or not isinstance(value.get("operator_uid"), int)
@@ -365,8 +583,26 @@ def _is_ancestor(older: str, newer: str) -> None:
 
 
 def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
-                           inventory_sha256: str, uid: int) -> None:
-    if (plan.get("campaign_id") != campaign["campaign_id"]
+                           inventory_sha256: str, uid: int, *,
+                           reserved_bootstrap: bool = False) -> None:
+    if reserved_bootstrap:
+        try:
+            _validate_reserved_diagnostic(
+                plan.get("rejection_diagnostic"), campaign,
+            )
+        except RetentionError:
+            mode_valid = False
+        else:
+            mode_valid = (
+                plan.get("schema") == RESERVED_SCHEMA
+                and plan.get("reserved_case_id") == RESERVED_CASE_ID
+                and plan.get("expected_error") == RESERVED_EXPECTED_ERROR
+                and plan.get("evidence_state") == "empty-reservation"
+            )
+    else:
+        mode_valid = plan.get("schema") == SCHEMA
+    if (not mode_valid
+            or plan.get("campaign_id") != campaign["campaign_id"]
             or plan.get("campaign_sha256") != campaign["campaign_sha256"]
             or plan.get("campaign_source_commit") != campaign["source_commit"]
             or plan.get("machine_identity_sha256")
@@ -440,8 +676,9 @@ def _result(campaign: dict[str, Any], replacement: str,
         supersessions[-1]["supersession_sha256"]
         if supersessions else plan["plan_sha256"]
     )
+    reserved = plan.get("schema") == RESERVED_SCHEMA
     value = {
-        "schema": RESULT_SCHEMA,
+        "schema": RESERVED_RESULT_SCHEMA if reserved else RESULT_SCHEMA,
         "status": "retained",
         "campaign_id": campaign["campaign_id"],
         "campaign_sha256": campaign["campaign_sha256"],
@@ -454,6 +691,14 @@ def _result(campaign: dict[str, Any], replacement: str,
         "destination_name": campaign["campaign_id"],
         "authority": "retention-only",
     }
+    if reserved:
+        value.update({
+            "reserved_case_id": RESERVED_CASE_ID,
+            "expected_error": RESERVED_EXPECTED_ERROR,
+            "evidence_state": "empty-reservation",
+            "diagnostic_sha256":
+                plan["rejection_diagnostic"]["diagnostic_sha256"],
+        })
     value["result_sha256"] = digest(value)
     return value
 
@@ -461,6 +706,7 @@ def _result(campaign: dict[str, Any], replacement: str,
 def verify_retained(*, expected_campaign_id: str,
                     expected_source_commit: str,
                     expected_replacement_commit: str,
+                    reserved_bootstrap: bool = False,
                     home: Path | None = None,
                     source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
                     identity_probe: Callable[[], str] | None = None) -> dict[str, Any]:
@@ -472,7 +718,9 @@ def verify_retained(*, expected_campaign_id: str,
     destination = home / RETAINED_RELATIVE / expected_campaign_id
     if os.path.lexists(live):
         raise RetentionError("retention_source_still_present")
-    campaign, inventory_sha256 = validate_empty_layout(destination, uid)
+    campaign, inventory_sha256 = validate_empty_layout(
+        destination, uid, reserved_bootstrap=reserved_bootstrap,
+    )
     if (campaign["campaign_id"] != expected_campaign_id
             or campaign["source_commit"] != expected_source_commit):
         raise RetentionError("retention_expected_campaign_mismatch")
@@ -492,7 +740,10 @@ def verify_retained(*, expected_campaign_id: str,
     if (readiness.get("available_driver_count") != len(DRIVER_ENTRYPOINTS)
             or readiness.get("status") != "ready"):
         raise RetentionError("retention_predecessor_driver_invalid")
-    _validate_plan_binding(plan, campaign, inventory_sha256, uid)
+    _validate_plan_binding(
+        plan, campaign, inventory_sha256, uid,
+        reserved_bootstrap=reserved_bootstrap,
+    )
     supersessions = _supersession_chain(
         destination, uid, plan, campaign, inventory_sha256,
     )
@@ -508,18 +759,27 @@ def verify_retained(*, expected_campaign_id: str,
 
 def retain(*, expected_campaign_id: str, expected_source_commit: str,
            acknowledgement: str, now: int | None = None,
+           reserved_bootstrap: bool = False,
            home: Path | None = None,
            rename: Callable[[int, str, int, str], None] = _rename_exclusive,
            source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
-           identity_probe: Callable[[], str] | None = None) -> dict[str, Any]:
-    if acknowledgement != ACKNOWLEDGEMENT:
+           identity_probe: Callable[[], str] | None = None,
+           reserved_probe: Callable[[dict[str, Any], Path, int],
+                                    dict[str, Any]] | None = None
+           ) -> dict[str, Any]:
+    expected_acknowledgement = (
+        RESERVED_ACKNOWLEDGEMENT if reserved_bootstrap else ACKNOWLEDGEMENT
+    )
+    if acknowledgement != expected_acknowledgement:
         raise RetentionError("retention_acknowledgement_required")
     if platform.system() != "Darwin":
         raise RetentionError("retention_disposable_mac_required")
     home = Path.home() if home is None else home
     uid = os.geteuid()
     root = home / CAMPAIGN_RELATIVE
-    campaign, inventory_sha256 = validate_empty_layout(root, uid)
+    campaign, inventory_sha256 = validate_empty_layout(
+        root, uid, reserved_bootstrap=reserved_bootstrap,
+    )
     if (campaign["campaign_id"] != expected_campaign_id
             or campaign["source_commit"] != expected_source_commit):
         raise RetentionError("retention_expected_campaign_mismatch")
@@ -580,8 +840,20 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
         else:
             raise RetentionError("retention_destination_exists")
 
+        observed_at = int(time.time()) if now is None else now
+        rejection_diagnostic = None
+        plan_path = root / PLAN_NAME
+        if reserved_bootstrap and not os.path.lexists(plan_path):
+            probe = (
+                confirm_reserved_bootstrap_failure
+                if reserved_probe is None else reserved_probe
+            )
+            rejection_diagnostic = probe(
+                campaign, root / "observations", observed_at,
+            )
+            _validate_reserved_diagnostic(rejection_diagnostic, campaign)
         plan = {
-            "schema": SCHEMA,
+            "schema": RESERVED_SCHEMA if reserved_bootstrap else SCHEMA,
             "status": "prepared",
             "campaign_id": campaign["campaign_id"],
             "campaign_sha256": campaign["campaign_sha256"],
@@ -590,16 +862,28 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             "remote_tips": remote_tips,
             "machine_identity_sha256": campaign["machine_identity_sha256"],
             "operator_uid": uid,
-            "reason": "preflight-failed-before-evidence",
-            "observed_at": int(time.time()) if now is None else now,
+            "reason": (
+                "collector-rejected-after-empty-reservation"
+                if reserved_bootstrap else "preflight-failed-before-evidence"
+            ),
+            "observed_at": observed_at,
             "inventory_sha256": inventory_sha256,
             "destination_name": destination_name,
         }
+        if reserved_bootstrap:
+            plan.update({
+                "reserved_case_id": RESERVED_CASE_ID,
+                "expected_error": RESERVED_EXPECTED_ERROR,
+                "evidence_state": "empty-reservation",
+                "rejection_diagnostic": rejection_diagnostic,
+            })
         plan["plan_sha256"] = digest(plan)
-        plan_path = root / PLAN_NAME
         if os.path.lexists(plan_path):
             plan = _trusted_plan(plan_path, uid)
-            _validate_plan_binding(plan, campaign, inventory_sha256, uid)
+            _validate_plan_binding(
+                plan, campaign, inventory_sha256, uid,
+                reserved_bootstrap=reserved_bootstrap,
+            )
         else:
             if not _remote_tips_for(replacement, remote_tips):
                 raise RetentionError("retention_remote_tips_mismatch")
@@ -677,7 +961,9 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
         if retained_descriptor is not None:
             os.close(retained_descriptor)
     destination = retained / destination_name
-    retained_campaign, retained_inventory = validate_empty_layout(destination, uid)
+    retained_campaign, retained_inventory = validate_empty_layout(
+        destination, uid, reserved_bootstrap=reserved_bootstrap,
+    )
     retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
     retained_supersessions = _supersession_chain(
         destination, uid, retained_plan, retained_campaign, retained_inventory,
@@ -691,33 +977,45 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
-        description="Retain one empty rejected acceptance campaign",
+        description="Retain one no-evidence rejected acceptance campaign",
     )
     commands = value.add_subparsers(dest="command", required=True)
-    retain_command = commands.add_parser("retain")
-    retain_command.add_argument("--expected-campaign-id", required=True)
-    retain_command.add_argument("--expected-source-commit", required=True)
-    retain_command.add_argument("--acknowledge", required=True)
-    verify_command = commands.add_parser("verify")
-    verify_command.add_argument("--expected-campaign-id", required=True)
-    verify_command.add_argument("--expected-source-commit", required=True)
-    verify_command.add_argument("--expected-replacement-commit", required=True)
+    for name in ("retain", "retain-reserved-bootstrap"):
+        command = commands.add_parser(name)
+        command.add_argument("--expected-campaign-id", required=True)
+        command.add_argument("--expected-source-commit", required=True)
+        acknowledgement = (
+            RESERVED_ACKNOWLEDGEMENT
+            if name == "retain-reserved-bootstrap" else ACKNOWLEDGEMENT
+        )
+        command.add_argument(
+            "--acknowledge", required=True,
+            help=f"must equal {acknowledgement!r}",
+        )
+    for name in ("verify", "verify-reserved-bootstrap"):
+        command = commands.add_parser(name)
+        command.add_argument("--expected-campaign-id", required=True)
+        command.add_argument("--expected-source-commit", required=True)
+        command.add_argument("--expected-replacement-commit", required=True)
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
-    if args.command == "retain":
+    reserved_bootstrap = args.command.endswith("reserved-bootstrap")
+    if args.command.startswith("retain"):
         result = retain(
             expected_campaign_id=args.expected_campaign_id,
             expected_source_commit=args.expected_source_commit,
             acknowledgement=args.acknowledge,
+            reserved_bootstrap=reserved_bootstrap,
         )
     else:
         result = verify_retained(
             expected_campaign_id=args.expected_campaign_id,
             expected_source_commit=args.expected_source_commit,
             expected_replacement_commit=args.expected_replacement_commit,
+            reserved_bootstrap=reserved_bootstrap,
         )
     sys.stdout.buffer.write(canonical(result))
     return 0

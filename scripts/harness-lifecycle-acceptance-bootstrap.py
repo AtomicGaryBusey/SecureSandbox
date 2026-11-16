@@ -45,6 +45,19 @@ INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
 MEDIA_TYPE = "application/json"
 MAX_JSON = 64 * 1024
+HOST_RELEASE_FIELDS = {
+    "schema", "status", "release_id", "launcher_sha256", "payloads",
+    "host_release_launcher_pair_sha256", "candidate_authority_sha256",
+    "release_tree_identity_sha256", "developer_id_team_id",
+    "developer_id_team_floor_sha256",
+    "developer_id_team_floor_release_id",
+}
+HOST_RELEASE_DIGEST_FIELDS = {
+    "release_id", "launcher_sha256", "host_release_launcher_pair_sha256",
+    "candidate_authority_sha256", "release_tree_identity_sha256",
+    "developer_id_team_floor_sha256",
+    "developer_id_team_floor_release_id",
+}
 CASE_FILES = {
     "bootstrap-clean-install": {
         "host-install-readback": "host-install-readback.json",
@@ -224,20 +237,19 @@ def validate_host_receipt(campaign: dict[str, Any], case: dict[str, Any],
                != case["procedure"]["procedure_sha256"]
             or not valid_observed_at(campaign, value, now)
             or not isinstance(release, dict)
-            or set(release) != {
-                "schema", "status", "release_id", "launcher_sha256", "payloads",
-            }
+            or set(release) != HOST_RELEASE_FIELDS
             or release.get("schema") != HOST_RELEASE.SCHEMA
             or release.get("status") != "verified"
-            or not isinstance(release.get("release_id"), str)
-            or SUPERVISOR.SHA256.fullmatch(release["release_id"]) is None
-            or not isinstance(release.get("launcher_sha256"), str)
-            or SUPERVISOR.SHA256.fullmatch(release["launcher_sha256"]) is None
+            or any(not isinstance(release.get(name), str)
+                   or SUPERVISOR.SHA256.fullmatch(release[name]) is None
+                   for name in HOST_RELEASE_DIGEST_FIELDS)
             or not isinstance(release.get("payloads"), dict)
             or not release["payloads"]
             or any(not isinstance(name, str) or not isinstance(item, str)
                    or SUPERVISOR.SHA256.fullmatch(item) is None
                    for name, item in release["payloads"].items())
+            or release.get("developer_id_team_id")
+               != HOST_RELEASE.NATIVE_HOST_PRODUCTS_TEAM_ID
             or value.get("release_sha256") != digest(release)
             or value.get("candidate_authority") != "none"
             or value.get("production_material_used") is not False

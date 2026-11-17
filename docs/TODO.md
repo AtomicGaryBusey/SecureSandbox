@@ -1101,17 +1101,21 @@ in ignored local records, not in this file.
   The earlier expired transition `15450635...96da` is now physically closed as
   `source_restored`/`authorization_expired`, with matching source STABLE
   evidence, absent journal, exact source services, and no target selection.
-  The Neo retains a later expired, still-source PENDING transition
-  `20739d26...`. Its first attributed closeout stopped fail-closed while the
-  newly bootstrapped demand-only Native Credential Helper's canonical inactive
-  launchd metadata was still maturing; both fences remain intact and the target
-  remains inert. Publish and transfer the reviewed stabilization repair. It
-  requires two consecutive identical inactive definitions and permits only
-  absent-to-empty launchd metadata maturation, never a run-count or other
-  semantic change. Cancel the stale old-manager prompt, run one fresh exact-
-  release password ceremony, and independently prove source terminal/STABLE,
-  journal removal, exact services, and inert target before any new Touch ID
-  request.
+  The later transition `20739d26...` is closed as `target_committed`, with
+  immutable terminal/STABLE evidence, exact target services, and absent
+  journal. The `d64fa0c` stabilization repair also activated through fresh
+  Touch ID as release `bd5c8e55...`; independent verification proves its
+  terminal, STABLE pair, candidate authority, tree, launcher, 35-payload
+  closure, services, predecessor, and absent journal. The retained empty
+  `35dd424` campaign still has zero raw reservations and observations. Its
+  first ordinary retention attempt failed closed before plan publication or
+  rename because the newer checkout was incorrectly required to present old
+  source bytes. Publish the reviewed repair that instead verifies all ten
+  drivers from the exact root-owned protected predecessor while retaining
+  independent clean-descendant, ancestry, machine, and remote-tip gates, then
+  rerun and independently verify the same no-delete retention. The focused 31
+  tests and 172 acceptance-family tests pass; sealed security scan
+  `43a3db46...` reports zero findings.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

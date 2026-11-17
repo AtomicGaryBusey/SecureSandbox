@@ -1167,6 +1167,33 @@ def _remote_tips_for(commit: str, remote_tips: Any) -> bool:
     )
 
 
+def verify_predecessor_driver_inventory(source_commit: str) -> str:
+    """Verify the campaign's immutable protected release, not newer source.
+
+    Retention necessarily runs from a clean descendant checkout.  Requiring
+    that checkout's mutable source files to hash as the predecessor commit
+    makes every legitimate post-upgrade retention impossible.  The campaign
+    commit is instead represented by its complete root-owned protected
+    release; the descendant checkout and remote tip are verified separately.
+    """
+    manifests: list[dict[str, Any]] = []
+    try:
+        for driver in DRIVER_ENTRYPOINTS:
+            manifests.append(ACCEPTANCE_CLI.verify_protected_driver(
+                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
+                source_commit, driver, 0,
+            ))
+    except (AcceptanceError, FileNotFoundError, OSError) as error:
+        raise RetentionError(
+            "retention_predecessor_driver_invalid"
+        ) from error
+    if (len(manifests) != len(DRIVER_ENTRYPOINTS)
+            or not manifests
+            or any(item != manifests[0] for item in manifests[1:])):
+        raise RetentionError("retention_predecessor_driver_invalid")
+    return digest(manifests[0])
+
+
 def _is_ancestor(older: str, newer: str) -> None:
     try:
         PREFLIGHT.git_command(
@@ -1364,7 +1391,9 @@ def verify_retained(*, expected_campaign_id: str,
                     protected_projection: bool = False,
                     home: Path | None = None,
                     source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
-                    identity_probe: Callable[[], str] | None = None) -> dict[str, Any]:
+                    identity_probe: Callable[[], str] | None = None,
+                    predecessor_probe: Callable[[str], str] | None = None,
+                    ) -> dict[str, Any]:
     if platform.system() != "Darwin":
         raise RetentionError("retention_disposable_mac_required")
     home = Path.home() if home is None else home
@@ -1391,12 +1420,11 @@ def verify_retained(*, expected_campaign_id: str,
     machine_identity = identity_probe()
     if machine_identity != campaign["machine_identity_sha256"]:
         raise RetentionError("retention_machine_identity_mismatch")
-    readiness = ACCEPTANCE_CLI.driver_readiness(
-        ROOT, source_commit=campaign["source_commit"],
+    predecessor_probe = (
+        verify_predecessor_driver_inventory
+        if predecessor_probe is None else predecessor_probe
     )
-    if (readiness.get("available_driver_count") != len(DRIVER_ENTRYPOINTS)
-            or readiness.get("status") != "ready"):
-        raise RetentionError("retention_predecessor_driver_invalid")
+    predecessor_probe(campaign["source_commit"])
     _validate_plan_binding(
         plan, campaign, inventory_sha256, uid,
         reserved_bootstrap=reserved_bootstrap,
@@ -1432,6 +1460,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
            protected_projection_probe: Callable[
                [dict[str, Any], Path, int, str], dict[str, Any]
            ] | None = None,
+           predecessor_probe: Callable[[str], str] | None = None,
            ) -> dict[str, Any]:
     if sum((reserved_bootstrap, owner_projection, protected_projection)) > 1:
         raise RetentionError("retention_mode_invalid")
@@ -1464,12 +1493,11 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     identity_probe = SUPERVISOR.current_machine_identity if identity_probe is None else identity_probe
     if identity_probe() != campaign["machine_identity_sha256"]:
         raise RetentionError("retention_machine_identity_mismatch")
-    readiness = ACCEPTANCE_CLI.driver_readiness(
-        ROOT, source_commit=campaign["source_commit"],
+    predecessor_probe = (
+        verify_predecessor_driver_inventory
+        if predecessor_probe is None else predecessor_probe
     )
-    if (readiness.get("available_driver_count") != len(DRIVER_ENTRYPOINTS)
-            or readiness.get("status") != "ready"):
-        raise RetentionError("retention_predecessor_driver_invalid")
+    predecessor_probe(campaign["source_commit"])
 
     destination_name = campaign["campaign_id"]
     source_parent = _directory(root.parent, uid, frozenset({0o700, 0o755}))

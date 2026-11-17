@@ -92,19 +92,50 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 "b" * 40, {"origin": "b" * 40},
             ),
             "identity_probe": lambda: self.campaign["machine_identity_sha256"],
+            "predecessor_probe": lambda commit: "c" * 64,
         }
         arguments.update(overrides)
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
                 mock.patch.object(retention.PREFLIGHT, "git_command",
-                                  side_effect=git_side_effect), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                                  side_effect=git_side_effect):
             return retention.retain(**arguments)
+
+    def test_predecessor_inventory_uses_exact_protected_release_not_source(self):
+        manifest = {"source_commit": self.campaign["source_commit"]}
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "verify_protected_driver",
+                return_value=manifest) as verifier:
+            observed = retention.verify_predecessor_driver_inventory(
+                self.campaign["source_commit"],
+            )
+        self.assertEqual(observed, acceptance.digest(manifest))
+        self.assertEqual(verifier.call_count, len(acceptance.DRIVER_ENTRYPOINTS))
+        self.assertEqual(
+            [call.args for call in verifier.call_args_list],
+            [
+                (
+                    retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
+                    self.campaign["source_commit"], driver, 0,
+                )
+                for driver in acceptance.DRIVER_ENTRYPOINTS
+            ],
+        )
+
+    def test_predecessor_inventory_rejects_inconsistent_manifests(self):
+        manifests = [
+            {"source_commit": self.campaign["source_commit"], "version": n}
+            for n in range(len(acceptance.DRIVER_ENTRYPOINTS))
+        ]
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "verify_protected_driver",
+                side_effect=manifests), self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_predecessor_driver_invalid",
+                ):
+            retention.verify_predecessor_driver_inventory(
+                self.campaign["source_commit"],
+            )
 
     def reserve_bootstrap_rejection(self) -> None:
         reservation = self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID
@@ -379,15 +410,9 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         self.assertEqual(plan["campaign_sha256"], self.campaign["campaign_sha256"])
         self.assertEqual(plan["replacement_source_commit"], "b" * 40)
 
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
-                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
             verified = retention.verify_retained(
                 expected_campaign_id=self.campaign["campaign_id"],
                 expected_source_commit=self.campaign["source_commit"],
@@ -397,6 +422,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                     "b" * 40, {"origin": "b" * 40},
                 ),
                 identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
 
@@ -444,15 +470,9 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             plan["rejection_diagnostic"]["diagnostic_sha256"],
         )
 
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
-                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
             verified = retention.verify_retained(
                 expected_campaign_id=self.campaign["campaign_id"],
                 expected_source_commit=self.campaign["source_commit"],
@@ -463,6 +483,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                     "b" * 40, {"origin": "b" * 40},
                 ),
                 identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
 
@@ -512,15 +533,9 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             plan["rejection_diagnostic"]["diagnostic_sha256"],
         )
 
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
-                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
             verified = retention.verify_retained(
                 expected_campaign_id=self.campaign["campaign_id"],
                 expected_source_commit=self.campaign["source_commit"],
@@ -529,6 +544,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 home=self.home,
                 source_probe=lambda: ("b" * 40, {"origin": "b" * 40}),
                 identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
 
@@ -612,15 +628,9 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             plan["rejection_diagnostic"]["diagnostic_sha256"],
         )
 
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
-                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
             verified = retention.verify_retained(
                 expected_campaign_id=self.campaign["campaign_id"],
                 expected_source_commit=self.campaign["source_commit"],
@@ -629,6 +639,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 home=self.home,
                 source_probe=lambda: ("b" * 40, {"origin": "b" * 40}),
                 identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
 
@@ -786,15 +797,9 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             supersession["supersession_sha256"],
         )
 
-        readiness = {
-            "status": "ready",
-            "available_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
-        }
         with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
                 mock.patch.object(retention, "acl_absent", return_value=True), \
-                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
-                mock.patch.object(retention.ACCEPTANCE_CLI, "driver_readiness",
-                                  return_value=readiness):
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
             verified = retention.verify_retained(
                 expected_campaign_id=self.campaign["campaign_id"],
                 expected_source_commit=self.campaign["source_commit"],
@@ -804,6 +809,7 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                     current, {"origin": current},
                 ),
                 identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
 

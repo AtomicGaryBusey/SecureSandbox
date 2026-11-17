@@ -846,6 +846,20 @@ the original root-projector branch. It grants no filesystem authority; the
 current verifier separately requires the actual releases, payloads, and
 manifests to remain root-owned and immutable.
 
+The original completely-empty retention path later exposed a distinct
+commit-domain defect when invoked from a clean published descendant: its
+source readiness check tried to classify the descendant's current source bytes
+as the older campaign commit before reaching the exact installed predecessor.
+This rejected safely before plan publication or rename, but made legitimate
+post-upgrade retention impossible. The repaired boundary treats the immutable
+root-owned protected release named by the campaign commit as the predecessor
+authority. It verifies every fixed driver through the canonical protected
+manifest and payload verifier and requires all ten results to be identical,
+while the replacement checkout remains independently bound by cleanliness,
+ancestry, authorized remote tip, machine identity, and the existing
+descriptor-relative no-overwrite publication. No caller may choose a protected
+root, driver list, manifest, or predecessor probe through the CLI.
+
 ## Disposable recovery fixture driver
 
 `scripts/harness-lifecycle-acceptance-recovery.py` implements the recovery

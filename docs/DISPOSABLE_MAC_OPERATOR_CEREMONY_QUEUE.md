@@ -21,12 +21,14 @@ development Mac.
 ## Current Neo resumption
 
 The retained live Neo campaign is still the empty exact `35dd424` campaign;
-do not collect from it under newer source. The acceptance-start repair was
+do not collect from it under newer source. Read-only resumption on November 17
+found Gateway running, Research and Target stopped, and the Parallels Gateway
+VM application resident. That mixed inventory is not a campaign collection
+baseline and authorizes no lifecycle mutation. The acceptance-start repair was
 published; its first physical stop safely isolated Gateway but
 exposed that the old guest shutdown transport used the same Shared adapter.
 The first local repair then exposed that Parallels 27.1.0 `--acpi` implicitly
-force-stops after 120 seconds; Target is now stopped, Research and Gateway are
-running, and Gateway `net0` remains disconnected. A later physical probe proved
+force-stops after 120 seconds. A later physical probe proved
 that `--noforce` requires Parallels Tools and cannot stop these guests. Publish
 the reviewed no-`prlctl stop` descendant, establish actual VM and GUI state
 read-only, explicitly recover the already-isolated Gateway control transport,
@@ -700,34 +702,59 @@ attributed expired-authority recovery selected no target, published immutable
 source STABLE record, removed its private journal only after readback, and left
 the source services exact.
 
-The Neo now retains a later ordinary public PENDING transition beginning
-`20739d26`. Its Touch ID authority expired before target selection; the source
-release and launcher remain selected and the target remains inert. The first
-attributed closeout stopped fail-closed while launchd's newly bootstrapped,
-demand-only Native Credential Helper definition was still maturing from absent
-empty-state metadata to its canonical inactive form. The journal and public
-fence remain intact. Do not edit either record, request new Touch ID authority,
-or retry with the older release manager.
+The later ordinary transition `20739d26...` is also
+closed. The retained local diagnostic wrapper began its exact recovery at
+`2026-11-17T18:10:08Z`; the protected manager completed at
+`2026-11-17T18:16:35Z` and published immutable terminal
+`ca20bbd9...`
+with `status: target_committed`, `error: null`, and transition digest
+`6eb892f6...`.
+The wrapper then attempted to assign zsh's read-only `status` parameter and
+exited nonzero after printing the successful protected result; that wrapper
+error did not alter or invalidate the manager's terminal evidence.
 
-Publish, sign/notarize, transfer, and independently preflight the stabilization
-repair. It admits an inactive helper only after two consecutive identical
-canonical definitions within the existing bound. Between reads it tolerates
-only launchd's exact additive empty-state maturation (`runs`: absent to zero;
-`job state`: absent to `uninitialized`); a real run-count change, any other
-definition change, scheduled/running state, absence, malformed output, or
-timeout fails closed. With Alex present at the Neo, cancel the stale visible
-password prompt and launch one fresh, release-bound attributed recovery. It
-must select no target and finish with immutable
-`source_restored`/`authorization_expired` terminal evidence, matching source
-STABLE evidence, absent private journal, exact source services, and inert
-target. Any different result stops the ceremony. Only after independent
-verification may a fresh candidate and Touch ID request be prepared.
+Independent readback verifies STABLE pair `ce60aa73...`, current release
+`44fe71d6...`, previous release `9afc9bee...`, candidate authority
+`d7e16671...`, release-tree identity `a6f9aa31...`, and launcher
+`58b16587...`.
+The private journal is absent and the complete public Host verifier reports
+`status: verified` for all 35 payloads. No PENDING transition remains.
 
-After activation, independently verify the selected Host release, launcher
-pair, daemon generation, candidate authority, trust floors, absent pending
-transition, and inert predecessor before proceeding. Then acquire and publish
-the already retained pinned Ubuntu installer, build and publish the reviewed
-autoinstall derivative, review the `neo-8gb` plan, and create the three exact
-stopped VMs through their separate protected ceremonies. Do not initialize the
-91-case campaign until guest installation, boundary readback, the exact-commit
-ten-driver protected installation, and post-install morning preflight all pass.
+The stabilization repair at exact commit `d64fa0c` was signed and notarized as
+submission `aaba36a9...`, transferred, staged, and activated through a fresh
+attributed Touch ID request. Transition `e468dd1d...` terminalized
+`target_committed` with terminal digest `ee0348f...`
+and no error. Independent verification proves current release `bd5c8e55...`,
+previous release `44fe71d6...`, STABLE pair `cf263657...`, candidate authority
+`6cd048fa...`, release-tree identity `aedd7983...`, exact launcher
+`58b16587...`, all 35 payloads, absent private journal, running authorization
+broker, and the Native Credential Helper's canonical inactive definition. The
+caller's later password-recovery prompt was cancelled because the protected
+transition had already committed; no recovery or retry occurred. Do not replay
+any of the three closed transitions.
+
+Live campaign readback then found empty campaign `21a27ec8...`, still bound to
+`35dd424`, with zero raw
+reservations, zero observations, and next case `bootstrap-clean-install`.
+Ordinary retention failed closed before plan publication or rename with
+`retention_predecessor_driver_invalid`; the campaign remains byte-for-byte at
+its live path and no retained destination exists. The defect was that a clean
+newer checkout was required to present current source bytes as the older
+campaign commit before the already-installed protected predecessor was
+verified. The repair instead verifies every fixed driver through the exact
+root-owned `35dd424` protected manifest and payload closure while retaining
+the independent clean-descendant, ancestry, machine, and authorized-remote
+checks. Its focused 31-test suite and 172-test acceptance family pass; sealed
+security scan `43a3db46...` reports complete coverage
+and zero findings. Publish and install that exact repair before rerunning the
+same no-delete retention command.
+
+After the corrected retention is published and independently verified on the
+Neo, install the matching protected ten-driver release. The pinned installer,
+reviewed autoinstall derivative, and three VMs already exist; do not reacquire
+or recreate them. First use the reviewed no-`prlctl stop` lifecycle to reconcile
+the current Gateway-running/Research-stopped/Target-stopped inventory to the
+required closed baseline with Parallels Desktop's GUI closed, then rerun the
+post-install morning preflight. Initialize a fresh exact-source campaign only
+after guest installation, boundary readback, the exact-commit ten-driver
+protected installation, and that preflight all pass.

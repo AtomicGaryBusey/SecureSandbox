@@ -2,10 +2,12 @@
 
 Status: every superseded or failed exact-commit campaign on the disposable Neo
 is retained without deletion, including historical protected collections and
-their unchanged raw bytes. A fresh replacement campaign is now live, bound to
-the exact installed public source and canonical suite digest retained in
-private evidence. It has zero observations, zero raw reservations, and exact
-next case `bootstrap-clean-install`. No acceptance verdict has been issued.
+their unchanged raw bytes. The live `35dd424` campaign has zero observations,
+zero raw reservations, and exact next case `bootstrap-clean-install`, but is
+older than the current clean `d64fa0c` checkout and therefore cannot collect.
+Its first no-delete retention attempt rejected before plan publication or
+rename; the reviewed repair remains to be published and replayed. No
+acceptance verdict has been issued.
 
 The exact `35dd424` protected ten-driver release is installed root-owned on the
 Neo. Its complete manifest passed independent readiness with ten available
@@ -673,16 +675,53 @@ closed on the same stale custody. A later exact recovery physically closed that
 transition without target selection and retained the required source terminal,
 STABLE, journal-absence, and service readbacks.
 
-A subsequent ordinary upgrade expired before target selection and remains
-fenced. Its first attributed source closeout stopped fail-closed because a
-newly bootstrapped demand-only Native Credential Helper's inactive launchd
-definition changed while launchd added empty-state metadata. The repair accepts
-inactivity only after two consecutive identical canonical definitions and
-tolerates solely `runs` absent-to-zero and `job state`
+A subsequent ordinary upgrade initially remained fenced after its first
+attributed closeout stopped fail-closed while launchd added empty-state
+metadata to a newly bootstrapped demand-only Native Credential Helper. The
+repair accepts inactivity only after two consecutive identical canonical
+definitions and tolerates solely `runs` absent-to-zero and `job state`
 absent-to-`uninitialized` maturation. A deterministic regression proves that
 `runs` zero-to-one fails immediately rather than converging. The complete Host
-release-manager suite passes 296 tests with two intentional skips. A new signed
-physical recovery of the retained later transition remains pending.
+release-manager suite passes 296 tests with two intentional skips.
+
+The retained recovery for transition `20739d26...` subsequently completed on
+the Neo and published immutable terminal `ca20bbd9...`
+as `target_committed` with no error. Its diagnostic wrapper failed only after
+printing that result because it assigned zsh's read-only `status` parameter.
+Independent readback verifies STABLE pair `ce60aa73...`,
+current release `44fe71d6...`, predecessor `9afc9bee...`, exact candidate
+authority `d7e16671...`, exact tree `a6f9aa31...`, exact launcher
+`58b16587...`, absent private journal, and a complete 35-payload public Host
+verification result. This closes that transition; it does not constitute a
+91-case campaign verdict.
+
+The signed/notarized `d64fa0c` stabilization candidate then activated through
+a fresh attributed Touch ID request. Transition `e468dd1d...` published
+immutable `target_committed` terminal `ee0348f...` with no error. Independent
+readback proves release `bd5c8e55...` selected, predecessor `44fe71d6...`
+retained, STABLE pair `cf263657...`, candidate authority `6cd048fa...`, tree
+identity `aedd7983...`, unchanged launcher `58b16587...`, all 35 payloads,
+absent journal, running authorization service, and canonical inactive Native
+Credential Helper definition. The caller's ambiguous response offered an
+administrator-password recovery prompt over an inaccessible SSH PTY; it was
+cancelled only after independent state readback proved the protected
+transition had already committed. No retry or recovery mutation followed.
+
+The live campaign remained the exact empty `35dd424` campaign `21a27ec8...`.
+Its first ordinary no-delete retention
+attempt rejected before plan publication or rename with
+`retention_predecessor_driver_invalid`; the live campaign is unchanged and no
+retained destination exists. The ordinary retention verifier had incorrectly
+asked the clean descendant checkout's current source files to satisfy the old
+campaign commit before verifying the immutable protected predecessor. The
+repair verifies all ten fixed drivers directly through the exact root-owned
+protected release named by the campaign commit, requires every driver to bind
+the same canonical manifest, and separately preserves clean replacement,
+ancestry, machine, remote-tip, descriptor, exclusive-rename, and post-move
+readback gates. Thirty-one focused tests and 172 acceptance-family tests pass.
+Sealed security scan `43a3db46...` reviewed the exact
+source diff with complete coverage and zero findings. Publication and physical
+no-delete replay remain pending.
 
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical

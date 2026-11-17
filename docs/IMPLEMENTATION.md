@@ -180,6 +180,19 @@ artifact overrides. Partial publication can resume only from exact matching
 observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 
+Physical use of the ordinary empty-campaign path after a later source upgrade
+exposed a commit-domain error in its predecessor gate: `driver_readiness`
+first inspected the descendant checkout's current source files while labeling
+them with the older campaign commit. The immutable root-owned protected
+predecessor already existed and was the intended authority, but could not be
+reached through that false source-completeness prerequisite. Ordinary and
+read-only retention verification now iterate the fixed ten-driver inventory
+through `verify_protected_driver(PROTECTED_INSTALL_ROOT, campaign_commit, ...)`,
+require every call to return one identical canonical manifest, and retain the
+separate clean replacement, ancestry, authorized-remote, machine, descriptor,
+exclusive-rename, and post-move checks. The injectable predecessor probe is a
+callable-only test seam and is not represented in argparse or CLI input.
+
 Physical bootstrap later reached the first raw reservation and exposed schema
 drift in the Host receipt validator: the production Host verifier now returns
 pair, candidate-authority, release-tree, and Developer ID floor bindings that

@@ -1098,6 +1098,14 @@ in ignored local records, not in this file.
   root authorization only immediately before one validated protected ceremony,
   and run the 11 Touch ID cases only in suite order with no password fallback
   or reflexive retry.
+  The Neo currently retains exact expired, still-source public PENDING
+  transition `15450635...96da` at checkpoint `bfa25f2`; its complete identifier
+  remains only in protected live evidence.
+  Publish and transfer the reviewed source-closeout repair, then use one
+  separately attributed password ceremony to terminalize only the exact source
+  pair as `source_restored`/`authorization_expired`. Independently prove the
+  matching STABLE record, removed journal, running source daemon, and inert
+  target before preparing any fresh Touch ID request.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

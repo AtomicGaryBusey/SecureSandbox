@@ -14911,6 +14911,7 @@ def _select_host_pair_physical_state(
     release_id = target["release_id"]
     authority = installed_native_host_candidate_binding(
         install_root, release_id, expected_uid,
+        public_only=defer_pending_source_authorization,
     )[3]
     if (native_host_candidate_authority_sha256(authority)
             != target["candidate_authority_sha256"]):
@@ -14995,6 +14996,80 @@ def _verify_committed_host_pair_physical_state(
     return observed, services
 
 
+def terminalize_host_pair_source_restoration(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    transition: Mapping[str, Any], pending_sha256: str, *, error: str,
+) -> tuple[dict[str, Any], str]:
+    """Close one exact PENDING transition on its already-selected source.
+
+    This helper never selects the journaled target.  It is shared by target
+    activation compensation and the separately attributed closeout of an
+    expired, still-source ordinary transition.  The public PENDING fence stays
+    active while source service definitions are installed and attested; live
+    source services start only after the source-restored terminal and STABLE
+    record are durable and the private journal has been removed.
+    """
+    validated = validate_host_pair_transition(dict(transition))
+    source = validated["source_pair"]
+    if source is None or validated["bootstrap"]:
+        raise ReleaseFailure("host_pair_transition_source_missing")
+    outstanding = read_pending_host_pair_transition(
+        install_root, expected_uid, allow_absent=False,
+    )
+    assert outstanding is not None
+    durable_transition, durable_root = outstanding
+    os.close(durable_root)
+    if (durable_transition["transition_id"]
+            != validated["transition_id"]
+            or durable_transition["transition_sha256"]
+                != validated["transition_sha256"]):
+        raise ReleaseFailure("host_pair_transition_changed")
+    if durable_transition["finalization"] is not None:
+        raise ReleaseFailure("host_pair_transition_finalization_changed")
+
+    if validated["native_uid"] >= 0:
+        stop_and_fence_host_services(validated["native_uid"])
+    restored_pair, services = _select_host_pair_physical_state(
+        install_root, launcher_path, expected_uid, validated, source,
+        previous_target=validated["old_previous_target"],
+        native_uid=validated["native_uid"],
+        old_process_release=(
+            install_root / "releases"
+            / validated["target_pair"]["release_id"]
+        ),
+        defer_pending_source_authorization=True,
+    )
+    finalization = make_host_pair_finalization(
+        validated, status="source_restored", committed_pair=restored_pair,
+        services=services, install_root=install_root, error=error,
+    )
+    root = open_locked_install_root(install_root, expected_uid)
+    try:
+        validated = stage_host_pair_finalization(
+            root, validated, finalization, expected_uid,
+        )
+    finally:
+        os.close(root)
+    terminal = make_host_pair_terminal(
+        validated, validated["finalization"], expected_uid=expected_uid,
+    )
+    restored = publish_host_pair_terminal_and_stable(
+        install_root, expected_uid, validated, terminal, pending_sha256,
+    )
+    if validated["native_uid"] >= 0:
+        restored_release, restored_manifest = verified_release(
+            install_root, install_root / "current", expected_uid,
+        )
+        install_release_host_services(
+            restored_release, restored_manifest, validated["native_uid"],
+        )
+        verify_release_host_services(
+            restored_release, restored_manifest, validated["native_uid"],
+            allow_inactive_native=True,
+        )
+    return restored
+
+
 def verify_host_pair_replay_prefix(
     install_root: Path, launcher_path: Path, expected_uid: int,
     transition: Mapping[str, Any],
@@ -15055,6 +15130,7 @@ def ensure_host_pair_transition_activation_current(
 def execute_host_pair_transition(
     install_root: Path, launcher_path: Path, expected_uid: int,
     transition: Mapping[str, Any], *, raise_after_source_restore: bool = True,
+    allow_expired_source_restoration: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Run or replay one journaled pair transition to a durable terminal."""
     validated = validate_host_pair_transition(dict(transition))
@@ -15219,6 +15295,30 @@ def execute_host_pair_transition(
         if validated["source_pair"] is None
         else install_root / "releases" / validated["source_pair"]["release_id"]
     )
+    if replay_prefix == "source" and allow_expired_source_restoration:
+        try:
+            ensure_host_pair_transition_activation_current(validated)
+        except ReleaseFailure as error:
+            if str(error) != "host_pair_transition_expired":
+                raise
+            try:
+                return terminalize_host_pair_source_restoration(
+                    install_root, launcher_path, expected_uid, validated,
+                    pending_sha256, error="authorization_expired",
+                )
+            except Exception as recovery_error:
+                recovery_code = (
+                    str(recovery_error)
+                    if isinstance(recovery_error, ReleaseFailure)
+                    and re.fullmatch(
+                        r"[A-Za-z0-9_.:-]{1,240}", str(recovery_error),
+                    )
+                    else "unclassified"
+                )
+                raise ReleaseFailure(
+                    "host_pair_transition_recovery_unproven:"
+                    + recovery_code
+                ) from recovery_error
     activation_started = False
     try:
         if replay_prefix == "source":
@@ -15279,7 +15379,9 @@ def execute_host_pair_transition(
         durable_transition, durable_root = outstanding
         os.close(durable_root)
         if (durable_transition["transition_id"]
-                != validated["transition_id"]):
+                != validated["transition_id"]
+                or durable_transition["transition_sha256"]
+                    != validated["transition_sha256"]):
             raise ReleaseFailure("host_pair_transition_changed") \
                 from activation_error
         if durable_transition["finalization"] is not None:
@@ -15290,35 +15392,9 @@ def execute_host_pair_transition(
             # journaled target.
             raise
         try:
-            if validated["native_uid"] >= 0:
-                stop_and_fence_host_services(validated["native_uid"])
-            source_pair, services = _select_host_pair_physical_state(
+            restored = terminalize_host_pair_source_restoration(
                 install_root, launcher_path, expected_uid, validated,
-                validated["source_pair"],
-                previous_target=validated["old_previous_target"],
-                native_uid=validated["native_uid"],
-                old_process_release=(
-                    install_root / "releases"
-                    / validated["target_pair"]["release_id"]
-                ),
-                defer_pending_source_authorization=True,
-            )
-            finalization = make_host_pair_finalization(
-                validated, status="source_restored",
-                committed_pair=source_pair, services=services,
-                install_root=install_root,
-                error="target_activation_failed",
-            )
-            root = open_locked_install_root(install_root, expected_uid)
-            try:
-                validated = stage_host_pair_finalization(
-                    root, validated, finalization, expected_uid,
-                )
-            finally:
-                os.close(root)
-            terminal = make_host_pair_terminal(
-                validated, validated["finalization"],
-                expected_uid=expected_uid,
+                pending_sha256, error="target_activation_failed",
             )
         except Exception as recovery_error:
             recovery_code = (
@@ -15331,20 +15407,6 @@ def execute_host_pair_transition(
                 "host_pair_transition_recovery_unproven:"
                 + recovery_code
             ) from recovery_error
-        restored = publish_host_pair_terminal_and_stable(
-            install_root, expected_uid, validated, terminal, pending_sha256,
-        )
-        if validated["native_uid"] >= 0:
-            restored_release, restored_manifest = verified_release(
-                install_root, install_root / "current", expected_uid,
-            )
-            install_release_host_services(
-                restored_release, restored_manifest, validated["native_uid"],
-            )
-            verify_release_host_services(
-                restored_release, restored_manifest, validated["native_uid"],
-                allow_inactive_native=True,
-            )
         if raise_after_source_restore:
             raise activation_error
         return restored
@@ -15445,6 +15507,7 @@ def recover_host_pair_transition(
     stable, stable_sha256 = execute_host_pair_transition(
         install_root, launcher_path, expected_uid, transition,
         raise_after_source_restore=False,
+        allow_expired_source_restoration=attributed_recovery,
     )
     return {
         "candidate_authority_sha256": stable["pair"][

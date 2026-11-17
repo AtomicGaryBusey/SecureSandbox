@@ -718,6 +718,83 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                     )
                     self.assert_public_pair_denied(fixture)
 
+    def test_attributed_expired_source_prefix_terminalizes_source_only(self):
+        with self.pair_fixture() as fixture:
+            installed = fixture.install()
+            source_id = str(installed["release_id"])
+            source_launcher = fixture.launcher_bytes(fixture.base_candidate)
+            candidate = fixture.new_candidate("attributed-expired-source")
+            (
+                _values, _hashes, target_id, target_launcher, _plan,
+            ) = fixture.describe_candidate(
+                candidate, source_stable_sha256=fixture.public_pair()[1],
+            )
+            self.crash_during_install(fixture, "PUBLIC_PENDING", candidate)
+            transition = fixture.pending_transition()
+            pending, pending_sha256 = fixture.public_pair()
+            target = transition["target_pair"]
+
+            with (
+                mock.patch.object(
+                    MANAGER.time, "time",
+                    return_value=transition["expires_at"],
+                ),
+                mock.patch.object(
+                    MANAGER, "install_launcher_generation",
+                    wraps=MANAGER.install_launcher_generation,
+                ) as install_launcher,
+                mock.patch.object(
+                    MANAGER, "installed_native_host_candidate_binding",
+                    wraps=MANAGER.installed_native_host_candidate_binding,
+                ) as candidate_binding,
+            ):
+                recovered = MANAGER.recover_host_pair_transition(
+                    fixture.install_root, fixture.launcher,
+                    fixture.state, fixture.uid,
+                    expected_public_pending_sha256=pending_sha256,
+                    expected_transition_id=transition["transition_id"],
+                    expected_transition_sha256=transition["transition_sha256"],
+                    expected_operation=transition["operation"],
+                    expected_target_release_id=target["release_id"],
+                    expected_target_candidate_authority_sha256=(
+                        target["candidate_authority_sha256"]
+                    ),
+                    expected_target_release_tree_identity_sha256=(
+                        target["release_tree_identity_sha256"]
+                    ),
+                    expected_target_launcher_sha256=target["launcher_sha256"],
+                )
+
+            self.assertEqual(
+                pending["schema"],
+                MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+            )
+            self.assertEqual(recovered["release_id"], source_id)
+            self.assertFalse(any(
+                call.args[2] == MANAGER.sha256_bytes(target_launcher)
+                for call in install_launcher.call_args_list
+            ))
+            self.assertTrue(any(
+                call.kwargs.get("public_only") is True
+                for call in candidate_binding.call_args_list
+            ))
+            self.assertFalse(
+                (fixture.install_root
+                 / MANAGER.INSTALL_TRANSITION_PENDING_NAME).exists()
+            )
+            stable = self.assert_stable_pair(
+                fixture, release_id=source_id,
+                launcher_bytes=source_launcher,
+            )
+            terminal = MANAGER.verified_public_host_pair_terminal(
+                fixture.install_root, fixture.uid, stable,
+            )
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertEqual(terminal[0]["status"], "source_restored")
+            self.assertEqual(terminal[0]["error"], "authorization_expired")
+            self.assertNotEqual(recovered["release_id"], target_id)
+
     def test_authorization_live_at_boundary_minus_one_can_activate(self):
         with self.pair_fixture() as fixture:
             fixture.install()

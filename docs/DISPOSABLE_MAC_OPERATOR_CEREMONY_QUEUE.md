@@ -692,22 +692,27 @@ wrong operation, wrong generation, changed plan digest, missing campaign
 identity, expired request, or ambiguous UI is a cancellation and retained
 failure record—not a reason to retry reflexively.
 
-## Morning handoff
+## Current handoff
 
-No operator ceremony is currently runnable. The attended `7fec2bd` request is
-spent, and its candidate must not be retried. First review and publish the
-initial-snapshot stabilization repair, build and notarize its exact Host
-products, transfer and admit that new candidate, and complete the read-only
-preflight. When Alex is back at the Neo keyboard, the agent must then
-revalidate the clean exact-public-release checkout, admitted signed/notarized
-candidate, unchanged source selector and launcher pair, running source
-authorization daemon, absent pending transition, absent rollback selector, and
-closed Parallels GUI. Only then is the exact private-floor broker recovery above
-unblocked: one fresh notice, one terminal-bound administrator-password stage,
-and one ordinary Touch ID activation. Notices that expire while the operator is
-away are retained `operator_cancelled` evidence and authorize no retry or
-mutation. Launch a fresh request only when the operator can answer its
-90-second notice immediately.
+The Neo currently retains an exact public PENDING transition beginning
+`15450635` and ending `96da` from published checkpoint `bfa25f2`.
+Its Touch ID authority expired before any target mutation. Current and launcher
+remain on the source generation, the target is inert, and generic recovery
+correctly refused to consume the expired authority. Do not delete or edit the
+private journal or public PENDING record and do not request another Touch ID
+authorization yet.
+
+First publish, sign/notarize, transfer, and independently preflight the exact
+source-closeout repair. The retained transition begins `15450635` and ends
+`96da`; keep its complete identifier only in protected live evidence. With
+Alex present at the Neo, launch one attributed administrator-password recovery
+for that exact journal. It must select no
+target component and must finish with an immutable `source_restored` terminal
+whose error is `authorization_expired`, the matching source STABLE record,
+absent private journal, running source authorization daemon, and inert target.
+Any different notice, identity, result, or readback stops the ceremony. Only
+after that closeout is independently verified may a fresh candidate and fresh
+Touch ID request be prepared.
 
 After activation, independently verify the selected Host release, launcher
 pair, daemon generation, candidate authority, trust floors, absent pending

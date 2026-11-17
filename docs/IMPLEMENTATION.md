@@ -531,6 +531,16 @@ STABLE digest. Target-tree preflight applies the same narrow uniform APFS
 device-number normalization as installed authority verification, so a reboot
 cannot strand an otherwise unchanged authorized transition.
 
+If the exact ordinary transition expires while its authenticated physical
+prefix is still source/source, generic recovery still refuses it and preserves
+the fence. The attributed password-gated command can instead terminalize only
+the journaled source pair. The root manager independently rebinds all eight
+target/transition fields, selects no target component, validates the source
+from installed public authority, publishes `source_restored` with
+`authorization_expired`, then removes the private journal after exact STABLE
+readback. The wrapper accepts that source result only after independently
+reading the same transition-bound STABLE and immutable source terminal.
+
 Ordinary pair activation now consumes Touch ID authority only while
 `created_at <= now < expires_at`: the manager checks before public PENDING,
 after source-prefix authentication, and directly before launcher replacement;

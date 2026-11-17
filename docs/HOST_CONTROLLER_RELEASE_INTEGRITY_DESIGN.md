@@ -194,8 +194,15 @@ For an ordinary Touch ID transition, `created_at <= now < expires_at` must
 still hold before STABLE can become PENDING, after replay authenticates an
 unchanged source/source physical prefix, and again immediately before the
 first launcher mutation. Expiry at any of those boundaries cannot select the
-target. A PENDING source/source transition remains fenced for explicit
-recovery rather than silently consuming stale authority. Once the authenticated
+target. A PENDING source/source transition remains fenced rather than silently
+consuming stale authority. Generic recovery continues to reject it after
+expiry. A separately attributed, administrator-password-gated recovery may
+close only that exact public/private-bound transition onto its already-selected
+source pair: it never selects the target, records `authorization_expired` in an
+immutable `source_restored` terminal, publishes the matching STABLE record,
+and removes the private journal only after readback. The source release is
+validated from its installed public authority and release-tree identity, not
+mutable retained-candidate custody. Once the authenticated
 physical prefix proves that the target launcher or selector was already
 durably selected—or a finalization/terminal already exists—replay may converge
 that exact journal after expiry. The receipt-free, typed first-pair bootstrap

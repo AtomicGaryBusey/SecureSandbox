@@ -643,6 +643,19 @@ it receipt-free bootstrap, and applies only the existing uniform APFS
 device-number normalization to target-tree preflight so a reboot cannot strand
 an otherwise unchanged authorized transition.
 
+A later Neo request at published checkpoint `bfa25f2` lost its caller response
+after the exact ordinary public PENDING fence was durable but before target
+mutation. Password recovery first reproduced the intended
+`host_pair_transition_expired` refusal: current, launcher, and source authority
+remained selected, the target remained inert, and the private journal stayed
+intact. The repair preserves that generic refusal but permits the separately
+attributed password ceremony to terminalize only the exact installed source
+pair as `source_restored` with `authorization_expired`. It validates source
+authority from the installed public record rather than stale private candidate
+custody, never selects the target, and requires the wrapper to independently
+cross-bind the returned source to the same transition-bound STABLE and source
+terminal. Physical execution of that repaired ceremony remains pending.
+
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical
 disposable-Mac evidence.

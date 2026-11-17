@@ -215,6 +215,7 @@ class DeployHostControllerTests(unittest.TestCase):
         }
 
     def host_pair_recovery_binding(self):
+        source = self.pair_identity("f" * 64)
         return DEPLOY.BootstrapBinding(
             "a" * 64, "b" * 64, "c" * 64, "4" * 64, "4" * 64,
             schema_current_release_id="a" * 64,
@@ -226,6 +227,14 @@ class DeployHostControllerTests(unittest.TestCase):
             host_pair_operation="install",
             host_pair_target_candidate_authority_sha256="7" * 64,
             host_pair_target_release_tree_identity_sha256="8" * 64,
+            host_pair_source_release_id=source["release_id"],
+            host_pair_source_candidate_authority_sha256=(
+                source["candidate_authority_sha256"]
+            ),
+            host_pair_source_release_tree_identity_sha256=(
+                source["release_tree_identity_sha256"]
+            ),
+            host_pair_source_launcher_sha256=source["launcher_sha256"],
         )
 
     def host_pair_recovery_result(self, binding=None):
@@ -2532,6 +2541,18 @@ class DeployHostControllerTests(unittest.TestCase):
             pending["source_pair"]["release_id"],
         )
         self.assertEqual(
+            binding.host_pair_source_candidate_authority_sha256,
+            pending["source_pair"]["candidate_authority_sha256"],
+        )
+        self.assertEqual(
+            binding.host_pair_source_release_tree_identity_sha256,
+            pending["source_pair"]["release_tree_identity_sha256"],
+        )
+        self.assertEqual(
+            binding.host_pair_source_launcher_sha256,
+            pending["source_pair"]["launcher_sha256"],
+        )
+        self.assertEqual(
             binding.host_pair_prior_stable_sha256,
             pending["prior_stable_sha256"],
         )
@@ -2669,6 +2690,21 @@ class DeployHostControllerTests(unittest.TestCase):
             notice,
         )
         self.assertIn(
+            "Journaled source candidate authority SHA-256: "
+            + binding.host_pair_source_candidate_authority_sha256,
+            notice,
+        )
+        self.assertIn(
+            "Journaled source release-tree identity SHA-256: "
+            + binding.host_pair_source_release_tree_identity_sha256,
+            notice,
+        )
+        self.assertIn(
+            "Journaled source launcher SHA-256: "
+            + binding.host_pair_source_launcher_sha256,
+            notice,
+        )
+        self.assertIn(
             "Prior STABLE record SHA-256: "
             + binding.host_pair_prior_stable_sha256,
             notice,
@@ -2761,6 +2797,100 @@ class DeployHostControllerTests(unittest.TestCase):
             binding.installed_launcher_sha256,
             "--json",
         ])
+
+    def test_host_pair_recovery_accepts_exact_authoritative_source_closeout(self):
+        binding = self.host_pair_recovery_binding()
+        source_pair = self.pair_identity(binding.host_pair_source_release_id)
+        stable_sha256 = "9" * 64
+        stable = {
+            "schema": DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA,
+            "required_feature": (
+                DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+            ),
+            "pair": source_pair,
+            "committed_transition_id": binding.host_pair_transition_id,
+            "committed_transition_sha256": binding.host_pair_transition_sha256,
+            "committed_terminal_sha256": "2" * 64,
+        }
+        terminal = {
+            "status": "source_restored",
+            "operation": binding.host_pair_operation,
+            "transition_id": binding.host_pair_transition_id,
+            "transition_sha256": binding.host_pair_transition_sha256,
+            "committed_pair": source_pair,
+        }
+        result = {
+            "candidate_authority_sha256": source_pair[
+                "candidate_authority_sha256"
+            ],
+            "host_release_launcher_pair_sha256": stable_sha256,
+            "operation": binding.host_pair_operation,
+            "release_id": source_pair["release_id"],
+            "release_tree_identity_sha256": source_pair[
+                "release_tree_identity_sha256"
+            ],
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "host_pair_transition_recovered",
+            "transition_id": binding.host_pair_transition_id,
+            "transition_sha256": binding.host_pair_transition_sha256,
+        }
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, stable_sha256),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, "2" * 64),
+            ),
+        ):
+            self.assertEqual(
+                DEPLOY.validate_host_pair_transition_recovery_result(
+                    result, binding, install_root=self.root,
+                    expected_uid=self.uid,
+                ),
+                result,
+            )
+
+        stable["pair"]["launcher_identity"]["sha256"] = "0" * 64
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, stable_sha256),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, "2" * 64),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "host_pair_transition_recovery_result_invalid",
+            ),
+        ):
+            DEPLOY.validate_host_pair_transition_recovery_result(
+                result, binding, install_root=self.root,
+                expected_uid=self.uid,
+            )
+        stable["pair"]["launcher_identity"]["sha256"] = (
+            binding.host_pair_source_launcher_sha256
+        )
+        terminal["status"] = "target_committed"
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(stable, stable_sha256),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                return_value=(terminal, "2" * 64),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "host_pair_transition_recovery_result_invalid",
+            ),
+        ):
+            DEPLOY.validate_host_pair_transition_recovery_result(
+                result, binding, install_root=self.root,
+                expected_uid=self.uid,
+            )
 
     def test_host_pair_recovery_rejects_mismatched_root_result(self):
         binding = self.host_pair_recovery_binding()

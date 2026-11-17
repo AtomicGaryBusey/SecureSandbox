@@ -96,6 +96,9 @@ class BootstrapBinding(NamedTuple):
     host_pair_target_candidate_authority_sha256: str = ""
     host_pair_target_release_tree_identity_sha256: str = ""
     host_pair_source_release_id: str = ""
+    host_pair_source_candidate_authority_sha256: str = ""
+    host_pair_source_release_tree_identity_sha256: str = ""
+    host_pair_source_launcher_sha256: str = ""
     host_pair_prior_stable_sha256: str = ""
     authorization_predecessor_release_id: str = ""
     authorization_clean_machine_bootstrap: bool = False
@@ -2346,6 +2349,12 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
             *([
                 "Journaled source release: "
                     f"{binding.host_pair_source_release_id}",
+                "Journaled source candidate authority SHA-256: "
+                    f"{binding.host_pair_source_candidate_authority_sha256}",
+                "Journaled source release-tree identity SHA-256: "
+                    f"{binding.host_pair_source_release_tree_identity_sha256}",
+                "Journaled source launcher SHA-256: "
+                    f"{binding.host_pair_source_launcher_sha256}",
                 "Prior STABLE record SHA-256: "
                     f"{binding.host_pair_prior_stable_sha256}",
             ] if binding.host_pair_source_release_id else [
@@ -2627,6 +2636,7 @@ def host_pair_transition_recovery_binding(
             "host_pair_transition_recovery_private_pending_invalid"
         )
 
+    source = pending.get("source_pair")
     return BootstrapBinding(
         release_id=target["release_id"],
         manager_sha256=manager_sha256,
@@ -2645,8 +2655,18 @@ def host_pair_transition_recovery_binding(
             "release_tree_identity_sha256"
         ],
         host_pair_source_release_id=(
-            "" if pending.get("source_pair") is None
-            else pending["source_pair"]["release_id"]
+            "" if source is None else source["release_id"]
+        ),
+        host_pair_source_candidate_authority_sha256=(
+            "" if source is None
+            else source["candidate_authority_sha256"]
+        ),
+        host_pair_source_release_tree_identity_sha256=(
+            "" if source is None
+            else source["release_tree_identity_sha256"]
+        ),
+        host_pair_source_launcher_sha256=(
+            "" if source is None else source["launcher_sha256"]
         ),
         host_pair_prior_stable_sha256=(
             "" if pending.get("prior_stable_sha256") is None
@@ -2656,7 +2676,8 @@ def host_pair_transition_recovery_binding(
 
 
 def validate_host_pair_transition_recovery_result(
-    value: object, binding: BootstrapBinding,
+    value: object, binding: BootstrapBinding, *,
+    install_root: Path = INSTALL_ROOT, expected_uid: int = 0,
 ) -> dict[str, object]:
     fields = {
         "candidate_authority_sha256", "host_release_launcher_pair_sha256",
@@ -2667,15 +2688,10 @@ def validate_host_pair_transition_recovery_result(
             or value.get("schema") != MANAGER.SCHEMA
             or value.get("status") != "host_pair_transition_recovered"
             or value.get("operation") != binding.host_pair_operation
-            or value.get("release_id") != binding.release_id
             or value.get("transition_id")
                 != binding.host_pair_transition_id
             or value.get("transition_sha256")
                 != binding.host_pair_transition_sha256
-            or value.get("candidate_authority_sha256")
-                != binding.host_pair_target_candidate_authority_sha256
-            or value.get("release_tree_identity_sha256")
-                != binding.host_pair_target_release_tree_identity_sha256
             or MANAGER.SHA256.fullmatch(str(value.get(
                 "host_release_launcher_pair_sha256", ""
             ))) is None):
@@ -2688,6 +2704,93 @@ def validate_host_pair_transition_recovery_result(
         raise RuntimeError(
             "host_pair_transition_recovery_result_invalid"
         ) from error
+    result_generation = {
+        "candidate_authority_sha256": value["candidate_authority_sha256"],
+        "release_id": value["release_id"],
+        "release_tree_identity_sha256": value[
+            "release_tree_identity_sha256"
+        ],
+    }
+    target_generation = {
+        "candidate_authority_sha256": (
+            binding.host_pair_target_candidate_authority_sha256
+        ),
+        "release_id": binding.release_id,
+        "release_tree_identity_sha256": (
+            binding.host_pair_target_release_tree_identity_sha256
+        ),
+    }
+    if result_generation == target_generation:
+        return value
+
+    source_generation = {
+        "candidate_authority_sha256": (
+            binding.host_pair_source_candidate_authority_sha256
+        ),
+        "release_id": binding.host_pair_source_release_id,
+        "release_tree_identity_sha256": (
+            binding.host_pair_source_release_tree_identity_sha256
+        ),
+    }
+    if (not binding.host_pair_source_release_id
+            or any(MANAGER.SHA256.fullmatch(item) is None
+                   for item in source_generation.values())
+            or MANAGER.SHA256.fullmatch(
+                binding.host_pair_source_launcher_sha256
+            ) is None
+            or result_generation != source_generation):
+        raise RuntimeError("host_pair_transition_recovery_result_invalid")
+    try:
+        observed = MANAGER.host_release_launcher_pair_public(
+            install_root, expected_uid, allow_absent=False,
+        )
+        if observed is None:
+            raise MANAGER.ReleaseFailure(
+                "host_release_launcher_pair_missing"
+            )
+        stable, stable_sha256 = observed
+        terminal = MANAGER.verified_public_host_pair_terminal(
+            install_root, expected_uid, stable,
+        )
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError(
+            "host_pair_transition_recovery_result_invalid"
+        ) from error
+    expected_source_pair = {
+        **source_generation,
+        "launcher_sha256": binding.host_pair_source_launcher_sha256,
+    }
+    observed_pair = stable.get("pair")
+    if not isinstance(observed_pair, dict):
+        raise RuntimeError("host_pair_transition_recovery_result_invalid")
+    observed_source_pair = {
+        name: observed_pair.get(name)
+        for name in expected_source_pair
+    }
+    launcher_identity = observed_pair.get("launcher_identity")
+    if (stable.get("schema")
+            != MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA
+            or stable_sha256
+                != value["host_release_launcher_pair_sha256"]
+            or observed_source_pair != expected_source_pair
+            or not isinstance(launcher_identity, dict)
+            or launcher_identity.get("sha256")
+                != binding.host_pair_source_launcher_sha256
+            or stable.get("committed_transition_id")
+                != binding.host_pair_transition_id
+            or stable.get("committed_transition_sha256")
+                != binding.host_pair_transition_sha256
+            or terminal is None
+            or terminal[0].get("status") != "source_restored"
+            or terminal[0].get("operation")
+                != binding.host_pair_operation
+            or terminal[0].get("transition_id")
+                != binding.host_pair_transition_id
+            or terminal[0].get("transition_sha256")
+                != binding.host_pair_transition_sha256
+            or terminal[0].get("committed_pair")
+                != observed_pair):
+        raise RuntimeError("host_pair_transition_recovery_result_invalid")
     return value
 
 

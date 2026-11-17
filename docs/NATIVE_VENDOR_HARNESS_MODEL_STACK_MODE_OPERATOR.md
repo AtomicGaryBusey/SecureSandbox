@@ -444,9 +444,14 @@ session.
 If capacity recovery reports
 `release_capacity_recovery_transition_pending`, do not delete, rename, edit, or
 parse `.install-transition.json` by hand. Resume the exact Host transition. An
-expired ordinary PREPARED or still-source PENDING transition deliberately stays
-fail-closed; there is no deletion, archive, or stale-authority bypass in this
-release. Escalate it for a separately reviewed source-restoration ceremony. An
+expired ordinary PREPARED transition, or any unattributed recovery of a
+still-source PENDING transition, deliberately stays fail-closed. There is no
+deletion, archive, or stale-authority bypass. For a canonical public PENDING
+record, use only the separately attributed administrator-password recovery
+command shown by the wrapper. It may restore and terminalize the exact source
+pair as `source_restored` with `authorization_expired`; it cannot select the
+target, and the wrapper independently requires the matching public STABLE and
+terminal records before accepting the result. An
 already durable launcher/selector prefix converges only the journaled outcome,
 while the typed first-pair bootstrap remains bound to its irreversible
 admission floor. After the transition reaches terminal STABLE and its private

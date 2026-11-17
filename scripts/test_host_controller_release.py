@@ -4180,7 +4180,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         self.assertEqual(opted_in, {
             "_select_host_pair_physical_state",
             "_verify_committed_host_pair_physical_state",
-            "execute_host_pair_transition",
+            "terminalize_host_pair_source_restoration",
             "install",
             "rollback",
         })
@@ -14205,6 +14205,7 @@ SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" SECURE_SANDBOX_RELEASE_DIR="$RELEASE_DIR"
         execute.assert_called_once_with(
             Path("/install"), Path("/launcher"), 0, transition,
             raise_after_source_restore=False,
+            allow_expired_source_restoration=True,
         )
 
         scenarios = (

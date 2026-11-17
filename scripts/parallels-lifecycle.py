@@ -42,6 +42,7 @@ STOP_ORDER = tuple(reversed(VMS))
 MAX_OUTPUT = 64 * 1024
 COMMAND_TERMINATION_GRACE = 2
 CONTROL_STATUS_TIMEOUT = 3
+CONTROL_MUTATION_TIMEOUT = 12
 
 
 class LifecycleError(RuntimeError):
@@ -315,8 +316,16 @@ def observe(*, reachability: bool = False) -> tuple[dict[str, str], dict[str, st
 def emit(
     operation: str, status: str, phase: str, outcomes: list[dict[str, str]],
     failures: list[str], *, reachability: bool = False,
-) -> None:
+) -> bool:
     observed, reachable = observe(reachability=reachability)
+    if status == "verified" and operation in {"start", "stop"}:
+        desired_vm_state = "running" if operation == "start" else "stopped"
+        desired_uplink_state = "connected" if operation == "start" else "disconnected"
+        if (any(observed.get(key) != desired_vm_state for key, _, _ in VMS)
+                or observed.get("gateway_net0") != desired_uplink_state):
+            status = "rejected"
+            phase = "readback"
+            failures = [*failures, "final_state_mismatch"]
     record: dict[str, Any] = {
         "schema": "secure-sandbox-host-lifecycle-v1",
         "operation": operation,
@@ -331,6 +340,7 @@ def emit(
         record["reachability"] = reachable
     print(json.dumps(record, sort_keys=True, separators=(",", ":")),
           file=sys.stdout if status == "verified" else sys.stderr, flush=True)
+    return status == "verified"
 
 
 def wait_vm(name: str, desired: str, attempts: int = 60) -> bool:
@@ -373,6 +383,46 @@ def mutate(
     return verified
 
 
+def guest_poweroff(
+    key: str, name: str, host: str, outcomes: list[dict[str, str]],
+) -> bool:
+    """Request one exact guest shutdown and trust only Parallels readback."""
+    return mutate(
+        [str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG), host,
+         "--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT), "run", "poweroff"],
+        "guest_shutdown", key, outcomes,
+        lambda: wait_vm(name, "stopped"),
+    )
+
+
+def disconnect_gateway_uplink(outcomes: list[dict[str, str]]) -> bool:
+    """Disconnect Gateway egress once and verify the exact cable state."""
+    try:
+        state = gateway_uplink_state()
+    except (LifecycleError, subprocess.TimeoutExpired):
+        state = "unknown"
+    if state == "disconnected":
+        outcomes.append({
+            "action": "gateway_uplink_disconnect", "target": "gateway",
+            "result": "already_satisfied",
+        })
+        return True
+
+    def disconnected() -> bool:
+        try:
+            return gateway_uplink_state() == "disconnected"
+        except (LifecycleError, subprocess.TimeoutExpired):
+            return False
+
+    publish_progress("stop", "gateway_uplink", "gateway")
+    return mutate(
+        [str(PRLCTL), "set", "SecureSandbox-Gateway",
+         "--device-disconnect", "net0"],
+        "gateway_uplink_disconnect", "gateway", outcomes,
+        disconnected,
+    )
+
+
 def require_mutation_prerequisites() -> None:
     for path, executable in ((PRLCTL, True), (CONTROL_CLIENT, True), (SSH_CONFIG, False)):
         require_regular(path, executable=executable)
@@ -413,7 +463,8 @@ def start(*, inherited_lock: int | None = None,
                 return 1
         publish_progress("start", "preflight")
         initial, _ = observe()
-        if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):
+        if (any(initial[key] not in ("running", "stopped") for key, _, _ in VMS)
+                or initial["gateway_net0"] not in ("connected", "disconnected")):
             emit("start", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
         for key, name, host in START_ORDER:
@@ -468,8 +519,9 @@ def start(*, inherited_lock: int | None = None,
             emit("start", "rejected", "boundary_verification", outcomes,
                  ["boundary_verification_failed"], reachability=True)
             return 1
-        emit("start", "verified", "complete", outcomes, [], reachability=True)
-        return 0
+        return 0 if emit(
+            "start", "verified", "complete", outcomes, [], reachability=True,
+        ) else 1
     except (LifecycleError, subprocess.TimeoutExpired) as error:
         failures.append(str(error) or error.__class__.__name__)
         emit("start", "rejected", "transition", outcomes, failures, reachability=True)
@@ -486,47 +538,82 @@ def stop(*, inherited_lock: int | None = None) -> int:
     lock = ensure_mutation_preconditions("stop") if inherited_lock is None else inherited_lock
     outcomes: list[dict[str, str]] = []
     failures: list[str] = []
+    isolation_required = False
     try:
         publish_progress("stop", "preflight")
         initial, _ = observe()
-        if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):
+        if (any(initial[key] not in ("running", "stopped") for key, _, _ in VMS)
+                or initial["gateway_net0"] not in ("connected", "disconnected")):
             emit("stop", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
-        if initial["gateway_net0"] == "connected":
-            publish_progress("stop", "gateway_uplink", "gateway")
-            if not mutate(
-                [str(PRLCTL), "set", "SecureSandbox-Gateway",
-                 "--device-disconnect", "net0"],
-                "gateway_uplink_disconnect", "gateway", outcomes,
-                lambda: gateway_uplink_state() == "disconnected",
-            ):
-                emit("stop", "rejected", "transition", outcomes,
-                     ["gateway_uplink_disconnect"])
-                return 1
-        else:
-            outcomes.append({
-                "action": "gateway_uplink_disconnect", "target": "gateway",
-                "result": "already_satisfied",
-            })
-        for key, name, host in STOP_ORDER:
+        if initial["gateway_net0"] == "disconnected" and any(
+                initial[key] == "running" for key, _, _ in VMS):
+            emit("stop", "rejected", "preflight", outcomes,
+                 ["guest_control_unreachable_after_isolation"])
+            return 1
+        isolation_required = initial["gateway_net0"] == "connected"
+
+        # Target and Research cannot reach an external network except through
+        # Gateway policy.  Shut them down while the authenticated control proxy
+        # is still reachable, proving each exact VM stopped before continuing.
+        for key, name, host in (STOP_ORDER[0], STOP_ORDER[1]):
             publish_progress("stop", "guest_shutdown", key)
             state = vm_state(name)
             if state == "stopped":
                 outcomes.append({"action": "guest_shutdown", "target": key,
                                  "result": "already_satisfied"})
                 continue
-            if not mutate(
-                [str(PRLCTL), "stop", name, "--noforce"],
-                "guest_shutdown", key, outcomes,
-                lambda name=name: wait_vm(name, "stopped"),
-            ):
+            if not guest_poweroff(key, name, host, outcomes):
                 failures.append(f"{key}_guest_shutdown")
+                if not disconnect_gateway_uplink(outcomes):
+                    failures.append("gateway_uplink_disconnect")
                 emit("stop", "rejected", "transition", outcomes, failures)
                 return 1
-        emit("stop", "verified", "complete", outcomes, [])
-        return 0
+
+        # Dispatch Gateway's own authenticated poweroff before removing its
+        # Shared-network transport.  The SSH response is deliberately
+        # non-authoritative: disconnect egress immediately after dispatch, then
+        # accept only independent stopped-state readback.  A lost command leaves
+        # a running but isolated Gateway and therefore fails closed.
+        key, name, host = STOP_ORDER[2]
+        publish_progress("stop", "guest_shutdown", key)
+        state = vm_state(name)
+        if state == "stopped":
+            outcomes.append({"action": "guest_shutdown", "target": key,
+                             "result": "already_satisfied"})
+            if not disconnect_gateway_uplink(outcomes):
+                emit("stop", "rejected", "transition", outcomes,
+                     ["gateway_uplink_disconnect"])
+                return 1
+        else:
+            try:
+                result = command(
+                    [str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG), host,
+                     "--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT), "run", "poweroff"],
+                    timeout=20,
+                )
+                returncode = result.returncode
+            except (LifecycleError, subprocess.TimeoutExpired):
+                returncode = 124
+            isolated = disconnect_gateway_uplink(outcomes)
+            stopped = wait_vm(name, "stopped")
+            outcomes.append({
+                "action": "guest_shutdown", "target": key,
+                "result": ("succeeded" if returncode == 0 else "lost_response")
+                if stopped else "failed",
+            })
+            if not isolated:
+                failures.append("gateway_uplink_disconnect")
+            if not stopped:
+                failures.append("gateway_guest_shutdown")
+            if failures:
+                emit("stop", "rejected", "transition", outcomes, failures)
+                return 1
+        return 0 if emit("stop", "verified", "complete", outcomes, []) else 1
     except (LifecycleError, subprocess.TimeoutExpired) as error:
         failures.append(str(error) or error.__class__.__name__)
+        if isolation_required and not disconnect_gateway_uplink(outcomes):
+            failures.append("gateway_uplink_disconnect")
         emit("stop", "rejected", "transition", outcomes, failures)
         return 1
     finally:

@@ -755,13 +755,17 @@ Parallels lifecycle modules it imports are members of the protected
 clean-machine driver payload. It then uses the reviewed stopped-service bridge
 under the existing lifecycle lock, but only if Gateway `net0` was already
 disconnected before Gateway powers on. Regular `labctl stop` establishes that
-secure-at-rest state by disconnecting the uplink before any VM shutdown and
-rejects before shutdown if independent readback cannot prove disconnection.
-Because that disconnect intentionally removes the Shared-network path used by
-the protected Gateway SSH proxy, shutdown uses only Parallels' local explicit
-`--noforce` transition for each exact VM, without `--acpi` or `--kill`, and
-independently rereads the stopped state after every command.
-This prevents even a transient egress window during vendor-service bootstrap.
+secure-at-rest state without any Parallels VM-stop action. It shuts down Target
+and Research through their authenticated controls while Gateway transport
+remains available, dispatches Gateway's own authenticated poweroff last, then
+immediately disconnects and rereads `net0` before waiting for Gateway's stopped
+state. A failed Target or Research shutdown isolates Gateway before rejection;
+a lost Gateway command can leave only a running, uplink-disconnected Gateway.
+Every guest completion comes from independent Parallels state readback.
+`--noforce`, `--acpi`, and `--kill` are all excluded: physical Parallels 27.1.0
+evidence proved the first requires Parallels Tools and the second silently
+escalates to a forced stop. The final all-stopped baseline therefore has no
+transient egress window during later vendor-service bootstrap.
 
 With the Parallels GUI closed and the same lock still held, the acceptance
 transition starts only Research, leaves Target stopped, disables automatic

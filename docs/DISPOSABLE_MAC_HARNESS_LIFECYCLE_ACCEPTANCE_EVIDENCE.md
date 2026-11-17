@@ -49,9 +49,13 @@ store, and independent boundary readbacks without reserving or projecting any
 evidence. The collector independently rereads that exact GUI-closed VM,
 uplink, and reachability inventory and embeds its self-digested campaign-bound
 stack readback inside the Host raw receipt; direct collection from a connected,
-Target-running, or ambiguous stack rejects. Regular stop disconnects and
-rereads Gateway `net0` before VM shutdown, providing the no-egress all-stopped
-baseline. Post-power reconnection and emit-time state drift are terminal
+Target-running, or ambiguous stack rejects. Regular stop sends exact
+authenticated poweroff requests to Target and Research, dispatches Gateway's
+request last, immediately disconnects and rereads Gateway `net0`, and then
+requires independent stopped-state readback for all three. An earlier guest
+failure also isolates Gateway before rejection. This provides the no-egress
+all-stopped baseline without any Parallels VM-stop action. Post-power
+reconnection and emit-time state drift are terminal
 failures rather than repairable success. This implementation was published and
 physically started on the Neo.
 That first stop safely disconnected Gateway egress, then failed closed before
@@ -62,9 +66,19 @@ local `--acpi`, then physical replay exposed Parallels 27.1.0's undocumented
 120-second forced-stop fallback: the controller rejected after its own bounded
 readback, but the still-pending vendor transition later force-stopped Target.
 Independent readback found Target stopped, Research and Gateway running, and
-`net0` still disconnected. The repaired descendant admits only explicit
-`--noforce`, prohibits both `--acpi` and `--kill`, and retains the same per-VM
-stopped-state readback; its physical replay remains pending.
+`net0` still disconnected. Physical probing of the next descendant then proved
+that `--noforce` is a Parallels-Tools consent path: with Tools deliberately
+absent it reports that guest shutdown is unavailable and leaves the VM running.
+The current source descendant therefore prohibits every `prlctl stop` form and
+returns to the already-authenticated guest poweroff operation with corrected
+ordering. Target and Research stop before the Shared transport is removed;
+Gateway's request is dispatched last, its uplink is immediately isolated, and
+all completion remains subordinate to independent readback. A later immutable
+review found one more low-severity edge: an inventory failure after valid
+preflight could reject without invoking isolation. The current source routes
+every post-preflight lifecycle exception through the same verified disconnect
+path and tests both proven and unproven isolation. Source fault tests pass;
+publication and physical replay remain pending.
 
 The first immutable security review of that source follow-up reproduced one
 low-severity source-binding defect: an absolute-path controller could verify a

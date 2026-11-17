@@ -10,12 +10,15 @@ vetoed both its Apple-event quit and SIGTERM while Gateway remained running.
 An exact-PID termination repair is implemented and source-tested. Physical
 acceptance of the later isolated-stop prerequisite exposed that disconnecting
 Gateway `net0` also removes the Shared-network transport used by the protected
-Gateway SSH proxy. The corrected stop path keeps the disconnect-first rule but
-uses Parallels' local explicit `--noforce` stop for each exact VM, never
-`--acpi` or `--kill`, and accepts completion only after independent `prlctl`
-stopped-state readback. Physical replay proved that Parallels 27.1.0 treats
+Gateway SSH proxy. A first local correction proved that Parallels 27.1.0 treats
 `--acpi` as a 120-second request with an implicit forced-stop fallback, so
-omitting `--kill` alone is not a no-force guarantee.
+omitting `--kill` alone is not a no-force guarantee. A second correction proved
+that `--noforce` is a Parallels-Tools consent path and cannot stop these
+deliberately Tools-free guests. The current source path instead shuts down
+Target and Research through their exact authenticated guest controls, dispatches
+the same request to Gateway, immediately disconnects and rereads Gateway
+`net0`, and accepts completion only after independent `prlctl` stopped-state
+readback. It never invokes a Parallels VM-stop action.
 Deployment-specific state, VM identities, and acceptance transcripts remain
 private.
 
@@ -23,13 +26,16 @@ private.
 
 SecureSandbox intentionally omits ambient host-to-guest network authority.
 The authenticated guest control plane is reached through Gateway's Shared
-adapter, so it is not a valid shutdown transport after the required
-disconnect-first egress isolation. Graceful stop instead uses Parallels' local
-explicit `--noforce` transition for the exact VM and treats its response as
-non-authoritative; only independent VM-state readback can prove completion.
-The superficially stronger `--acpi` spelling is prohibited: on the accepted
-vendor build it silently escalates to a force-stop after its internal timeout
-when the guest does not power off.
+adapter, so all authenticated shutdown requests must be dispatched before that
+transport is removed. Target and Research are shut down first; neither has an
+Internet-capable adapter. Gateway's request is dispatched last and its uplink
+is disconnected immediately afterward, before waiting for shutdown completion.
+The guest-control response is non-authoritative; only independent VM-state and
+adapter readback can prove completion. A failed non-Gateway shutdown triggers
+uplink isolation before rejection, and a lost Gateway command leaves a running
+but isolated Gateway. Both `--acpi` and `--kill` are prohibited. `--noforce` is
+also excluded because physical evidence showed it requires the omitted
+Parallels Tools guest agent and therefore cannot establish completion.
 Separately, the Parallels Desktop GUI has crashed while network state changed
 during both stack shutdown and startup. In each retained incident, command or
 transport status alone disagreed with the VM state that was subsequently read
@@ -91,13 +97,19 @@ remains a separate and stronger requirement after startup.
   the ordinary closed-GUI start controller. Adapter mutation, Research and
   Target startup, guest readiness, clock synchronization, and complete boundary
   verification remain ordinary-controller operations with the GUI closed.
-- `stop` holds the same lock, refuses a running GUI, disconnects and rereads
-  Gateway `net0`, then converges in Target, Research, Gateway order with local
-  explicit `prlctl stop --noforce` transitions. Already-stopped guests are not
-  contacted. Neither `--acpi` nor `--kill` is an admitted shutdown action.
-  A lost, oversized, or failing Parallels response is recorded as
+- `stop` holds the same lock, refuses a running GUI, and converges in Target,
+  Research, Gateway order through the exact authenticated guest-control
+  `poweroff` operation. Already-stopped guests are not contacted. Target and
+  Research must independently read back stopped before the next request.
+  Gateway `net0` is disconnected immediately after its request returns or loses
+  transport and before waiting for Gateway to stop. A failed Target or Research
+  shutdown also causes immediate fail-closed uplink isolation before rejection.
+  After exact preflight accepts a connected uplink, any later lifecycle read
+  failure uses that same verified isolation path before rejection.
+  A lost, oversized, or failing guest-control response is recorded as
   `lost_response` only when independent `prlctl` readback proves that exact
-  guest stopped. The controller never adds `--acpi` or `--kill`.
+  guest stopped. The controller never invokes `prlctl stop`; therefore
+  `--noforce`, `--acpi`, and `--kill` cannot become hidden fallback behavior.
 
 The shell entry point performs a credential-readiness gate before either
 mutating operation. The provisioning and control agents use separate fixed

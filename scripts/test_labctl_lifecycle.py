@@ -3,11 +3,13 @@
 import json
 import fcntl
 import importlib.util
+import io
 import os
 import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 from pathlib import Path
 
@@ -113,6 +115,7 @@ fi
 if [[ "$1" == list && "$2" == --info && "$3" == --json ]]; then
   state="$(cat "$MOCK_STATE_DIR/uplink")"
   gamepad="$(cat "$MOCK_STATE_DIR/gamepad")"
+  [[ "$state" == invalid ]] && { printf 'not-json\n'; exit 0; }
   if [[ "$state" == disconnected ]]; then
     printf '[{"Name":"SecureSandbox-Gateway","Hardware":{"net0":{"enabled":true,"state":"disconnected"}},"USB and Bluetooth":{"Automatic sharing gamepads":"%s"}}]\n' "$gamepad"
   else
@@ -326,12 +329,24 @@ exit 2
         self.assertEqual(result.returncode, 0, result.stderr)
         actions = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(actions[0], "identity-ready")
-        stop_actions = [line for line in actions if line.startswith("prlctl stop")]
+        stop_actions = [line for line in actions
+                        if line.startswith("control ") and line.endswith(" run poweroff")]
         self.assertEqual(len(stop_actions), 3)
-        self.assertTrue(all(line.endswith(" --noforce") for line in stop_actions))
-        joined = "\n".join(stop_actions)
+        joined = "\n".join(actions)
+        self.assertNotIn("prlctl stop", joined)
         self.assertNotIn("--kill", joined)
         self.assertNotIn("--acpi", joined)
+        target = next(index for index, line in enumerate(actions)
+                      if "sandbox-target-control" in line and line.endswith(" run poweroff"))
+        research = next(index for index, line in enumerate(actions)
+                        if "sandbox-research-control" in line and line.endswith(" run poweroff"))
+        gateway = next(index for index, line in enumerate(actions)
+                       if "sandbox-gateway-control" in line and line.endswith(" run poweroff"))
+        disconnect = next(index for index, line in enumerate(actions)
+                          if "--device-disconnect net0" in line)
+        self.assertLess(target, research)
+        self.assertLess(research, gateway)
+        self.assertLess(gateway, disconnect)
 
     def test_identity_restore_failure_prevents_every_vm_action(self):
         (self.scripts / "ensure-ssh-identities.sh").write_text(
@@ -373,6 +388,8 @@ exit 2
             }
             with (patch.object(module, "observe", return_value=(observed, {})),
                   patch.object(module, "vm_state", return_value="stopped"),
+                  patch.object(module, "gateway_uplink_state",
+                               return_value="disconnected"),
                   patch.object(module, "emit"),
                   patch.object(module, "ensure_mutation_preconditions", side_effect=AssertionError("new lock"))):
                 self.assertEqual(module.stop(inherited_lock=descriptor), 0)
@@ -501,9 +518,9 @@ exit 2
         self.assertIn("research_start", record["action_failures"])
         self.assertNotIn("verify", self.log.read_text(encoding="utf-8"))
 
-    def test_stop_treats_parallels_disconnect_as_lost_response_after_readback(self):
+    def test_stop_treats_guest_disconnect_as_lost_response_after_readback(self):
         result = self.run_labctl(
-            "stop", MOCK_FAIL_RESPONSE="stop:SecureSandbox-Research",
+            "stop", MOCK_FAIL_RESPONSE="poweroff:research",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(result)
@@ -516,7 +533,7 @@ exit 2
 
     def test_stop_treats_oversized_response_as_lost_after_readback(self):
         result = self.run_labctl(
-            "stop", MOCK_LARGE_RESPONSE="stop:SecureSandbox-Target",
+            "stop", MOCK_LARGE_RESPONSE="poweroff:target",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(result)
@@ -536,25 +553,146 @@ exit 2
         self.assertTrue(all(item["result"] == "already_satisfied"
                             for item in record["action_outcomes"]
                             if item["action"] == "guest_shutdown"))
-        self.assertNotIn("prlctl stop", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("run poweroff", self.log.read_text(encoding="utf-8"))
 
-    def test_stop_fails_closed_before_shutdown_if_uplink_cannot_disconnect(self):
+    def test_stop_rejects_if_post_dispatch_uplink_cannot_disconnect(self):
         result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="disconnect")
         self.assertNotEqual(result.returncode, 0)
         record = self.record(result)
         self.assertEqual(record["observed"]["gateway_net0"], "connected")
         self.assertIn("gateway_uplink_disconnect", record["action_failures"])
-        self.assertNotIn("prlctl stop", self.log.read_text(encoding="utf-8"))
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("run poweroff"), 3)
 
-    def test_stop_rejects_residual_running_guest(self):
+    def test_stop_rejects_residual_running_guest_and_isolates_gateway(self):
         result = self.run_labctl(
-            "stop", MOCK_NO_APPLY_ACTION="stop:SecureSandbox-Target",
+            "stop", MOCK_NO_APPLY_ACTION="poweroff:target",
         )
         self.assertNotEqual(result.returncode, 0)
         record = self.record(result)
         self.assertEqual(record["observed"]["target"], "running")
+        self.assertEqual(record["observed"]["gateway_net0"], "disconnected")
         self.assertIn("target_guest_shutdown", record["action_failures"])
-        self.assertNotIn("stop SecureSandbox-Research", self.log.read_text(encoding="utf-8"))
+        actions = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("sandbox-research-control --timeout", actions)
+        self.assertIn("--device-disconnect net0", actions)
+
+    def test_stop_rejects_running_guest_when_uplink_is_already_disconnected(self):
+        self.set_state(gateway="running", research="stopped", target="stopped",
+                       uplink="disconnected")
+        result = self.run_labctl("stop")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["phase"], "preflight")
+        self.assertEqual(record["action_failures"],
+                         ["guest_control_unreachable_after_isolation"])
+        self.assertNotIn("run poweroff", self.log.read_text(encoding="utf-8"))
+
+    def test_stop_rejects_unknown_uplink_before_every_mutation(self):
+        self.set_state(gateway="running", research="running", target="running",
+                       uplink="invalid")
+        result = self.run_labctl("stop")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["phase"], "preflight")
+        self.assertEqual(record["observed"]["gateway_net0"], "unknown")
+        self.assertEqual(record["action_failures"], ["mixed_or_unknown_vm_state"])
+        actions = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("run poweroff", actions)
+        self.assertNotIn("--device-disconnect", actions)
+
+    def test_isolation_attempts_disconnect_when_preliminary_readback_fails(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_isolation_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        outcomes = []
+        with (patch.object(module, "gateway_uplink_state",
+                           side_effect=module.LifecycleError("unavailable")),
+              patch.object(module, "command", return_value=completed) as command,
+              patch.object(module, "publish_progress")):
+            self.assertFalse(module.disconnect_gateway_uplink(outcomes))
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.args[0][-2:],
+                         ["--device-disconnect", "net0"])
+        self.assertEqual(outcomes, [{"action": "gateway_uplink_disconnect",
+                                     "target": "gateway", "result": "failed"}])
+
+    def test_verified_stop_is_downgraded_when_final_snapshot_drifts(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_emit_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        observed = {"gateway": "stopped", "research": "stopped",
+                    "target": "stopped", "gateway_net0": "connected"}
+        stream = io.StringIO()
+        with patch.object(module, "observe", return_value=(observed, {})):
+            with redirect_stderr(stream):
+                verified = module.emit("stop", "verified", "complete", [], [])
+        self.assertFalse(verified)
+        record = json.loads(stream.getvalue())
+        self.assertEqual(record["status"], "rejected")
+        self.assertEqual(record["phase"], "readback")
+        self.assertEqual(record["action_failures"], ["final_state_mismatch"])
+        self.assertEqual(record["observed"], observed)
+
+    def test_stop_rejects_lost_gateway_poweroff_but_keeps_it_isolated(self):
+        result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="poweroff:gateway")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["observed"]["gateway"], "running")
+        self.assertEqual(record["observed"]["gateway_net0"], "disconnected")
+        self.assertIn("gateway_guest_shutdown", record["action_failures"])
+
+    def test_stop_isolates_gateway_after_post_preflight_inventory_failure(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_exception_isolation_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        observed = {"gateway": "running", "research": "running",
+                    "target": "running", "gateway_net0": "connected"}
+        with (patch.object(module, "publish_progress"),
+              patch.object(module, "observe", return_value=(observed, {})),
+              patch.object(module, "vm_state",
+                           side_effect=module.LifecycleError("vm_inventory_unavailable")),
+              patch.object(module, "disconnect_gateway_uplink",
+                           return_value=True) as disconnect,
+              patch.object(module, "emit") as emit):
+            self.assertEqual(module.stop(inherited_lock=17), 1)
+        disconnect.assert_called_once_with([])
+        self.assertEqual(emit.call_args.args[0:3],
+                         ("stop", "rejected", "transition"))
+        self.assertEqual(emit.call_args.args[4], ["vm_inventory_unavailable"])
+
+    def test_stop_records_unproven_isolation_after_transition_failure(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_failed_exception_isolation_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        observed = {"gateway": "running", "research": "running",
+                    "target": "running", "gateway_net0": "connected"}
+        outcomes = [{"action": "gateway_uplink_disconnect", "target": "gateway",
+                     "result": "failed"}]
+
+        def reject_isolation(actual_outcomes):
+            actual_outcomes.extend(outcomes)
+            return False
+
+        with (patch.object(module, "publish_progress"),
+              patch.object(module, "observe", return_value=(observed, {})),
+              patch.object(module, "vm_state",
+                           side_effect=module.LifecycleError("vm_inventory_unavailable")),
+              patch.object(module, "disconnect_gateway_uplink",
+                           side_effect=reject_isolation),
+              patch.object(module, "emit") as emit):
+            self.assertEqual(module.stop(inherited_lock=17), 1)
+        self.assertEqual(emit.call_args.args[3], outcomes)
+        self.assertEqual(emit.call_args.args[4],
+                         ["vm_inventory_unavailable", "gateway_uplink_disconnect"])
 
     def test_invalid_inventory_fails_closed_without_mutation(self):
         self.set_state(gateway="invalid", research="running", target="running",

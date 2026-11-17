@@ -280,14 +280,18 @@ power-on, starts only Gateway and Research, leaves Target stopped, synchronizes
 only those two guests after proving no active or unreconciled Research run,
 and applies the suite-fixed protected Host/Research readbacks without
 collecting evidence. Production `labctl stop` now disconnects and independently
-rereads Gateway `net0` before VM shutdown so the all-stopped baseline cannot
-create a transient egress window when the Parallels service is bootstrapped.
-Failure to isolate rejects before shutdown. After isolation, exact VM shutdown
-uses only the local explicit Parallels `--noforce` transition because the
-protected Gateway SSH proxy deliberately loses its Shared-network transport.
-Neither `--acpi` nor `--kill` is admitted: physical Parallels 27.1.0 evidence
-proved that `--acpi` itself force-stops an unresponsive guest after 120
-seconds. Each response is subordinate to independent stopped-state readback.
+rereads Gateway `net0` before declaring the all-stopped baseline. Target and
+Research first receive the existing exact authenticated guest poweroff while
+the control proxy remains reachable. Gateway receives the same request last;
+its uplink is immediately disconnected and reread before the controller waits
+for Gateway to stop. A failed earlier guest shutdown also isolates Gateway
+before rejection. Once exact preflight accepts a connected uplink, unexpected
+lifecycle read failures use the same isolation path before rejection. No
+`prlctl stop` action is admitted: physical Parallels
+27.1.0 evidence proved that `--noforce` requires the deliberately omitted
+Parallels Tools agent and that `--acpi` force-stops an unresponsive guest after
+120 seconds. `--kill` remains prohibited. Each response is subordinate to
+independent stopped-state readback.
 The new controller and both
 Parallels lifecycle dependencies are included in the protected clean-machine
 driver closure. The one-shot collector independently rereads the exact

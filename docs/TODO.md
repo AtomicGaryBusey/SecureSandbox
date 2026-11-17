@@ -607,12 +607,18 @@ in ignored local records, not in this file.
   exposed that Parallels 27.1.0 `--acpi` implicitly force-stops after 120
   seconds: Target stopped only after the controller had rejected, while
   Research and Gateway remained running and isolated. The next descendant uses
-  only explicit `--noforce` for each exact VM, never `--acpi` or `--kill`, after
-  the disconnect-first gate and independently proves each stopped state. Publish
-  and physically replay that repair, then retain the old campaign, install the
-  exact protected release, initialize the replacement, and prove the fixed
-  final inventory before invoking the one-shot collector. Never collect on an
-  ambiguous or partially recovered startup.
+  explicit `--noforce`, but physical probing proved that operation is a
+  Parallels-Tools consent path and cannot stop the deliberately Tools-free
+  guests. The current source descendant invokes no `prlctl stop` form. It
+  powers off Target and Research through exact authenticated guest control,
+  dispatches Gateway poweroff last, immediately disconnects and rereads its
+  uplink, and independently proves every stopped state. Any earlier shutdown
+  failure or post-preflight lifecycle exception isolates Gateway before
+  rejection. Publish and physically replay
+  that repair, then retain the old campaign, install the exact protected
+  release, initialize the replacement, and prove the fixed final inventory
+  before invoking the one-shot collector. Never collect on an ambiguous or
+  partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

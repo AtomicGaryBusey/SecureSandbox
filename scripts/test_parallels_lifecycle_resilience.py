@@ -51,9 +51,12 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         self.assertIn("os.killpg(process.pid, signal.SIGKILL)", controller)
         self.assertIn('"--timeout-seconds", str(CONTROL_STATUS_TIMEOUT)', controller)
         self.assertIn('state not in ("running", "stopped")', controller)
-        self.assertIn('[str(PRLCTL), "stop", name, "--noforce"]', controller)
+        self.assertIn('"--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT)', controller)
+        self.assertIn('"run", "poweroff"', controller)
+        self.assertIn('disconnect_gateway_uplink(outcomes)', controller)
+        self.assertNotIn('[str(PRLCTL), "stop", name, "--noforce"]', controller)
         self.assertNotIn('[str(PRLCTL), "stop", name, "--acpi"]', controller)
-        self.assertNotIn('"run", "poweroff"', controller)
+        self.assertNotIn('[str(PRLCTL), "stop", name, "--kill"]', controller)
 
     def test_time_sync_bounds_ssh_and_protected_control_calls(self):
         sync = self.text("scripts/sync-lab-time.sh")

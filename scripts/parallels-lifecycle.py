@@ -42,7 +42,6 @@ STOP_ORDER = tuple(reversed(VMS))
 MAX_OUTPUT = 64 * 1024
 COMMAND_TERMINATION_GRACE = 2
 CONTROL_STATUS_TIMEOUT = 3
-CONTROL_MUTATION_TIMEOUT = 12
 
 
 class LifecycleError(RuntimeError):
@@ -517,8 +516,7 @@ def stop(*, inherited_lock: int | None = None) -> int:
                                  "result": "already_satisfied"})
                 continue
             if not mutate(
-                [str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG), host,
-                 "--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT), "run", "poweroff"],
+                [str(PRLCTL), "stop", name, "--acpi"],
                 "guest_shutdown", key, outcomes,
                 lambda name=name: wait_vm(name, "stopped"),
             ):

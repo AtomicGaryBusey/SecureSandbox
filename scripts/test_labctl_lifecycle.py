@@ -136,7 +136,10 @@ if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --device-connect ]
   exit 0
 fi
 if [[ "$1" == stop ]]; then
-  printf stopped >"$(state_file "$2")"
+  name="$2"; action="stop:$name"
+  [[ "${MOCK_NO_APPLY_ACTION:-}" == "$action" ]] || printf stopped >"$(state_file "$name")"
+  [[ "${MOCK_LARGE_RESPONSE:-}" == "$action" ]] && /usr/bin/python3 -c 'print("x" * 65537)'
+  [[ "${MOCK_FAIL_RESPONSE:-}" == "$action" ]] && exit 1
   exit 0
 fi
 if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --device-disconnect ]]; then
@@ -323,8 +326,10 @@ exit 2
         self.assertEqual(result.returncode, 0, result.stderr)
         actions = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(actions[0], "identity-ready")
-        self.assertGreater(next(index for index, line in enumerate(actions)
-                                if " poweroff" in line), 0)
+        stop_actions = [line for line in actions if line.startswith("prlctl stop")]
+        self.assertEqual(len(stop_actions), 3)
+        self.assertTrue(all(line.endswith(" --acpi") for line in stop_actions))
+        self.assertNotIn("--kill", "\n".join(stop_actions))
 
     def test_identity_restore_failure_prevents_every_vm_action(self):
         (self.scripts / "ensure-ssh-identities.sh").write_text(
@@ -402,7 +407,7 @@ exit 2
             os.close(descriptor)
 
     def test_protected_control_calls_have_short_inner_deadlines(self):
-        result = self.run_labctl("stop")
+        result = self.run_labctl("status")
         self.assertEqual(result.returncode, 0, result.stderr)
         control_lines = [line for line in self.log.read_text(encoding="utf-8").splitlines()
                          if line.startswith("control ")]
@@ -494,8 +499,10 @@ exit 2
         self.assertIn("research_start", record["action_failures"])
         self.assertNotIn("verify", self.log.read_text(encoding="utf-8"))
 
-    def test_stop_treats_ssh_disconnect_as_lost_response_after_readback(self):
-        result = self.run_labctl("stop", MOCK_FAIL_RESPONSE="poweroff:research")
+    def test_stop_treats_parallels_disconnect_as_lost_response_after_readback(self):
+        result = self.run_labctl(
+            "stop", MOCK_FAIL_RESPONSE="stop:SecureSandbox-Research",
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(result)
         research = next(item for item in record["action_outcomes"]
@@ -506,7 +513,9 @@ exit 2
             self.assertEqual(record["observed"][key], "stopped")
 
     def test_stop_treats_oversized_response_as_lost_after_readback(self):
-        result = self.run_labctl("stop", MOCK_LARGE_RESPONSE="poweroff:target")
+        result = self.run_labctl(
+            "stop", MOCK_LARGE_RESPONSE="stop:SecureSandbox-Target",
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(result)
         target = next(item for item in record["action_outcomes"]
@@ -525,7 +534,7 @@ exit 2
         self.assertTrue(all(item["result"] == "already_satisfied"
                             for item in record["action_outcomes"]
                             if item["action"] == "guest_shutdown"))
-        self.assertNotIn("poweroff", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("prlctl stop", self.log.read_text(encoding="utf-8"))
 
     def test_stop_fails_closed_before_shutdown_if_uplink_cannot_disconnect(self):
         result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="disconnect")
@@ -533,15 +542,17 @@ exit 2
         record = self.record(result)
         self.assertEqual(record["observed"]["gateway_net0"], "connected")
         self.assertIn("gateway_uplink_disconnect", record["action_failures"])
-        self.assertNotIn("poweroff", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("prlctl stop", self.log.read_text(encoding="utf-8"))
 
     def test_stop_rejects_residual_running_guest(self):
-        result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="poweroff:target")
+        result = self.run_labctl(
+            "stop", MOCK_NO_APPLY_ACTION="stop:SecureSandbox-Target",
+        )
         self.assertNotEqual(result.returncode, 0)
         record = self.record(result)
         self.assertEqual(record["observed"]["target"], "running")
         self.assertIn("target_guest_shutdown", record["action_failures"])
-        self.assertNotIn("poweroff:research", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("stop SecureSandbox-Research", self.log.read_text(encoding="utf-8"))
 
     def test_invalid_inventory_fails_closed_without_mutation(self):
         self.set_state(gateway="invalid", research="running", target="running",

@@ -50,11 +50,16 @@ evidence. The collector independently rereads that exact GUI-closed VM,
 uplink, and reachability inventory and embeds its self-digested campaign-bound
 stack readback inside the Host raw receipt; direct collection from a connected,
 Target-running, or ambiguous stack rejects. Regular stop disconnects and
-rereads Gateway `net0` before guest shutdown, providing the no-egress
-all-stopped baseline. Post-power reconnection and emit-time state drift are
-terminal failures rather than repairable success. This implementation is
-source-tested only at this checkpoint. It has not been published, installed,
-or physically exercised.
+rereads Gateway `net0` before VM shutdown, providing the no-egress all-stopped
+baseline. Post-power reconnection and emit-time state drift are terminal
+failures rather than repairable success. This implementation was published and
+physically started on the Neo.
+That first stop safely disconnected Gateway egress, then failed closed before
+any VM stopped because its guest-control shutdown still depended on the now-
+disconnected Shared adapter. Independent readback retained all three VMs
+running and `net0` disconnected. The corrective descendant uses only exact
+local graceful Parallels stops after isolation and retains the same per-VM
+stopped-state readback; physical replay remains pending.
 
 The first immutable security review of that source follow-up reproduced one
 low-severity source-binding defect: an absolute-path controller could verify a

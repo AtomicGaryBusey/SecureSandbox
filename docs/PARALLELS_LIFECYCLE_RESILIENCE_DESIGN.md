@@ -7,16 +7,23 @@ stop/start and idempotent-recovery sequence, and complete boundary verification
 pass. The first published Parallels 27.1 stopped-service bootstrap reached and
 proved its Gateway-only state on the Neo, then rejected because Parallels
 vetoed both its Apple-event quit and SIGTERM while Gateway remained running.
-An exact-PID termination repair is implemented and source-tested; publication
-and physical replay are pending.
+An exact-PID termination repair is implemented and source-tested. Physical
+acceptance of the later isolated-stop prerequisite exposed that disconnecting
+Gateway `net0` also removes the Shared-network transport used by the protected
+Gateway SSH proxy. The corrected stop path keeps the disconnect-first rule but
+uses Parallels' local graceful ACPI stop for each exact VM, never `--kill`, and
+accepts completion only after independent `prlctl` stopped-state readback.
 Deployment-specific state, VM identities, and acceptance transcripts remain
 private.
 
 ## Problem and evidence
 
-SecureSandbox intentionally omits Parallels Tools from all guests. Graceful
-shutdown therefore travels through the authenticated guest control plane and
-normally closes its own SSH transport before a success response can return.
+SecureSandbox intentionally omits ambient host-to-guest network authority.
+The authenticated guest control plane is reached through Gateway's Shared
+adapter, so it is not a valid shutdown transport after the required
+disconnect-first egress isolation. Graceful stop instead uses Parallels' local
+ACPI transition for the exact VM and treats its response as non-authoritative;
+only independent VM-state readback can prove completion.
 Separately, the Parallels Desktop GUI has crashed while network state changed
 during both stack shutdown and startup. In each retained incident, command or
 transport status alone disagreed with the VM state that was subsequently read
@@ -78,10 +85,12 @@ remains a separate and stronger requirement after startup.
   the ordinary closed-GUI start controller. Adapter mutation, Research and
   Target startup, guest readiness, clock synchronization, and complete boundary
   verification remain ordinary-controller operations with the GUI closed.
-- `stop` holds the same lock, refuses a running GUI, and converges in Target,
-  Research, Gateway order. Already-stopped guests are not contacted. A closed
-  SSH transport is recorded as `lost_response` only when independent `prlctl`
-  readback proves that exact guest stopped.
+- `stop` holds the same lock, refuses a running GUI, disconnects and rereads
+  Gateway `net0`, then converges in Target, Research, Gateway order with local
+  graceful `prlctl stop` transitions. Already-stopped guests are not contacted.
+  A lost, oversized, or failing Parallels response is recorded as
+  `lost_response` only when independent `prlctl` readback proves that exact
+  guest stopped. The controller never adds `--kill`.
 
 The shell entry point performs a credential-readiness gate before either
 mutating operation. The provisioning and control agents use separate fixed

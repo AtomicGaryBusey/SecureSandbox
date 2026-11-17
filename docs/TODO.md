@@ -599,11 +599,17 @@ in ignored local records, not in this file.
   Target stopped, and applies the suite-fixed Host and Research readbacks
   without collecting evidence. The collector independently enforces that
   exact GUI-closed VM/uplink/reachability baseline and embeds a campaign-bound
-  self-digested stack readback in its Host raw receipt. Regular stop establishes the disconnected
-  all-stopped baseline and rejects before shutdown if isolation cannot be
-  proven. Finish review and publication, install the exact release, then
-  physically prove the fixed final inventory before invoking the one-shot
-  collector. Never collect on an ambiguous or partially recovered startup.
+  self-digested stack readback in its Host raw receipt. The reviewed transition
+  was published at `62023389`. Its first Neo stop disconnected and reread
+  Gateway egress, then failed closed because the subsequent guest-control
+  shutdown still depended on that same Shared adapter; all three VMs remained
+  running and Gateway stayed isolated. The corrective descendant uses only
+  local graceful Parallels stops for the exact VMs, never `--kill`, after the
+  disconnect-first gate and independently proves each stopped state. Publish
+  and physically replay that repair, then retain the old campaign, install the
+  exact protected release, initialize the replacement, and prove the fixed
+  final inventory before invoking the one-shot collector. Never collect on an
+  ambiguous or partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

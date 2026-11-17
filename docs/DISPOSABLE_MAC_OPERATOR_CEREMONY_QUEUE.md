@@ -21,9 +21,11 @@ development Mac.
 ## Current Neo resumption
 
 The retained live Neo campaign is still the empty exact `35dd424` campaign;
-do not collect from it under newer source. After the acceptance-start repair is
-reviewed and published, wake and unlock the Neo, establish actual VM and GUI
-state read-only, and use the ordinary reviewed stop controller to reach
+do not collect from it under newer source. The acceptance-start repair was
+published; its first physical stop safely isolated Gateway but
+exposed that the old guest shutdown transport used the same Shared adapter.
+Publish the reviewed local-graceful-stop descendant, wake and unlock the Neo,
+establish actual VM and GUI state read-only, and use that controller to reach
 all-stopped with Gateway `net0` independently proven disconnected. Retain and
 independently verify the old campaign through the existing no-delete empty-
 campaign continuation, install the exact newly published protected ten-driver

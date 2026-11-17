@@ -656,6 +656,22 @@ custody, never selects the target, and requires the wrapper to independently
 cross-bind the returned source to the same transition-bound STABLE and source
 terminal. Physical execution of that repaired ceremony remains pending.
 
+The first physical execution of that ceremony stopped fail-closed before
+finalization with
+`host_pair_transition_recovery_unproven:native_host_candidate_authority_stale`.
+Independent readback again proved the private journal and public PENDING fence
+intact, the source selected, and the target inert. The failure localized a
+second private-custody lookup in the source restoration's final pair readback:
+the initial installed-source check already used public authority, but the final
+readback silently returned to private retained-candidate custody. The reviewed
+repair carries public-only mode through that final readback only for the fully
+attributed expired-source closeout. Ordinary activation compensation retains
+its private-custody final gate. The hostile regression reproduces stale private
+source custody, proves the attributed closeout succeeds without selecting the
+target, and separately proves ordinary compensation remains PENDING and fails
+closed on the same stale custody. A new signed physical candidate and ceremony
+remain pending.
+
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical
 disposable-Mac evidence.

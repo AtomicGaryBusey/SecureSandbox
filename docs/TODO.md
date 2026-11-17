@@ -1101,6 +1101,13 @@ in ignored local records, not in this file.
   The Neo currently retains exact expired, still-source public PENDING
   transition `15450635...96da` at checkpoint `bfa25f2`; its complete identifier
   remains only in protected live evidence.
+  The first attributed closeout attempt on published checkpoint `cb1b569`
+  failed closed at the final source-pair readback because it re-entered stale
+  private retained-candidate custody. The journal and PENDING fence remain
+  intact and the target remains inert. Publish a replacement whose final
+  readback uses installed public authority only for the fully attributed
+  expired closeout; ordinary activation compensation must retain its private
+  custody gate.
   Publish and transfer the reviewed source-closeout repair, then use one
   separately attributed password ceremony to terminalize only the exact source
   pair as `source_restored`/`authorization_expired`. Independently prove the

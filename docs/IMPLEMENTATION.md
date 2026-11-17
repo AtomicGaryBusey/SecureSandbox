@@ -540,6 +540,11 @@ from installed public authority, publishes `source_restored` with
 `authorization_expired`, then removes the private journal after exact STABLE
 readback. The wrapper accepts that source result only after independently
 reading the same transition-bound STABLE and immutable source terminal.
+The public-authority exception covers both the initial and final installed
+source-pair readbacks only in that fully attributed expired closeout. The
+shared ordinary activation-compensation path continues to require private
+retained-candidate freshness at final readback; stale custody there leaves the
+PENDING fence and journal intact.
 
 Ordinary pair activation now consumes Touch ID authority only while
 `created_at <= now < expires_at`: the manager checks before public PENDING,

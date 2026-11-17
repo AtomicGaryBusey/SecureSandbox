@@ -733,6 +733,16 @@ class HostPairTransitionHostileTests(unittest.TestCase):
             transition = fixture.pending_transition()
             pending, pending_sha256 = fixture.public_pair()
             target = transition["target_pair"]
+            candidate_binding_impl = (
+                MANAGER.installed_native_host_candidate_binding
+            )
+
+            def reject_stale_private_custody(*args, **kwargs):
+                if not kwargs.get("public_only", False):
+                    raise MANAGER.ReleaseFailure(
+                        "native_host_candidate_authority_stale"
+                    )
+                return candidate_binding_impl(*args, **kwargs)
 
             with (
                 mock.patch.object(
@@ -745,7 +755,7 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 ) as install_launcher,
                 mock.patch.object(
                     MANAGER, "installed_native_host_candidate_binding",
-                    wraps=MANAGER.installed_native_host_candidate_binding,
+                    side_effect=reject_stale_private_custody,
                 ) as candidate_binding,
             ):
                 recovered = MANAGER.recover_host_pair_transition(
@@ -774,7 +784,8 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 call.args[2] == MANAGER.sha256_bytes(target_launcher)
                 for call in install_launcher.call_args_list
             ))
-            self.assertTrue(any(
+            self.assertGreaterEqual(candidate_binding.call_count, 2)
+            self.assertTrue(all(
                 call.kwargs.get("public_only") is True
                 for call in candidate_binding.call_args_list
             ))
@@ -881,6 +892,84 @@ class HostPairTransitionHostileTests(unittest.TestCase):
             self.assertIsNotNone(terminal)
             assert terminal is not None
             self.assertEqual(terminal[0]["status"], "source_restored")
+
+    def test_ordinary_compensation_retains_private_source_custody_gate(self):
+        with self.pair_fixture() as fixture:
+            installed = fixture.install()
+            source_id = str(installed["release_id"])
+            candidate = fixture.new_candidate("expiry-race-stale-source")
+            _source_stable, source_stable_sha256 = fixture.public_pair()
+            (
+                _values, _hashes, _target_id, target_launcher, _plan,
+            ) = fixture.describe_candidate(
+                candidate, source_stable_sha256=source_stable_sha256,
+            )
+            self.crash_during_install(fixture, "PUBLIC_PENDING", candidate)
+            transition = fixture.pending_transition()
+            real_freshness_check = (
+                MANAGER.ensure_host_pair_transition_activation_current
+            )
+            candidate_binding_impl = (
+                MANAGER.installed_native_host_candidate_binding
+            )
+            checks = 0
+
+            def expire_on_second_check(value, *, now=None):
+                nonlocal checks
+                checks += 1
+                instant = (
+                    transition["expires_at"] - 1
+                    if checks == 1 else transition["expires_at"]
+                )
+                return real_freshness_check(value, now=instant)
+
+            def reject_stale_private_source(*args, **kwargs):
+                if (args[1] == source_id
+                        and not kwargs.get("public_only", False)):
+                    raise MANAGER.ReleaseFailure(
+                        "native_host_candidate_authority_stale"
+                    )
+                return candidate_binding_impl(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    MANAGER,
+                    "ensure_host_pair_transition_activation_current",
+                    side_effect=expire_on_second_check,
+                ),
+                mock.patch.object(
+                    MANAGER, "installed_native_host_candidate_binding",
+                    side_effect=reject_stale_private_source,
+                ),
+                mock.patch.object(
+                    MANAGER, "install_launcher_generation",
+                    wraps=MANAGER.install_launcher_generation,
+                ) as install_launcher,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_pair_transition_recovery_unproven:"
+                    "native_host_candidate_authority_stale",
+                ),
+            ):
+                MANAGER.recover_host_pair_transition(
+                    fixture.install_root, fixture.launcher,
+                    fixture.state, fixture.uid,
+                )
+
+            self.assertEqual(checks, 2)
+            self.assertFalse(any(
+                call.args[2] == MANAGER.sha256_bytes(target_launcher)
+                for call in install_launcher.call_args_list
+            ))
+            self.assertTrue(
+                (fixture.install_root
+                 / MANAGER.INSTALL_TRANSITION_PENDING_NAME).is_file()
+            )
+            public, _public_sha256 = fixture.public_pair()
+            self.assertEqual(
+                public["schema"],
+                MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+            )
 
     def test_expired_transition_converges_after_durable_pair_mutation(self):
         for checkpoint in ("LAUNCHER_SELECTED", "RELEASE_SELECTED"):

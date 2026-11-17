@@ -202,7 +202,10 @@ source pair: it never selects the target, records `authorization_expired` in an
 immutable `source_restored` terminal, publishes the matching STABLE record,
 and removes the private journal only after readback. The source release is
 validated from its installed public authority and release-tree identity, not
-mutable retained-candidate custody. Once the authenticated
+mutable retained-candidate custody. That exception is scoped to the fully
+attributed expired-source closeout through its final source-pair readback.
+Ordinary target-activation compensation retains a private-custody final gate;
+an unprovable source restoration stays PENDING. Once the authenticated
 physical prefix proves that the target launcher or selector was already
 durably selected—or a finalization/terminal already exists—replay may converge
 that exact journal after expiry. The receipt-free, typed first-pair bootstrap

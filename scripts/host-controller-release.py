@@ -14619,7 +14619,7 @@ def enforce_developer_id_migration_predecessor_floor(
 
 def observed_host_release_launcher_pair(
     install_root: Path, launcher_path: Path, release_id: str,
-    expected_uid: int,
+    expected_uid: int, *, public_only: bool = False,
 ) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
     """Derive one complete live pair from root-owned installed evidence."""
     if SHA256.fullmatch(release_id) is None:
@@ -14631,6 +14631,7 @@ def observed_host_release_launcher_pair(
     )
     authority = installed_native_host_candidate_binding(
         install_root, release_id, expected_uid,
+        public_only=public_only,
     )[3]
     if (authority["schema"]
             != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
@@ -14901,7 +14902,10 @@ def _select_host_pair_physical_state(
     old_process_release: Path | None,
     activation_deadline: int | None = None,
     defer_pending_source_authorization: bool = False,
+    public_only_final_readback: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if public_only_final_readback and not defer_pending_source_authorization:
+        raise ReleaseFailure("host_pair_public_readback_scope_invalid")
     target = validate_host_release_launcher_pair_generation({
         name: generation[name] for name in (
             "candidate_authority_sha256", "launcher_sha256", "release_id",
@@ -14960,6 +14964,7 @@ def _select_host_pair_physical_state(
     pair, observed_release, observed_manifest, observed_authority = (
         observed_host_release_launcher_pair(
             install_root, launcher_path, release_id, expected_uid,
+            public_only=public_only_final_readback,
         )
     )
     if (observed_release != release or observed_manifest != manifest
@@ -14999,6 +15004,7 @@ def _verify_committed_host_pair_physical_state(
 def terminalize_host_pair_source_restoration(
     install_root: Path, launcher_path: Path, expected_uid: int,
     transition: Mapping[str, Any], pending_sha256: str, *, error: str,
+    public_only_source_readback: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Close one exact PENDING transition on its already-selected source.
 
@@ -15038,6 +15044,7 @@ def terminalize_host_pair_source_restoration(
             / validated["target_pair"]["release_id"]
         ),
         defer_pending_source_authorization=True,
+        public_only_final_readback=public_only_source_readback,
     )
     finalization = make_host_pair_finalization(
         validated, status="source_restored", committed_pair=restored_pair,
@@ -15305,6 +15312,7 @@ def execute_host_pair_transition(
                 return terminalize_host_pair_source_restoration(
                     install_root, launcher_path, expected_uid, validated,
                     pending_sha256, error="authorization_expired",
+                    public_only_source_readback=True,
                 )
             except Exception as recovery_error:
                 recovery_code = (

@@ -702,6 +702,15 @@ correctly refused to consume the expired authority. Do not delete or edit the
 private journal or public PENDING record and do not request another Touch ID
 authorization yet.
 
+The first attributed closeout attempt using checkpoint `cb1b569` failed closed
+at its final source-pair readback with
+`host_pair_transition_recovery_unproven:native_host_candidate_authority_stale`.
+It did not select the target or remove either fence. Do not retry that candidate.
+The follow-up repair extends installed-public-authority verification through
+the final source readback only for this fully attributed expired closeout;
+ordinary activation compensation still requires its private-custody final
+gate.
+
 First publish, sign/notarize, transfer, and independently preflight the exact
 source-closeout repair. The retained transition begins `15450635` and ends
 `96da`; keep its complete identifier only in protected live evidence. With

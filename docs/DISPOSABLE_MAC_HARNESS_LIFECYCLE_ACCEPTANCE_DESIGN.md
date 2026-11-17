@@ -758,9 +758,9 @@ disconnected before Gateway powers on. Regular `labctl stop` establishes that
 secure-at-rest state by disconnecting the uplink before any VM shutdown and
 rejects before shutdown if independent readback cannot prove disconnection.
 Because that disconnect intentionally removes the Shared-network path used by
-the protected Gateway SSH proxy, shutdown uses only Parallels' local graceful
-ACPI transition for each exact VM, without `--kill`, and independently rereads
-the stopped state after every command.
+the protected Gateway SSH proxy, shutdown uses only Parallels' local explicit
+`--noforce` transition for each exact VM, without `--acpi` or `--kill`, and
+independently rereads the stopped state after every command.
 This prevents even a transient egress window during vendor-service bootstrap.
 
 With the Parallels GUI closed and the same lock still held, the acceptance

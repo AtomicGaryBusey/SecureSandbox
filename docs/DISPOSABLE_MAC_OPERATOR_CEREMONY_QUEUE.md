@@ -24,9 +24,12 @@ The retained live Neo campaign is still the empty exact `35dd424` campaign;
 do not collect from it under newer source. The acceptance-start repair was
 published; its first physical stop safely isolated Gateway but
 exposed that the old guest shutdown transport used the same Shared adapter.
-Publish the reviewed local-graceful-stop descendant, wake and unlock the Neo,
-establish actual VM and GUI state read-only, and use that controller to reach
-all-stopped with Gateway `net0` independently proven disconnected. Retain and
+The first local repair then exposed that Parallels 27.1.0 `--acpi` implicitly
+force-stops after 120 seconds; Target is now stopped, Research and Gateway are
+running, and Gateway `net0` remains disconnected. Publish the reviewed
+explicit-`--noforce` descendant, establish actual VM and GUI state read-only,
+and use that controller to reach all-stopped with Gateway `net0` independently
+proven disconnected. Retain and
 independently verify the old campaign through the existing no-delete empty-
 campaign continuation, install the exact newly published protected ten-driver
 release, and initialize a fresh exact-source campaign.

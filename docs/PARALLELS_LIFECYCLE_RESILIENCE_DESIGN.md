@@ -11,8 +11,11 @@ An exact-PID termination repair is implemented and source-tested. Physical
 acceptance of the later isolated-stop prerequisite exposed that disconnecting
 Gateway `net0` also removes the Shared-network transport used by the protected
 Gateway SSH proxy. The corrected stop path keeps the disconnect-first rule but
-uses Parallels' local graceful ACPI stop for each exact VM, never `--kill`, and
-accepts completion only after independent `prlctl` stopped-state readback.
+uses Parallels' local explicit `--noforce` stop for each exact VM, never
+`--acpi` or `--kill`, and accepts completion only after independent `prlctl`
+stopped-state readback. Physical replay proved that Parallels 27.1.0 treats
+`--acpi` as a 120-second request with an implicit forced-stop fallback, so
+omitting `--kill` alone is not a no-force guarantee.
 Deployment-specific state, VM identities, and acceptance transcripts remain
 private.
 
@@ -22,8 +25,11 @@ SecureSandbox intentionally omits ambient host-to-guest network authority.
 The authenticated guest control plane is reached through Gateway's Shared
 adapter, so it is not a valid shutdown transport after the required
 disconnect-first egress isolation. Graceful stop instead uses Parallels' local
-ACPI transition for the exact VM and treats its response as non-authoritative;
-only independent VM-state readback can prove completion.
+explicit `--noforce` transition for the exact VM and treats its response as
+non-authoritative; only independent VM-state readback can prove completion.
+The superficially stronger `--acpi` spelling is prohibited: on the accepted
+vendor build it silently escalates to a force-stop after its internal timeout
+when the guest does not power off.
 Separately, the Parallels Desktop GUI has crashed while network state changed
 during both stack shutdown and startup. In each retained incident, command or
 transport status alone disagreed with the VM state that was subsequently read
@@ -87,10 +93,11 @@ remains a separate and stronger requirement after startup.
   verification remain ordinary-controller operations with the GUI closed.
 - `stop` holds the same lock, refuses a running GUI, disconnects and rereads
   Gateway `net0`, then converges in Target, Research, Gateway order with local
-  graceful `prlctl stop` transitions. Already-stopped guests are not contacted.
+  explicit `prlctl stop --noforce` transitions. Already-stopped guests are not
+  contacted. Neither `--acpi` nor `--kill` is an admitted shutdown action.
   A lost, oversized, or failing Parallels response is recorded as
   `lost_response` only when independent `prlctl` readback proves that exact
-  guest stopped. The controller never adds `--kill`.
+  guest stopped. The controller never adds `--acpi` or `--kill`.
 
 The shell entry point performs a credential-readiness gate before either
 mutating operation. The provisioning and control agents use separate fixed

@@ -516,7 +516,7 @@ def stop(*, inherited_lock: int | None = None) -> int:
                                  "result": "already_satisfied"})
                 continue
             if not mutate(
-                [str(PRLCTL), "stop", name, "--acpi"],
+                [str(PRLCTL), "stop", name, "--noforce"],
                 "guest_shutdown", key, outcomes,
                 lambda name=name: wait_vm(name, "stopped"),
             ):

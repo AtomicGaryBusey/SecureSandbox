@@ -57,9 +57,14 @@ physically started on the Neo.
 That first stop safely disconnected Gateway egress, then failed closed before
 any VM stopped because its guest-control shutdown still depended on the now-
 disconnected Shared adapter. Independent readback retained all three VMs
-running and `net0` disconnected. The corrective descendant uses only exact
-local graceful Parallels stops after isolation and retains the same per-VM
-stopped-state readback; physical replay remains pending.
+running and `net0` disconnected. The first corrective descendant selected
+local `--acpi`, then physical replay exposed Parallels 27.1.0's undocumented
+120-second forced-stop fallback: the controller rejected after its own bounded
+readback, but the still-pending vendor transition later force-stopped Target.
+Independent readback found Target stopped, Research and Gateway running, and
+`net0` still disconnected. The repaired descendant admits only explicit
+`--noforce`, prohibits both `--acpi` and `--kill`, and retains the same per-VM
+stopped-state readback; its physical replay remains pending.
 
 The first immutable security review of that source follow-up reproduced one
 low-severity source-binding defect: an absolute-path controller could verify a

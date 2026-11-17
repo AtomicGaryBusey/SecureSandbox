@@ -283,10 +283,12 @@ collecting evidence. Production `labctl stop` now disconnects and independently
 rereads Gateway `net0` before VM shutdown so the all-stopped baseline cannot
 create a transient egress window when the Parallels service is bootstrapped.
 Failure to isolate rejects before shutdown. After isolation, exact VM shutdown
-uses only the local graceful Parallels ACPI transition because the protected
-Gateway SSH proxy deliberately loses its Shared-network transport. No
-`--kill` fallback exists; each response is subordinate to independent
-stopped-state readback. The new controller and both
+uses only the local explicit Parallels `--noforce` transition because the
+protected Gateway SSH proxy deliberately loses its Shared-network transport.
+Neither `--acpi` nor `--kill` is admitted: physical Parallels 27.1.0 evidence
+proved that `--acpi` itself force-stops an unresponsive guest after 120
+seconds. Each response is subordinate to independent stopped-state readback.
+The new controller and both
 Parallels lifecycle dependencies are included in the protected clean-machine
 driver closure. The one-shot collector independently rereads the exact
 GUI-closed Gateway/Research-running, Target-stopped, uplink-disconnected

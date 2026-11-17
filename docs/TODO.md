@@ -603,9 +603,12 @@ in ignored local records, not in this file.
   was published at `62023389`. Its first Neo stop disconnected and reread
   Gateway egress, then failed closed because the subsequent guest-control
   shutdown still depended on that same Shared adapter; all three VMs remained
-  running and Gateway stayed isolated. The corrective descendant uses only
-  local graceful Parallels stops for the exact VMs, never `--kill`, after the
-  disconnect-first gate and independently proves each stopped state. Publish
+  running and Gateway stayed isolated. The first corrective descendant then
+  exposed that Parallels 27.1.0 `--acpi` implicitly force-stops after 120
+  seconds: Target stopped only after the controller had rejected, while
+  Research and Gateway remained running and isolated. The next descendant uses
+  only explicit `--noforce` for each exact VM, never `--acpi` or `--kill`, after
+  the disconnect-first gate and independently proves each stopped state. Publish
   and physically replay that repair, then retain the old campaign, install the
   exact protected release, initialize the replacement, and prove the fixed
   final inventory before invoking the one-shot collector. Never collect on an

@@ -328,8 +328,10 @@ exit 2
         self.assertEqual(actions[0], "identity-ready")
         stop_actions = [line for line in actions if line.startswith("prlctl stop")]
         self.assertEqual(len(stop_actions), 3)
-        self.assertTrue(all(line.endswith(" --acpi") for line in stop_actions))
-        self.assertNotIn("--kill", "\n".join(stop_actions))
+        self.assertTrue(all(line.endswith(" --noforce") for line in stop_actions))
+        joined = "\n".join(stop_actions)
+        self.assertNotIn("--kill", joined)
+        self.assertNotIn("--acpi", joined)
 
     def test_identity_restore_failure_prevents_every_vm_action(self):
         (self.scripts / "ensure-ssh-identities.sh").write_text(

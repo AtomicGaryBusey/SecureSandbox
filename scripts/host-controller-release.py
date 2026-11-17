@@ -11334,6 +11334,75 @@ def inactive_launchd_service_definition(
     }
 
 
+def stable_inactive_launchd_service_snapshot(
+    domain: str, label: str, *, expected_plist: Path,
+    expected_program: str,
+    timeout: float = HOST_SERVICE_STOP_TIMEOUT_SECONDS,
+) -> str:
+    """Require two identical canonical snapshots before static attestation.
+
+    A newly bootstrapped demand-only LaunchAgent can initially expose a
+    canonical but not-yet-settled definition (for example, launchd may add its
+    zero run counter or uninitialized job state on the following read).  That
+    is not authority to accept either snapshot.  Wait read-only within the
+    existing service bound and admit only two consecutive identical inactive
+    definitions.  A running, scheduled, absent, or non-canonical observation
+    is never treated as settling and fails closed immediately.
+    """
+    def benign_metadata_maturation(
+        before: Mapping[str, Any], after: Mapping[str, Any],
+    ) -> bool:
+        """Recognize only launchd's additive empty-state metadata."""
+        normalized_before = dict(before)
+        normalized_after = dict(after)
+        before_runs = normalized_before.pop("runs", None)
+        after_runs = normalized_after.pop("runs", None)
+        before_job_state = normalized_before.pop("job_state", None)
+        after_job_state = normalized_after.pop("job_state", None)
+        if normalized_before != normalized_after:
+            return False
+        if not (
+            before_runs == after_runs
+            or (before_runs is None and after_runs == 0)
+        ):
+            return False
+        return (
+            before_job_state == after_job_state
+            or (
+                before_job_state is None
+                and after_job_state == "uninitialized"
+            )
+        )
+
+    deadline = time.monotonic() + timeout
+    previous: dict[str, Any] | None = None
+    while True:
+        state, pid, snapshot = launchd_service_snapshot(domain, label)
+        if state != "inactive" or pid is not None:
+            raise ReleaseFailure(f"host_service_state_changed:{label}")
+        definition = inactive_launchd_service_definition(
+            snapshot, domain, label,
+            expected_plist=expected_plist,
+            expected_program=expected_program,
+        )
+        observed_at = time.monotonic()
+        if definition == previous:
+            if observed_at > deadline:
+                raise ReleaseFailure(
+                    f"host_service_definition_unstable:{label}"
+                )
+            return snapshot
+        if (
+            previous is not None
+            and not benign_metadata_maturation(previous, definition)
+        ):
+            raise ReleaseFailure(f"host_service_definition_changed:{label}")
+        previous = definition
+        if observed_at >= deadline:
+            raise ReleaseFailure(f"host_service_definition_unstable:{label}")
+        time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+
+
 def inactive_native_credential_identity(
     release: Path, native_uid: int, native_manifest: Mapping[str, Any],
     first_snapshot: str,
@@ -11675,10 +11744,15 @@ def verify_release_host_services(
             read_regular(release / "native_credential_helper_bundle")
         )
         if allow_inactive_native:
-            state, pid, snapshot = launchd_service_snapshot(
+            state, pid, _snapshot = launchd_service_snapshot(
                 f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
             )
             if state == "inactive" and pid is None:
+                snapshot = stable_inactive_launchd_service_snapshot(
+                    f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+                    expected_plist=DEFAULT_NATIVE_CREDENTIAL_PLIST,
+                    expected_program=NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH,
+                )
                 result["native_credential"] = (
                     inactive_native_credential_identity(
                         release, native_uid, native_manifest, snapshot,
@@ -11760,13 +11834,11 @@ def attest_pending_source_host_services(
     }
     payloads = set(manifest.get("payloads", {}))
     if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
-        state, pid, snapshot = launchd_service_snapshot(
+        snapshot = stable_inactive_launchd_service_snapshot(
             f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            expected_plist=DEFAULT_NATIVE_CREDENTIAL_PLIST,
+            expected_program=NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH,
         )
-        if state != "inactive" or pid is not None:
-            raise ReleaseFailure(
-                f"host_service_state_changed:{NATIVE_CREDENTIAL_HELPER_LABEL}"
-            )
         native_manifest = native_components_manifest(
             read_regular(release / "native_credential_helper_bundle")
         )

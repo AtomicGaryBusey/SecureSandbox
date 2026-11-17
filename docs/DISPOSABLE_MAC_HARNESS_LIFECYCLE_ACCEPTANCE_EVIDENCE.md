@@ -669,8 +669,20 @@ attributed expired-source closeout. Ordinary activation compensation retains
 its private-custody final gate. The hostile regression reproduces stale private
 source custody, proves the attributed closeout succeeds without selecting the
 target, and separately proves ordinary compensation remains PENDING and fails
-closed on the same stale custody. A new signed physical candidate and ceremony
-remain pending.
+closed on the same stale custody. A later exact recovery physically closed that
+transition without target selection and retained the required source terminal,
+STABLE, journal-absence, and service readbacks.
+
+A subsequent ordinary upgrade expired before target selection and remains
+fenced. Its first attributed source closeout stopped fail-closed because a
+newly bootstrapped demand-only Native Credential Helper's inactive launchd
+definition changed while launchd added empty-state metadata. The repair accepts
+inactivity only after two consecutive identical canonical definitions and
+tolerates solely `runs` absent-to-zero and `job state`
+absent-to-`uninitialized` maturation. A deterministic regression proves that
+`runs` zero-to-one fails immediately rather than converging. The complete Host
+release-manager suite passes 296 tests with two intentional skips. A new signed
+physical recovery of the retained later transition remains pending.
 
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical

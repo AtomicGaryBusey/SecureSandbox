@@ -694,34 +694,34 @@ failure record—not a reason to retry reflexively.
 
 ## Current handoff
 
-The Neo currently retains an exact public PENDING transition beginning
-`15450635` and ending `96da` from published checkpoint `bfa25f2`.
-Its Touch ID authority expired before any target mutation. Current and launcher
-remain on the source generation, the target is inert, and generic recovery
-correctly refused to consume the expired authority. Do not delete or edit the
-private journal or public PENDING record and do not request another Touch ID
-authorization yet.
+The earlier transition beginning `15450635` and ending `96da` is closed. Its
+attributed expired-authority recovery selected no target, published immutable
+`source_restored`/`authorization_expired` terminal evidence and the matching
+source STABLE record, removed its private journal only after readback, and left
+the source services exact.
 
-The first attributed closeout attempt using checkpoint `cb1b569` failed closed
-at its final source-pair readback with
-`host_pair_transition_recovery_unproven:native_host_candidate_authority_stale`.
-It did not select the target or remove either fence. Do not retry that candidate.
-The follow-up repair extends installed-public-authority verification through
-the final source readback only for this fully attributed expired closeout;
-ordinary activation compensation still requires its private-custody final
-gate.
+The Neo now retains a later ordinary public PENDING transition beginning
+`20739d26`. Its Touch ID authority expired before target selection; the source
+release and launcher remain selected and the target remains inert. The first
+attributed closeout stopped fail-closed while launchd's newly bootstrapped,
+demand-only Native Credential Helper definition was still maturing from absent
+empty-state metadata to its canonical inactive form. The journal and public
+fence remain intact. Do not edit either record, request new Touch ID authority,
+or retry with the older release manager.
 
-First publish, sign/notarize, transfer, and independently preflight the exact
-source-closeout repair. The retained transition begins `15450635` and ends
-`96da`; keep its complete identifier only in protected live evidence. With
-Alex present at the Neo, launch one attributed administrator-password recovery
-for that exact journal. It must select no
-target component and must finish with an immutable `source_restored` terminal
-whose error is `authorization_expired`, the matching source STABLE record,
-absent private journal, running source authorization daemon, and inert target.
-Any different notice, identity, result, or readback stops the ceremony. Only
-after that closeout is independently verified may a fresh candidate and fresh
-Touch ID request be prepared.
+Publish, sign/notarize, transfer, and independently preflight the stabilization
+repair. It admits an inactive helper only after two consecutive identical
+canonical definitions within the existing bound. Between reads it tolerates
+only launchd's exact additive empty-state maturation (`runs`: absent to zero;
+`job state`: absent to `uninitialized`); a real run-count change, any other
+definition change, scheduled/running state, absence, malformed output, or
+timeout fails closed. With Alex present at the Neo, cancel the stale visible
+password prompt and launch one fresh, release-bound attributed recovery. It
+must select no target and finish with immutable
+`source_restored`/`authorization_expired` terminal evidence, matching source
+STABLE evidence, absent private journal, exact source services, and inert
+target. Any different result stops the ceremony. Only after independent
+verification may a fresh candidate and Touch ID request be prepared.
 
 After activation, independently verify the selected Host release, launcher
 pair, daemon generation, candidate authority, trust floors, absent pending

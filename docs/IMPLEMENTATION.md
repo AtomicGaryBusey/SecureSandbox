@@ -531,6 +531,16 @@ STABLE digest. Target-tree preflight applies the same narrow uniform APFS
 device-number normalization as installed authority verification, so a reboot
 cannot strand an otherwise unchanged authorized transition.
 
+Neo source-closeout recovery also stabilizes demand-only launchd evidence.
+Immediately after bootstrap, launchd may add an absent zero run counter or
+uninitialized job state on a later read even though the helper remains idle.
+The privileged manager requires two consecutive identical canonical inactive
+definitions, tolerates only those two additive empty-state transitions, and
+fails immediately on a real run-count or any other semantic change. Static
+plist, selector, executable, and signature evidence stays bracketed; running
+helpers retain exact live-process verification. The complete Host manager
+suite passes 296 tests with two intentional skips.
+
 If the exact ordinary transition expires while its authenticated physical
 prefix is still source/source, generic recovery still refuses it and preserves
 the fence. The attributed password-gated command can instead terminalize only

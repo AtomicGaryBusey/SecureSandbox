@@ -206,6 +206,18 @@ privileged release manager still reads the private canonical bytes and requires
 their digest to match the public projection before mutation, so moving the
 login-user check to the projection does not move final authority out of root.
 
+Attributed expired-authority source closeout exposed a separate demand-helper
+observation boundary. Immediately after bootstrap, launchd can report a
+canonical inactive definition before adding its zero run counter or
+uninitialized job state. The release manager therefore requires two
+consecutive identical canonical inactive definitions within the existing
+bound. Between reads it recognizes only `runs` absent-to-zero and `job state`
+absent-to-`uninitialized` maturation. A real run-count change, any other
+definition change, running or scheduled state, absence, malformed output, or
+timeout fails closed. Exact plist, selector, executable, signature, and final
+unchanged launchd definition remain bracketed; an actually running helper still
+uses the stronger live-process verification path.
+
 The operator password ceremony must run in a Terminal window on the disposable
 Mac. An SSH pseudo-terminal owned by the controller is not an operator-visible
 prompt even when the preceding graphical notice is visible. Remote orchestration

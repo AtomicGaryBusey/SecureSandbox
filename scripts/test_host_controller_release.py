@@ -9,6 +9,7 @@ import json
 import os
 import plistlib
 import py_compile
+import re
 import select
 import shutil
 import signal
@@ -65,7 +66,7 @@ AUDIT_SPEC.loader.exec_module(AUDIT)
 
 def inactive_launchd_snapshot(
     *, domain: str, label: str, plist: Path, program: str,
-    runs: int | None = 0,
+    runs: int | None = 0, job_state: str | None = "uninitialized",
 ) -> str:
     lines = [
         f"{domain}/{label} = {{",
@@ -96,10 +97,10 @@ def inactive_launchd_snapshot(
         "\t}",
         "",
         "\tspawn type = interactive (4)",
-        "\tjob state = uninitialized",
-        "}",
-        "",
     ])
+    if job_state is not None:
+        lines.append(f"\tjob state = {job_state}")
+    lines.extend(["}", ""])
     return "\n".join(lines)
 
 
@@ -3992,6 +3993,157 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     release, 501, manifest, first,
                 )
 
+    def test_inactive_native_snapshot_waits_for_two_identical_definitions(self):
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        domain = "gui/501"
+        plist = Path("/Library/LaunchAgents/native.plist")
+        program = "/usr/local/libexec/native-helper"
+        initial = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=None,
+        )
+        settled = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=0,
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_snapshot",
+                side_effect=[
+                    ("inactive", None, initial),
+                    ("inactive", None, settled),
+                    ("inactive", None, settled),
+                ],
+            ) as snapshot,
+            mock.patch.object(MANAGER.time, "sleep") as sleep,
+        ):
+            observed = MANAGER.stable_inactive_launchd_service_snapshot(
+                domain, label, expected_plist=plist,
+                expected_program=program,
+            )
+        self.assertEqual(observed, settled)
+        self.assertEqual(snapshot.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_inactive_native_snapshot_allows_only_empty_metadata_maturation(self):
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        domain = "gui/501"
+        plist = Path("/Library/LaunchAgents/native.plist")
+        program = "/usr/local/libexec/native-helper"
+        initial = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=None, job_state=None,
+        )
+        run_counter = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=0, job_state=None,
+        )
+        settled = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=0, job_state="uninitialized",
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_snapshot",
+                side_effect=[
+                    ("inactive", None, initial),
+                    ("inactive", None, run_counter),
+                    ("inactive", None, settled),
+                    ("inactive", None, settled),
+                ],
+            ),
+            mock.patch.object(MANAGER.time, "sleep"),
+        ):
+            observed = MANAGER.stable_inactive_launchd_service_snapshot(
+                domain, label, expected_plist=plist,
+                expected_program=program,
+            )
+        self.assertEqual(observed, settled)
+
+    def test_inactive_native_snapshot_rejects_helper_execution_convergence(self):
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        domain = "gui/501"
+        plist = Path("/Library/LaunchAgents/native.plist")
+        program = "/usr/local/libexec/native-helper"
+        before = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=0,
+        )
+        after = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=1,
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_snapshot",
+                side_effect=[
+                    ("inactive", None, before),
+                    ("inactive", None, after),
+                    ("inactive", None, after),
+                ],
+            ) as snapshot,
+            mock.patch.object(MANAGER.time, "sleep"),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "host_service_definition_changed:" + re.escape(label),
+            ),
+        ):
+            MANAGER.stable_inactive_launchd_service_snapshot(
+                domain, label, expected_plist=plist,
+                expected_program=program,
+            )
+        self.assertEqual(snapshot.call_count, 2)
+
+    def test_inactive_native_snapshot_rejects_noninactive_authority(self):
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        with mock.patch.object(
+            MANAGER, "launchd_service_snapshot",
+            return_value=("running", 73, "running"),
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "host_service_state_changed:" + re.escape(label),
+        ):
+            MANAGER.stable_inactive_launchd_service_snapshot(
+                "gui/501", label,
+                expected_plist=Path("/Library/LaunchAgents/native.plist"),
+                expected_program="/usr/local/libexec/native-helper",
+            )
+
+    def test_inactive_native_snapshot_rejects_unstable_definition_at_bound(self):
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        domain = "gui/501"
+        plist = Path("/Library/LaunchAgents/native.plist")
+        program = "/usr/local/libexec/native-helper"
+        first = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=None,
+        )
+        second = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=0,
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_snapshot",
+                side_effect=[
+                    ("inactive", None, first),
+                    ("inactive", None, second),
+                ],
+            ),
+            mock.patch.object(
+                MANAGER.time, "monotonic", side_effect=[10.0, 10.0, 10.1],
+            ),
+            mock.patch.object(MANAGER.time, "sleep"),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "host_service_definition_unstable:" + re.escape(label),
+            ),
+        ):
+            MANAGER.stable_inactive_launchd_service_snapshot(
+                domain, label, expected_plist=plist,
+                expected_program=program, timeout=0.1,
+            )
+
     def test_inactive_native_identity_rejects_static_evidence_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4244,6 +4396,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     return_value=("inactive", None, "snapshot"),
                 ),
                 mock.patch.object(
+                    MANAGER, "stable_inactive_launchd_service_snapshot",
+                    return_value="snapshot",
+                ) as stable_snapshot,
+                mock.patch.object(
                     MANAGER, "inactive_native_credential_identity",
                     return_value=inactive_evidence,
                 ) as inactive_identity,
@@ -4253,6 +4409,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     release, manifest, 501, allow_inactive_native=True,
                 )
             self.assertEqual(result["native_credential"], inactive_evidence)
+            stable_snapshot.assert_called_once_with(
+                "gui/501", MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                expected_plist=MANAGER.DEFAULT_NATIVE_CREDENTIAL_PLIST,
+                expected_program=MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH,
+            )
             inactive_identity.assert_called_once()
             live.assert_not_called()
 
@@ -4272,6 +4433,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     return_value=("running", 72, "snapshot"),
                 ),
                 mock.patch.object(
+                    MANAGER, "stable_inactive_launchd_service_snapshot",
+                ) as stable_snapshot,
+                mock.patch.object(
                     MANAGER, "inactive_native_credential_identity",
                 ) as inactive_identity,
                 mock.patch.object(
@@ -4284,6 +4448,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 )
             self.assertEqual(result["native_credential"], running_evidence)
             live.assert_called_once()
+            stable_snapshot.assert_not_called()
             inactive_identity.assert_not_called()
 
     def test_launchd_state_accepts_only_exact_absent_and_running_records(self):

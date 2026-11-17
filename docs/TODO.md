@@ -1098,21 +1098,20 @@ in ignored local records, not in this file.
   root authorization only immediately before one validated protected ceremony,
   and run the 11 Touch ID cases only in suite order with no password fallback
   or reflexive retry.
-  The Neo currently retains exact expired, still-source public PENDING
-  transition `15450635...96da` at checkpoint `bfa25f2`; its complete identifier
-  remains only in protected live evidence.
-  The first attributed closeout attempt on published checkpoint `cb1b569`
-  failed closed at the final source-pair readback because it re-entered stale
-  private retained-candidate custody. The journal and PENDING fence remain
-  intact and the target remains inert. Publish a replacement whose final
-  readback uses installed public authority only for the fully attributed
-  expired closeout; ordinary activation compensation must retain its private
-  custody gate.
-  Publish and transfer the reviewed source-closeout repair, then use one
-  separately attributed password ceremony to terminalize only the exact source
-  pair as `source_restored`/`authorization_expired`. Independently prove the
-  matching STABLE record, removed journal, running source daemon, and inert
-  target before preparing any fresh Touch ID request.
+  The earlier expired transition `15450635...96da` is now physically closed as
+  `source_restored`/`authorization_expired`, with matching source STABLE
+  evidence, absent journal, exact source services, and no target selection.
+  The Neo retains a later expired, still-source PENDING transition
+  `20739d26...`. Its first attributed closeout stopped fail-closed while the
+  newly bootstrapped demand-only Native Credential Helper's canonical inactive
+  launchd metadata was still maturing; both fences remain intact and the target
+  remains inert. Publish and transfer the reviewed stabilization repair. It
+  requires two consecutive identical inactive definitions and permits only
+  absent-to-empty launchd metadata maturation, never a run-count or other
+  semantic change. Cancel the stale old-manager prompt, run one fresh exact-
+  release password ceremony, and independently prove source terminal/STABLE,
+  journal removal, exact services, and inert target before any new Touch ID
+  request.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

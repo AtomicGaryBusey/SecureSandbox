@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "shared"))
 
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
+    CASES,
     DRIVER_ENTRYPOINTS,
     canonical,
     digest,
@@ -101,6 +102,14 @@ HOME_REJECTION_SCHEMA = (
 HOME_REJECTION_RESULT_SCHEMA = (
     "secure-sandbox-harness-lifecycle-bootstrap-home-rejection-retention-v1"
 )
+QUALIFICATION_REJECTION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-control-rejection-"
+    "retention-plan-v1"
+)
+QUALIFICATION_REJECTION_RESULT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-control-rejection-"
+    "retention-v1"
+)
 ACKNOWLEDGEMENT = "RETAIN EMPTY REJECTED CAMPAIGN WITHOUT DELETION"
 RESERVED_ACKNOWLEDGEMENT = (
     "RETAIN EMPTY RESERVED BOOTSTRAP REJECTION WITHOUT DELETION"
@@ -114,6 +123,9 @@ PROTECTED_PROJECTION_ACKNOWLEDGEMENT = (
 HOME_REJECTION_ACKNOWLEDGEMENT = (
     "RETAIN PROJECTED BOOTSTRAP HOME REJECTION WITHOUT DELETION"
 )
+QUALIFICATION_REJECTION_ACKNOWLEDGEMENT = (
+    "RETAIN QUALIFICATION CONTROL REJECTION WITHOUT DELETION"
+)
 SUPERSEDE_ACKNOWLEDGEMENT = (
     "EXTEND RETAINED CAMPAIGN TO COMPATIBLE DESCENDANT WITHOUT DELETION"
 )
@@ -124,6 +136,19 @@ PROTECTED_PROJECTION_EXPECTED_ERROR = "bootstrap_protected_release_required"
 HOME_REJECTION_CASE_ID = "bootstrap-no-production-material"
 HOME_REJECTION_EXPECTED_ERROR = "bootstrap_home_untrusted"
 HOME_REJECTION_EXPECTED_MODE = 0o750
+QUALIFICATION_REJECTION_CASE_ID = "qualification-no-preexecution"
+QUALIFICATION_REJECTION_EXPECTED_ERROR = "supervisor_command_rejected"
+QUALIFICATION_REJECTION_CASE_INDEX = next(
+    index for index, case in enumerate(CASES)
+    if case.case_id == QUALIFICATION_REJECTION_CASE_ID
+)
+QUALIFICATION_REJECTION_COMPLETED_CASE_COUNT = (
+    QUALIFICATION_REJECTION_CASE_INDEX
+)
+QUALIFICATION_REJECTION_COMPLETED_OBSERVATION_COUNT = sum(
+    len(case.evidence_kinds)
+    for case in CASES[:QUALIFICATION_REJECTION_CASE_INDEX]
+)
 RESERVED_DIAGNOSTIC_SCHEMA = (
     "secure-sandbox-harness-lifecycle-bootstrap-rejection-diagnostic-v1"
 )
@@ -137,6 +162,97 @@ PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA = (
 HOME_REJECTION_DIAGNOSTIC_SCHEMA = (
     "secure-sandbox-harness-lifecycle-bootstrap-home-rejection-diagnostic-v1"
 )
+QUALIFICATION_REJECTION_DIAGNOSTIC_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-control-rejection-"
+    "diagnostic-v1"
+)
+QUALIFICATION_REJECTION_DIAGNOSTIC_PROGRAM = r'''\
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+release = Path(sys.argv[1])
+campaign_path = Path(sys.argv[2])
+observations = Path(sys.argv[3])
+raw_directory = Path(sys.argv[4])
+now = int(sys.argv[5])
+case_id = sys.argv[6]
+expected_error = sys.argv[7]
+schema = sys.argv[8]
+operator_uid = int(sys.argv[9])
+sys.path.insert(0, str(release / "shared"))
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+supervisor_path = release / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py"
+driver_path = release / "scripts/harness-lifecycle-acceptance-qualification.py"
+supervisor_source = supervisor_path.read_bytes()
+driver_source = driver_path.read_bytes()
+supervisor_tree = ast.parse(supervisor_source, filename=str(supervisor_path))
+driver_tree = ast.parse(driver_source, filename=str(driver_path))
+
+def function(tree, name):
+    matches = [node for node in tree.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == name]
+    if len(matches) != 1:
+        raise RuntimeError("historical_function_invalid")
+    return matches[0]
+
+run_research = ast.dump(function(supervisor_tree, "run_research"))
+execute = ast.dump(function(driver_tree, "execute"))
+if ("RESEARCH_ADMIN" not in run_research or "COMMON" not in run_research
+        or "geteuid" not in execute or "qualification_root_required" not in execute):
+    raise RuntimeError("historical_control_path_not_reproduced")
+
+supervisor = load("retained_qualification_supervisor", supervisor_path)
+campaign = supervisor.validate_campaign(
+    supervisor.ACCEPTANCE_CLI.trusted_json(
+        campaign_path, expected_uid=operator_uid,
+    ), now, allow_expired=True,
+)
+next_value = supervisor.ACCEPTANCE_CLI.next_case(
+    campaign, observations, observation_uid=0,
+    directory_uid=operator_uid,
+)
+case = next_value.get("case")
+if (next_value.get("status") != "pending" or not isinstance(case, dict)
+        or case.get("case_id") != case_id):
+    raise RuntimeError("historical_case_invalid")
+info = raw_directory.lstat()
+if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != operator_uid or stat.S_IMODE(info.st_mode) != 0o700
+        or list(raw_directory.iterdir())):
+    raise RuntimeError("historical_reservation_invalid")
+value = {
+    "schema": schema,
+    "status": "confirmed",
+    "case_id": case_id,
+    "error": expected_error,
+    "source_commit": campaign["source_commit"],
+    "observed_at": now,
+    "execution_path": "direct-research-admin-nonroot",
+    "supervisor_sha256": hashlib.sha256(supervisor_source).hexdigest(),
+    "driver_sha256": hashlib.sha256(driver_source).hexdigest(),
+    "reservation_device": info.st_dev,
+    "reservation_inode": info.st_ino,
+    "reservation_uid": info.st_uid,
+    "reservation_gid": info.st_gid,
+    "reservation_mode": stat.S_IMODE(info.st_mode),
+}
+value["diagnostic_sha256"] = supervisor.digest(value)
+sys.stdout.buffer.write(supervisor.canonical(value))
+'''
 HOME_REJECTION_DIAGNOSTIC_PROGRAM = r'''\
 import importlib.util
 import os
@@ -635,15 +751,114 @@ def _trusted_file_bytes(path: Path, uid: int, *, mode: int,
     return bytes(chunks)
 
 
+def _validate_qualification_rejection_layout(
+        root: Path, uid: int, campaign: dict[str, Any], campaign_raw: bytes,
+        protected_observation_uid: int,
+        ) -> tuple[dict[str, Any], str]:
+    prior_cases = []
+    for case in CASES:
+        if case.case_id == QUALIFICATION_REJECTION_CASE_ID:
+            break
+        prior_cases.append(case)
+    else:
+        raise RetentionError("retention_qualification_case_invalid")
+    expected_observations = {
+        f"{case.case_id}.{kind}.json"
+        for case in prior_cases for kind in case.evidence_kinds
+    }
+    expected = (
+        (Path("observations"), expected_observations),
+        (Path("raw"), EXPECTED_RAW),
+        (Path("raw/bootstrap"), {
+            RESERVED_CASE_ID, HOME_REJECTION_CASE_ID,
+        }),
+        (Path("raw/qualification"), {
+            QUALIFICATION_REJECTION_CASE_ID,
+        }),
+        (Path("raw/recovery"), set()),
+        (Path("raw/bootstrap") / RESERVED_CASE_ID,
+         set(OWNER_PROJECTION_RAW_FILES.values())),
+        (Path("raw/bootstrap") / HOME_REJECTION_CASE_ID, {
+            "production-material-scan.json", "machine-enrollment.json",
+        }),
+        (Path("raw/qualification") / QUALIFICATION_REJECTION_CASE_ID,
+         set()),
+    )
+    for relative, entries in expected:
+        descriptor = _directory(root / relative, uid)
+        try:
+            if set(os.listdir(descriptor)) != entries:
+                raise RetentionError(
+                    "retention_qualification_inventory_invalid"
+                )
+        finally:
+            os.close(descriptor)
+    try:
+        next_value = ACCEPTANCE_CLI.next_case(
+            campaign, root / "observations",
+            observation_uid=protected_observation_uid, directory_uid=uid,
+        )
+    except (AcceptanceError, OSError) as error:
+        raise RetentionError(
+            "retention_qualification_observations_invalid"
+        ) from error
+    next_case = next_value.get("case")
+    if (next_value.get("status") != "pending"
+            or not isinstance(next_case, dict)
+            or next_case.get("case_id")
+               != QUALIFICATION_REJECTION_CASE_ID):
+        raise RetentionError("retention_qualification_case_invalid")
+
+    files: list[Any] = ["campaign.json"]
+    for relative, owner, mode in [
+        *[(Path("observations") / name, protected_observation_uid, 0o444)
+          for name in sorted(expected_observations)],
+        *[(Path("raw/bootstrap") / RESERVED_CASE_ID / name, uid, 0o600)
+          for name in sorted(OWNER_PROJECTION_RAW_FILES.values())],
+        *[(Path("raw/bootstrap") / HOME_REJECTION_CASE_ID / name, uid, 0o600)
+          for name in ("machine-enrollment.json", "production-material-scan.json")],
+    ]:
+        raw = _trusted_file_bytes(
+            root / relative, owner, mode=mode, maximum=64 * 1024,
+        )
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetentionError(
+                "retention_qualification_json_invalid"
+            ) from error
+        if not isinstance(value, dict) or canonical(value) != raw:
+            raise RetentionError("retention_qualification_json_invalid")
+        files.append({
+            "path": str(relative),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw), "mode": mode, "uid": owner,
+        })
+    inventory = {
+        "campaign_sha256": hashlib.sha256(campaign_raw).hexdigest(),
+        "directories": [
+            ".", "observations", "raw", "raw/bootstrap",
+            f"raw/bootstrap/{RESERVED_CASE_ID}",
+            f"raw/bootstrap/{HOME_REJECTION_CASE_ID}",
+            "raw/qualification",
+            f"raw/qualification/{QUALIFICATION_REJECTION_CASE_ID}",
+            "raw/recovery",
+        ],
+        "files": [files[0], *sorted(files[1:], key=lambda item: item["path"])],
+    }
+    return campaign, digest(inventory)
+
+
 def validate_empty_layout(root: Path, uid: int, *,
                           reserved_bootstrap: bool = False,
                           owner_projection: bool = False,
                           protected_projection: bool = False,
                           home_rejection: bool = False,
+                          qualification_rejection: bool = False,
                           protected_observation_uid: int = 0,
                           ) -> tuple[dict[str, Any], str]:
     if sum((reserved_bootstrap, owner_projection, protected_projection,
-            home_rejection)) > 1:
+            home_rejection, qualification_rejection)) > 1:
         raise RetentionError("retention_mode_invalid")
     root_descriptor = _directory(root, uid)
     try:
@@ -664,6 +879,10 @@ def validate_empty_layout(root: Path, uid: int, *,
         raise RetentionError("retention_campaign_invalid") from error
     if canonical(campaign) != raw:
         raise RetentionError("retention_campaign_invalid")
+    if qualification_rejection:
+        return _validate_qualification_rejection_layout(
+            root, uid, campaign, raw, protected_observation_uid,
+        )
     projected_observations = {
         f"{RESERVED_CASE_ID}.{kind}.json"
         for kind in OWNER_PROJECTION_KINDS
@@ -942,6 +1161,110 @@ def confirm_home_rejection_failure(
     if canonical(value) != completed.stdout:
         raise RetentionError("retention_home_rejection_diagnostic_failed")
     _validate_home_rejection_diagnostic(value, campaign, os.geteuid())
+    return value
+
+
+def _validate_qualification_rejection_diagnostic(
+        value: Any, campaign: dict[str, Any], uid: int) -> None:
+    if not isinstance(value, dict):
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_invalid"
+        )
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "diagnostic_sha256"
+    }
+    observed_at = value.get("observed_at")
+    if (set(value) != {
+            "schema", "status", "case_id", "error", "source_commit",
+            "observed_at", "execution_path", "supervisor_sha256",
+            "driver_sha256", "reservation_device", "reservation_inode",
+            "reservation_uid", "reservation_gid", "reservation_mode",
+            "diagnostic_sha256",
+        }
+            or value.get("schema")
+               != QUALIFICATION_REJECTION_DIAGNOSTIC_SCHEMA
+            or value.get("status") != "confirmed"
+            or value.get("case_id") != QUALIFICATION_REJECTION_CASE_ID
+            or value.get("error") != QUALIFICATION_REJECTION_EXPECTED_ERROR
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("execution_path")
+               != "direct-research-admin-nonroot"
+            or not isinstance(observed_at, int)
+            or isinstance(observed_at, bool)
+            or observed_at < campaign["created_at"]
+            or observed_at > int(time.time())
+            or any(re.fullmatch(r"[0-9a-f]{64}", str(value.get(name))) is None
+                   for name in ("supervisor_sha256", "driver_sha256"))
+            or not isinstance(value.get("reservation_device"), int)
+            or isinstance(value.get("reservation_device"), bool)
+            or value["reservation_device"] < 0
+            or not isinstance(value.get("reservation_inode"), int)
+            or isinstance(value.get("reservation_inode"), bool)
+            or value["reservation_inode"] <= 0
+            or value.get("reservation_uid") != uid
+            or not isinstance(value.get("reservation_gid"), int)
+            or isinstance(value.get("reservation_gid"), bool)
+            or value["reservation_gid"] < 0
+            or value.get("reservation_mode") != 0o700
+            or value.get("diagnostic_sha256") != digest(unsigned)):
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_invalid"
+        )
+
+
+def confirm_qualification_rejection_failure(
+        campaign: dict[str, Any], observations: Path, now: int
+        ) -> dict[str, Any]:
+    release = (
+        ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+        / campaign["source_commit"]
+    )
+    raw_directory = (
+        observations.parent / "raw/qualification"
+        / QUALIFICATION_REJECTION_CASE_ID
+    )
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3", "-I", "-c",
+                QUALIFICATION_REJECTION_DIAGNOSTIC_PROGRAM,
+                str(release), str(observations.parent / "campaign.json"),
+                str(observations), str(raw_directory), str(now),
+                QUALIFICATION_REJECTION_CASE_ID,
+                QUALIFICATION_REJECTION_EXPECTED_ERROR,
+                QUALIFICATION_REJECTION_DIAGNOSTIC_SCHEMA,
+                str(os.geteuid()),
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, cwd="/", timeout=45, check=False,
+            env={
+                "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_failed"
+        ) from error
+    if (completed.returncode != 0 or completed.stderr
+            or not completed.stdout or len(completed.stdout) > 64 * 1024):
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_failed"
+        )
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_failed"
+        ) from error
+    if canonical(value) != completed.stdout:
+        raise RetentionError(
+            "retention_qualification_rejection_diagnostic_failed"
+        )
+    _validate_qualification_rejection_diagnostic(
+        value, campaign, os.geteuid(),
+    )
     return value
 
 
@@ -1309,6 +1632,31 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
         and value.get("evidence_state")
         == "root-projected-bootstrap-plus-empty-home-reservation"
     )
+    qualification_rejection = (
+        set(value) == common | {
+            "completed_case_count", "completed_observation_count",
+            "reserved_case_id", "expected_error", "evidence_state",
+            "protected_host_state", "protected_research_state",
+            "rejection_diagnostic",
+        }
+        and value.get("schema") == QUALIFICATION_REJECTION_SCHEMA
+        and value.get("reason")
+        == "qualification-control-rejected-after-progressed-campaign"
+        and value.get("completed_case_count")
+        == QUALIFICATION_REJECTION_COMPLETED_CASE_COUNT
+        and value.get("completed_observation_count")
+        == QUALIFICATION_REJECTION_COMPLETED_OBSERVATION_COUNT
+        and value.get("reserved_case_id")
+        == QUALIFICATION_REJECTION_CASE_ID
+        and value.get("expected_error")
+        == QUALIFICATION_REJECTION_EXPECTED_ERROR
+        and value.get("evidence_state")
+        == "validated-prior-observations-plus-empty-qualification-reservation"
+        and value.get("protected_host_state")
+        == "retained-in-place-by-campaign-id"
+        and value.get("protected_research_state")
+        == "retained-in-place-by-campaign-id"
+    )
     if reserved:
         _validate_reserved_diagnostic(
             value.get("rejection_diagnostic"), {
@@ -1339,9 +1687,17 @@ def _trusted_plan(path: Path, uid: int) -> dict[str, Any]:
             },
             value.get("operator_uid"),
         )
+    if qualification_rejection:
+        _validate_qualification_rejection_diagnostic(
+            value.get("rejection_diagnostic"), {
+                "source_commit": value.get("campaign_source_commit"),
+                "created_at": 0,
+            }, value.get("operator_uid"),
+        )
     if (canonical(value) != data
             or not (ordinary or reserved or owner_projection
-                    or protected_projection or home_rejection)
+                    or protected_projection or home_rejection
+                    or qualification_rejection)
             or value.get("status") != "prepared"
             or not isinstance(value.get("observed_at"), int)
             or isinstance(value.get("observed_at"), bool)
@@ -1522,9 +1878,10 @@ def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
                            reserved_bootstrap: bool = False,
                            owner_projection: bool = False,
                            protected_projection: bool = False,
-                           home_rejection: bool = False) -> None:
+                           home_rejection: bool = False,
+                           qualification_rejection: bool = False) -> None:
     if sum((reserved_bootstrap, owner_projection, protected_projection,
-            home_rejection)) > 1:
+            home_rejection, qualification_rejection)) > 1:
         raise RetentionError("retention_mode_invalid")
     if reserved_bootstrap:
         try:
@@ -1589,6 +1946,31 @@ def _validate_plan_binding(plan: dict[str, Any], campaign: dict[str, Any],
                 == HOME_REJECTION_EXPECTED_ERROR
                 and plan.get("evidence_state")
                 == "root-projected-bootstrap-plus-empty-home-reservation"
+            )
+    elif qualification_rejection:
+        try:
+            _validate_qualification_rejection_diagnostic(
+                plan.get("rejection_diagnostic"), campaign, uid,
+            )
+        except RetentionError:
+            mode_valid = False
+        else:
+            mode_valid = (
+                plan.get("schema") == QUALIFICATION_REJECTION_SCHEMA
+                and plan.get("completed_case_count")
+                == QUALIFICATION_REJECTION_COMPLETED_CASE_COUNT
+                and plan.get("completed_observation_count")
+                == QUALIFICATION_REJECTION_COMPLETED_OBSERVATION_COUNT
+                and plan.get("reserved_case_id")
+                == QUALIFICATION_REJECTION_CASE_ID
+                and plan.get("expected_error")
+                == QUALIFICATION_REJECTION_EXPECTED_ERROR
+                and plan.get("evidence_state")
+                == "validated-prior-observations-plus-empty-qualification-reservation"
+                and plan.get("protected_host_state")
+                == "retained-in-place-by-campaign-id"
+                and plan.get("protected_research_state")
+                == "retained-in-place-by-campaign-id"
             )
     else:
         mode_valid = plan.get("schema") == SCHEMA
@@ -1671,9 +2053,14 @@ def _result(campaign: dict[str, Any], replacement: str,
     owner_projection = plan.get("schema") == OWNER_PROJECTION_SCHEMA
     protected_projection = plan.get("schema") == PROTECTED_PROJECTION_SCHEMA
     home_rejection = plan.get("schema") == HOME_REJECTION_SCHEMA
+    qualification_rejection = (
+        plan.get("schema") == QUALIFICATION_REJECTION_SCHEMA
+    )
     value = {
         "schema": (
             HOME_REJECTION_RESULT_SCHEMA if home_rejection
+            else QUALIFICATION_REJECTION_RESULT_SCHEMA
+            if qualification_rejection
             else PROTECTED_PROJECTION_RESULT_SCHEMA if protected_projection
             else OWNER_PROJECTION_RESULT_SCHEMA if owner_projection
             else RESERVED_RESULT_SCHEMA if reserved else RESULT_SCHEMA
@@ -1724,6 +2111,21 @@ def _result(campaign: dict[str, Any], replacement: str,
             "diagnostic_sha256":
                 plan["rejection_diagnostic"]["diagnostic_sha256"],
         })
+    if qualification_rejection:
+        value.update({
+            "completed_case_count":
+                QUALIFICATION_REJECTION_COMPLETED_CASE_COUNT,
+            "completed_observation_count":
+                QUALIFICATION_REJECTION_COMPLETED_OBSERVATION_COUNT,
+            "reserved_case_id": QUALIFICATION_REJECTION_CASE_ID,
+            "expected_error": QUALIFICATION_REJECTION_EXPECTED_ERROR,
+            "evidence_state":
+                "validated-prior-observations-plus-empty-qualification-reservation",
+            "protected_host_state": "retained-in-place-by-campaign-id",
+            "protected_research_state": "retained-in-place-by-campaign-id",
+            "diagnostic_sha256":
+                plan["rejection_diagnostic"]["diagnostic_sha256"],
+        })
     value["result_sha256"] = digest(value)
     return value
 
@@ -1735,6 +2137,7 @@ def verify_retained(*, expected_campaign_id: str,
                     owner_projection: bool = False,
                     protected_projection: bool = False,
                     home_rejection: bool = False,
+                    qualification_rejection: bool = False,
                     protected_observation_uid: int = 0,
                     home: Path | None = None,
                     source_probe: Callable[[], tuple[str, dict[str, str]]] | None = None,
@@ -1754,6 +2157,7 @@ def verify_retained(*, expected_campaign_id: str,
         owner_projection=owner_projection,
         protected_projection=protected_projection,
         home_rejection=home_rejection,
+        qualification_rejection=qualification_rejection,
         protected_observation_uid=protected_observation_uid,
     )
     if (campaign["campaign_id"] != expected_campaign_id
@@ -1780,6 +2184,7 @@ def verify_retained(*, expected_campaign_id: str,
         owner_projection=owner_projection,
         protected_projection=protected_projection,
         home_rejection=home_rejection,
+        qualification_rejection=qualification_rejection,
     )
     supersessions = _supersession_chain(
         destination, uid, plan, campaign, inventory_sha256,
@@ -1844,12 +2249,16 @@ def supersede_retained(*, expected_campaign_id: str,
                 plan.get("schema") == PROTECTED_PROJECTION_SCHEMA
             )
             home_rejection = plan.get("schema") == HOME_REJECTION_SCHEMA
+            qualification_rejection = (
+                plan.get("schema") == QUALIFICATION_REJECTION_SCHEMA
+            )
             campaign, inventory_sha256 = validate_empty_layout(
                 destination, uid,
                 reserved_bootstrap=reserved_bootstrap,
                 owner_projection=owner_projection,
                 protected_projection=protected_projection,
                 home_rejection=home_rejection,
+                qualification_rejection=qualification_rejection,
                 protected_observation_uid=protected_observation_uid,
             )
             if (campaign["campaign_id"] != expected_campaign_id
@@ -1861,6 +2270,7 @@ def supersede_retained(*, expected_campaign_id: str,
                 owner_projection=owner_projection,
                 protected_projection=protected_projection,
                 home_rejection=home_rejection,
+                qualification_rejection=qualification_rejection,
             )
             supersessions = _supersession_chain(
                 destination, uid, plan, campaign, inventory_sha256,
@@ -1951,6 +2361,7 @@ def supersede_retained(*, expected_campaign_id: str,
                 owner_projection=owner_projection,
                 protected_projection=protected_projection,
                 home_rejection=home_rejection,
+                qualification_rejection=qualification_rejection,
                 protected_observation_uid=protected_observation_uid,
             )
             retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
@@ -1982,6 +2393,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
            owner_projection: bool = False,
            protected_projection: bool = False,
            home_rejection: bool = False,
+           qualification_rejection: bool = False,
            protected_observation_uid: int = 0,
            home: Path | None = None,
            rename: Callable[[int, str, int, str], None] = _rename_exclusive,
@@ -1997,13 +2409,18 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
            home_rejection_probe: Callable[
                [dict[str, Any], Path, int], dict[str, Any]
            ] | None = None,
+           qualification_rejection_probe: Callable[
+               [dict[str, Any], Path, int], dict[str, Any]
+           ] | None = None,
            predecessor_probe: Callable[[str], str] | None = None,
            ) -> dict[str, Any]:
     if sum((reserved_bootstrap, owner_projection, protected_projection,
-            home_rejection)) > 1:
+            home_rejection, qualification_rejection)) > 1:
         raise RetentionError("retention_mode_invalid")
     expected_acknowledgement = (
         HOME_REJECTION_ACKNOWLEDGEMENT if home_rejection
+        else QUALIFICATION_REJECTION_ACKNOWLEDGEMENT
+        if qualification_rejection
         else PROTECTED_PROJECTION_ACKNOWLEDGEMENT if protected_projection
         else OWNER_PROJECTION_ACKNOWLEDGEMENT if owner_projection
         else RESERVED_ACKNOWLEDGEMENT if reserved_bootstrap
@@ -2021,6 +2438,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
         owner_projection=owner_projection,
         protected_projection=protected_projection,
         home_rejection=home_rejection,
+        qualification_rejection=qualification_rejection,
         protected_observation_uid=protected_observation_uid,
     )
     if (campaign["campaign_id"] != expected_campaign_id
@@ -2126,9 +2544,23 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             _validate_home_rejection_diagnostic(
                 rejection_diagnostic, campaign, uid,
             )
+        if qualification_rejection and not os.path.lexists(plan_path):
+            probe = (
+                confirm_qualification_rejection_failure
+                if qualification_rejection_probe is None
+                else qualification_rejection_probe
+            )
+            rejection_diagnostic = probe(
+                campaign, root / "observations", observed_at,
+            )
+            _validate_qualification_rejection_diagnostic(
+                rejection_diagnostic, campaign, uid,
+            )
         plan = {
             "schema": (
                 HOME_REJECTION_SCHEMA if home_rejection
+                else QUALIFICATION_REJECTION_SCHEMA
+                if qualification_rejection
                 else PROTECTED_PROJECTION_SCHEMA if protected_projection
                 else OWNER_PROJECTION_SCHEMA if owner_projection
                 else RESERVED_SCHEMA if reserved_bootstrap else SCHEMA
@@ -2144,6 +2576,8 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             "reason": (
                 "collector-rejected-after-projected-bootstrap-and-empty-home-reservation"
                 if home_rejection
+                else "qualification-control-rejected-after-progressed-campaign"
+                if qualification_rejection
                 else "protected-projector-rejected-before-output"
                 if protected_projection
                 else "collector-projected-owner-output" if owner_projection
@@ -2184,6 +2618,20 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
                     "root-projected-bootstrap-plus-empty-home-reservation",
                 "rejection_diagnostic": rejection_diagnostic,
             })
+        if qualification_rejection:
+            plan.update({
+                "completed_case_count":
+                    QUALIFICATION_REJECTION_COMPLETED_CASE_COUNT,
+                "completed_observation_count":
+                    QUALIFICATION_REJECTION_COMPLETED_OBSERVATION_COUNT,
+                "reserved_case_id": QUALIFICATION_REJECTION_CASE_ID,
+                "expected_error": QUALIFICATION_REJECTION_EXPECTED_ERROR,
+                "evidence_state":
+                    "validated-prior-observations-plus-empty-qualification-reservation",
+                "protected_host_state": "retained-in-place-by-campaign-id",
+                "protected_research_state": "retained-in-place-by-campaign-id",
+                "rejection_diagnostic": rejection_diagnostic,
+            })
         plan["plan_sha256"] = digest(plan)
         if os.path.lexists(plan_path):
             plan = _trusted_plan(plan_path, uid)
@@ -2193,6 +2641,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
                 owner_projection=owner_projection,
                 protected_projection=protected_projection,
                 home_rejection=home_rejection,
+                qualification_rejection=qualification_rejection,
             )
         else:
             if not _remote_tips_for(replacement, remote_tips):
@@ -2276,6 +2725,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
         owner_projection=owner_projection,
         protected_projection=protected_projection,
         home_rejection=home_rejection,
+        qualification_rejection=qualification_rejection,
         protected_observation_uid=protected_observation_uid,
     )
     retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
@@ -2299,6 +2749,7 @@ def parser() -> argparse.ArgumentParser:
         "retain-owner-projected-bootstrap",
         "retain-protected-projection-rejection",
         "retain-bootstrap-home-rejection",
+        "retain-qualification-control-rejection",
     ):
         command = commands.add_parser(name)
         command.add_argument("--expected-campaign-id", required=True)
@@ -2308,6 +2759,8 @@ def parser() -> argparse.ArgumentParser:
             if name == "retain-protected-projection-rejection"
             else HOME_REJECTION_ACKNOWLEDGEMENT
             if name == "retain-bootstrap-home-rejection"
+            else QUALIFICATION_REJECTION_ACKNOWLEDGEMENT
+            if name == "retain-qualification-control-rejection"
             else OWNER_PROJECTION_ACKNOWLEDGEMENT
             if name == "retain-owner-projected-bootstrap"
             else RESERVED_ACKNOWLEDGEMENT
@@ -2322,6 +2775,7 @@ def parser() -> argparse.ArgumentParser:
         "verify-owner-projected-bootstrap",
         "verify-protected-projection-rejection",
         "verify-bootstrap-home-rejection",
+        "verify-qualification-control-rejection",
     ):
         command = commands.add_parser(name)
         command.add_argument("--expected-campaign-id", required=True)
@@ -2359,6 +2813,9 @@ def main(arguments: list[str] | None = None) -> int:
         "protected-projection-rejection"
     )
     home_rejection = args.command.endswith("bootstrap-home-rejection")
+    qualification_rejection = args.command.endswith(
+        "qualification-control-rejection"
+    )
     if args.command.startswith("retain"):
         result = retain(
             expected_campaign_id=args.expected_campaign_id,
@@ -2368,6 +2825,7 @@ def main(arguments: list[str] | None = None) -> int:
             owner_projection=owner_projection,
             protected_projection=protected_projection,
             home_rejection=home_rejection,
+            qualification_rejection=qualification_rejection,
         )
     else:
         result = verify_retained(
@@ -2378,6 +2836,7 @@ def main(arguments: list[str] | None = None) -> int:
             owner_projection=owner_projection,
             protected_projection=protected_projection,
             home_rejection=home_rejection,
+            qualification_rejection=qualification_rejection,
         )
     sys.stdout.buffer.write(canonical(result))
     return 0

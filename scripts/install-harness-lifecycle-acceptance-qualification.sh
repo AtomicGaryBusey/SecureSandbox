@@ -4,10 +4,19 @@ set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
 campaign_id="${1:-}"
 source_commit="${2:-}"
+case_id="${3:-}"
 [[ "$campaign_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
   || { echo "Invalid campaign identity." >&2; exit 2; }
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "Invalid source commit." >&2; exit 2; }
+case "$case_id" in
+  qualification-no-preexecution|qualification-zero-production-authority|\
+  qualification-deny-updater|qualification-deny-login|\
+  qualification-deny-model-switch|qualification-deny-tool-switch|\
+  qualification-deny-extension|qualification-deny-child-process|\
+  qualification-deny-credential|qualification-deny-network) ;;
+  *) echo "Invalid qualification case." >&2; exit 2 ;;
+esac
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id \
    && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json \
    && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] \
@@ -141,4 +150,8 @@ else
 fi
 
 "$release/scripts/harness-lifecycle-acceptance-qualification.py" --help >/dev/null
-echo "harness-lifecycle-acceptance-qualification:installed:$campaign_id:$source_commit"
+/usr/bin/python3 -I \
+  "$release/scripts/harness-lifecycle-acceptance-qualification.py" execute \
+  --campaign "$campaign/campaign.json" \
+  --case "$case_id" \
+  --output-root "$campaign/qualification-fixtures"

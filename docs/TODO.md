@@ -581,15 +581,19 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The historical `35dd424` campaign was retained without deletion. The current
-  live Neo campaign is abbreviated `d5322a07...`, bound to exact public source
-  abbreviated `f447613...`, with zero raw
-  reservations and zero observations; its next case remains
-  `bootstrap-clean-install`. Its protected ten-driver release is installed and
-  ready, and bounded recovery proves all three VMs stopped, Gateway `net0`
-  disconnected, and Parallels GUI/runtime absent. Preserve and retain it
-  through the no-delete path before installing or initializing a replacement;
-  do not replay its known-broken bootstrap. Before collecting, publish and
+  The active Neo campaign is abbreviated `4bbd26aa...`, bound to exact public
+  source abbreviated `10fcd0e...`. It has completed 30 cases and
+  retains 34 independently validated root-owned mode-0444 observations. Its
+  exact next case is `qualification-no-preexecution`; that case has only an
+  empty raw reservation after the historical direct-admin execution path
+  correctly failed against the Research driver's root requirement. Preserve
+  it through the explicit progressed-campaign no-delete retention and
+  independent verification path after the authenticated-control repair is
+  published to both remotes. Then install the exact successor release,
+  initialize a fresh campaign, and replay from bootstrap in fixed order. Do
+  not retry, delete, copy forward, reconnect Shared, or relabel the failed
+  control path as qualification evidence. Historical campaign narrative
+  follows: before collecting, publish and
   physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also

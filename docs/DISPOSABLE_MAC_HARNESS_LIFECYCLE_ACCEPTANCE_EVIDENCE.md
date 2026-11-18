@@ -2,12 +2,56 @@
 
 Status: every superseded or failed exact-commit campaign on the disposable Neo
 is retained without deletion, including historical protected collections and
-their unchanged raw bytes. The live `35dd424` campaign has zero observations,
-zero raw reservations, and exact next case `bootstrap-clean-install`, but is
-older than the current clean `d64fa0c` checkout and therefore cannot collect.
-Its first no-delete retention attempt rejected before plan publication or
-rename; the reviewed repair remains to be published and replayed. No
-acceptance verdict has been issued.
+their unchanged raw bytes. The active campaign is
+abbreviated `4bbd26aa...`, bound to source abbreviated `10fcd0e...`. It has
+completed 30 ordered
+cases and retains 34 root-owned, mode-0444 observations. Its exact next case is
+`qualification-no-preexecution`. No complete acceptance verdict has been
+issued.
+
+## Current physical checkpoint — 2026-11-18
+
+The active campaign physically completed both bootstrap cases, all sixteen
+provenance cases, and all twelve archive cases. Independent inventory readback
+found exactly 34 observations, each root-owned, mode 0444, single-linked, and
+accepted by the production ordering validator. Gateway and Research remain
+running, Target remains stopped, and Shared remains disconnected. Those states
+must not be changed merely to simplify source repair.
+
+The first qualification attempt reserved only the private empty
+`raw/qualification/qualification-no-preexecution` directory and then failed
+closed with `supervisor_command_rejected`. It created no qualification
+observation. Source and installed-release analysis proved the historical Host
+supervisor deployed the root-only Research driver through authenticated
+control, but then attempted to execute that driver through the unprivileged
+`sandbox-research-admin` SSH identity. The Research driver correctly requires
+effective UID zero, and the admin identity has no passwordless sudo. This is a
+control-path defect, not a failed qualification outcome, and the case must not
+be retried under its old exact source.
+
+The repair makes authenticated privileged control the sole deployment and
+execution boundary. The Host sends the exact campaign, source, fixed
+qualification case, installer, and payload closure in one authenticated deploy
+request. The root-side installer validates the case against the ten fixed
+qualification IDs, revalidates and installs the exact release, and immediately
+executes the protected driver as root. Direct Research-admin execution is
+removed. Focused qualification and retention tests pass, including a regression
+that makes any direct command path fail.
+
+Because an exact-source campaign cannot consume that repair, the existing
+atomic no-overwrite retention tool now has a distinct progressed-campaign
+ceremony. It requires the exact 30-case/34-observation prefix, revalidates the
+production next-case result, requires every prior observation to remain
+root-owned mode 0444, checks the two historical bootstrap raw bundles, and
+requires the qualification reservation to remain empty. An isolated diagnostic
+loads the exact protected predecessor, proves its historical direct-admin path
+and root-only driver requirement, and binds the reservation identity and source
+hashes. The plan records the Host and Research campaign-keyed protected state
+as retained in place; the retention operation does not delete, overwrite, or
+reuse either protected state tree. The operator campaign directory moves
+atomically without overwrite to its UUID under the retained-campaign root and
+has a separate read-only verifier. Publication, physical retention, successor
+release installation, and replay in a fresh campaign remain pending.
 
 The exact `35dd424` protected ten-driver release is installed root-owned on the
 Neo. Its complete manifest passed independent readiness with ten available

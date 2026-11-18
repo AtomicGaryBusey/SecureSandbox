@@ -1,9 +1,11 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
-Status: active only on the dedicated disposable Mac. All ten driver classes
-are source-complete, source-tested, and an exact protected release has been
-installed there. Physical bootstrap remains fenced while the isolated Host
-control-plane repair below is reviewed, published, installed, and proved.
+Status: active only on the dedicated disposable Mac. The live campaign has
+completed 30 cases and 34 protected observations; its first qualification
+attempt failed closed before an observation because the historical supervisor
+used an unprivileged direct-SSH execution path. Source repair and a no-delete
+progressed-campaign retention ceremony are under review. No operator prompt is
+currently runnable.
 
 ## Current-Mac gate
 
@@ -16,6 +18,35 @@ No Touch ID prompt or root-password prompt is currently runnable on the
 development Mac.
 
 ## Current Neo resumption
+
+The current campaign is abbreviated `4bbd26aa...`, bound to exact source
+abbreviated `10fcd0e...`. It retains 30 completed cases,
+34 root-owned mode-0444 observations, and an empty private reservation for the
+exact next case `qualification-no-preexecution`. Gateway and Research are
+running, Target is stopped, and Shared is disconnected. Preserve all of that
+state. Do not rerun qualification, delete the reservation, reuse the campaign,
+stop the stack, or reconnect Shared while the repair is unpublished.
+
+After the repaired descendant is reviewed, committed, published to both
+authorized `public-release` tips, and installed as the exact protected
+ten-driver release, run only the explicit
+`retain-qualification-control-rejection` ceremony with the old campaign UUID,
+old source commit, and its literal acknowledgement. Then run
+`verify-qualification-control-rejection` independently. The ceremony must
+validate the exact 30-case/34-observation prefix, immutable observation modes,
+historical raw bundles, empty qualification reservation, and predecessor
+control-path diagnostic before its exclusive atomic rename. It leaves the
+campaign-keyed Host and Research protected state in place. Any ambiguity stops
+the sequence; never rerun retention speculatively.
+
+Only after verification proves the live campaign pathname absent may a fresh
+campaign be initialized at the published repair commit. Replay must begin at
+bootstrap and proceed in fixed order; the prior 34 observations cannot be
+copied forward. Qualification execution must then traverse authenticated
+privileged control and return a root-produced Research result before Host
+projection.
+
+### Historical isolated-control checkpoint
 
 The Neo currently holds the empty campaign abbreviated `d5322a07...`, bound
 to exact public source abbreviated `f447613...`, with zero raw reservations and

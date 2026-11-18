@@ -571,6 +571,64 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         path.chmod(0o600)
         return plan
 
+    def seed_qualification_rejection(self) -> dict:
+        for case in retention.CASES:
+            if case.case_id == retention.QUALIFICATION_REJECTION_CASE_ID:
+                break
+            for kind in case.evidence_kinds:
+                path = self.root / "observations" / f"{case.case_id}.{kind}.json"
+                path.write_bytes(acceptance.canonical({
+                    "case_id": case.case_id, "kind": kind,
+                }))
+                path.chmod(0o444)
+        first = self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID
+        first.mkdir(mode=0o700)
+        for name in retention.OWNER_PROJECTION_RAW_FILES.values():
+            path = first / name
+            path.write_bytes(acceptance.canonical({"name": name}))
+            path.chmod(0o600)
+        second = self.root / "raw/bootstrap" / retention.HOME_REJECTION_CASE_ID
+        second.mkdir(mode=0o700)
+        for name in ("production-material-scan.json", "machine-enrollment.json"):
+            path = second / name
+            path.write_bytes(acceptance.canonical({"name": name}))
+            path.chmod(0o600)
+        reservation = (
+            self.root / "raw/qualification"
+            / retention.QUALIFICATION_REJECTION_CASE_ID
+        )
+        reservation.mkdir(mode=0o700)
+        info = reservation.stat()
+        now = int(time.time())
+        diagnostic = {
+            "schema": retention.QUALIFICATION_REJECTION_DIAGNOSTIC_SCHEMA,
+            "status": "confirmed",
+            "case_id": retention.QUALIFICATION_REJECTION_CASE_ID,
+            "error": retention.QUALIFICATION_REJECTION_EXPECTED_ERROR,
+            "source_commit": self.campaign["source_commit"],
+            "observed_at": now,
+            "execution_path": "direct-research-admin-nonroot",
+            "supervisor_sha256": "2" * 64,
+            "driver_sha256": "3" * 64,
+            "reservation_device": info.st_dev,
+            "reservation_inode": info.st_ino,
+            "reservation_uid": os.geteuid(),
+            "reservation_gid": info.st_gid,
+            "reservation_mode": 0o700,
+        }
+        diagnostic["diagnostic_sha256"] = acceptance.digest(diagnostic)
+        return diagnostic
+
+    @staticmethod
+    def qualification_next() -> dict:
+        case = acceptance.CASE_BY_ID[
+            retention.QUALIFICATION_REJECTION_CASE_ID
+        ]
+        return {
+            "status": "pending",
+            "case": acceptance.case_record(case),
+        }
+
     def seed_supersession(self, prior: dict, replacement: str,
                            *, prior_authority: str | None = None) -> dict:
         supersession = {
@@ -629,6 +687,121 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
+
+    def test_progressed_qualification_rejection_is_retained_without_deletion(self):
+        diagnostic = self.seed_qualification_rejection()
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "next_case",
+                return_value=self.qualification_next()):
+            result = self.execute(
+                acknowledgement=retention.QUALIFICATION_REJECTION_ACKNOWLEDGEMENT,
+                qualification_rejection=True,
+                protected_observation_uid=os.geteuid(),
+                qualification_rejection_probe=lambda campaign, observations, now: diagnostic,
+            )
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        self.assertFalse(self.root.exists())
+        self.assertTrue((
+            destination / "raw/qualification"
+            / retention.QUALIFICATION_REJECTION_CASE_ID
+        ).is_dir())
+        self.assertEqual(result["schema"],
+                         retention.QUALIFICATION_REJECTION_RESULT_SCHEMA)
+        self.assertEqual(result["completed_case_count"], 30)
+        self.assertEqual(result["completed_observation_count"], 34)
+        self.assertEqual(result["diagnostic_sha256"],
+                         diagnostic["diagnostic_sha256"])
+        with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
+                mock.patch.object(retention, "acl_absent", return_value=True), \
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""), \
+                mock.patch.object(retention.ACCEPTANCE_CLI, "next_case",
+                                  return_value=self.qualification_next()):
+            verified = retention.verify_retained(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                expected_replacement_commit="b" * 40,
+                qualification_rejection=True,
+                protected_observation_uid=os.geteuid(),
+                home=self.home,
+                source_probe=lambda: ("b" * 40, {"origin": "b" * 40}),
+                identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
+            )
+        self.assertEqual(verified, result)
+
+    def test_qualification_rejection_refuses_nonempty_reservation(self):
+        self.seed_qualification_rejection()
+        reservation = (
+            self.root / "raw/qualification"
+            / retention.QUALIFICATION_REJECTION_CASE_ID / "unexpected"
+        )
+        reservation.write_bytes(b"unexpected")
+        with mock.patch.object(retention, "acl_absent", return_value=True), \
+                mock.patch.object(retention.ACCEPTANCE_CLI, "next_case",
+                                  return_value=self.qualification_next()), \
+                self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_qualification_inventory_invalid",
+                ):
+            retention.validate_empty_layout(
+                self.root, os.geteuid(), qualification_rejection=True,
+                protected_observation_uid=os.geteuid(),
+            )
+
+    def test_qualification_rejection_refuses_mutable_prior_observation(self):
+        self.seed_qualification_rejection()
+        observation = next((self.root / "observations").iterdir())
+        observation.chmod(0o600)
+        with mock.patch.object(retention, "acl_absent", return_value=True), \
+                mock.patch.object(retention.ACCEPTANCE_CLI, "next_case",
+                                  return_value=self.qualification_next()), \
+                self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_evidence_file_untrusted",
+                ):
+            retention.validate_empty_layout(
+                self.root, os.geteuid(), qualification_rejection=True,
+                protected_observation_uid=os.geteuid(),
+            )
+
+    def test_qualification_rejection_refuses_diagnostic_path_substitution(self):
+        diagnostic = self.seed_qualification_rejection()
+        diagnostic["execution_path"] = "authenticated-control-root"
+        diagnostic["diagnostic_sha256"] = acceptance.digest({
+            key: value for key, value in diagnostic.items()
+            if key != "diagnostic_sha256"
+        })
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_qualification_rejection_diagnostic_invalid",
+                ):
+            retention._validate_qualification_rejection_diagnostic(
+                diagnostic, self.campaign, os.geteuid(),
+            )
+
+    def test_qualification_rejection_commands_are_explicit(self):
+        retain_args = retention.parser().parse_args([
+            "retain-qualification-control-rejection",
+            "--expected-campaign-id", self.campaign["campaign_id"],
+            "--expected-source-commit", self.campaign["source_commit"],
+            "--acknowledge",
+            retention.QUALIFICATION_REJECTION_ACKNOWLEDGEMENT,
+        ])
+        verify_args = retention.parser().parse_args([
+            "verify-qualification-control-rejection",
+            "--expected-campaign-id", self.campaign["campaign_id"],
+            "--expected-source-commit", self.campaign["source_commit"],
+            "--expected-replacement-commit", "b" * 40,
+        ])
+        self.assertEqual(
+            retain_args.command, "retain-qualification-control-rejection",
+        )
+        self.assertEqual(
+            verify_args.command, "verify-qualification-control-rejection",
+        )
 
     def supersede_retained(self, replacement="c" * 40, **overrides):
         arguments = {

@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "shared"))
@@ -208,6 +209,71 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     supervisor.QualificationSupervisorError, "material_present"):
                 supervisor.production_scan(home, {"OPENAI_API_KEY": "set"}, absent)
+
+    def test_supervisor_executes_only_through_authenticated_control(self):
+        campaign = self.campaign()
+        case_id = "qualification-no-preexecution"
+        observed: dict[str, object] = {}
+
+        def staged(_release: Path, _campaign: dict, stage: Path) -> list[Path]:
+            files = [
+                stage / "install-harness-lifecycle-acceptance-qualification.sh",
+                stage / "campaign.json",
+            ]
+            for path in files:
+                path.write_bytes(b"fixture")
+                path.chmod(0o600)
+            return files
+
+        expected = {"schema": qualification.RESULT_SCHEMA, "status": "passed"}
+
+        def controlled(argv: list[str], timeout: int) -> dict:
+            observed["argv"] = argv
+            observed["timeout"] = timeout
+            return expected
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(supervisor, "stage_release", side_effect=staged), \
+                mock.patch.object(supervisor.COMMON, "prerequisite"), \
+                mock.patch.object(
+                    supervisor.COMMON, "json_command", side_effect=controlled,
+                ), \
+                mock.patch.object(
+                    supervisor.COMMON, "command",
+                    side_effect=AssertionError("direct command path forbidden"),
+                ):
+            destination = Path(directory)
+            value = supervisor.deploy_and_run(
+                Path("/protected/release"), campaign, destination, case_id,
+            )
+
+        self.assertIs(value, expected)
+        argv = observed["argv"]
+        self.assertIsInstance(argv, list)
+        self.assertEqual(argv[:6], [
+            str(supervisor.COMMON.CONTROL_CLIENT), "client", "--ssh-config",
+            str(supervisor.COMMON.SSH_CONFIG), supervisor.COMMON.RESEARCH_CONTROL,
+            "deploy",
+        ])
+        self.assertEqual(argv[6:10], [
+            "install-harness-lifecycle-acceptance-qualification.sh",
+            campaign["campaign_id"], campaign["source_commit"], case_id,
+        ])
+        self.assertNotIn(supervisor.COMMON.RESEARCH_ADMIN, argv)
+        self.assertEqual(observed["timeout"], 240)
+
+    def test_research_installer_executes_only_fixed_qualification_case(self):
+        source = (ROOT / "scripts/install-harness-lifecycle-acceptance-qualification.sh").read_text()
+        self.assertIn('case "$case_id" in', source)
+        for case in acceptance.CASES:
+            if case.category == "qualification":
+                self.assertIn(case.case_id, source)
+        self.assertIn('/usr/bin/python3 -I', source)
+        self.assertIn('--output-root "$campaign/qualification-fixtures"', source)
+        supervisor_source = (
+            ROOT / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py"
+        ).read_text()
+        self.assertNotIn("COMMON.RESEARCH_ADMIN", supervisor_source)
 
     def test_projector_revalidates_complete_mixed_authority_raw_set(self):
         campaign = self.campaign()

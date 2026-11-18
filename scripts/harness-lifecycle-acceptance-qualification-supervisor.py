@@ -186,7 +186,8 @@ def stage_release(release: Path, campaign: dict[str, Any], stage: Path) -> list[
     return files
 
 
-def deploy(release: Path, campaign: dict[str, Any], destination: Path) -> None:
+def deploy_and_run(release: Path, campaign: dict[str, Any], destination: Path,
+                   case_id: str) -> dict[str, Any]:
     for path in (COMMON.CONTROL_CLIENT, COMMON.SSH_CONFIG):
         COMMON.prerequisite(path, executable=path != COMMON.SSH_CONFIG)
     with tempfile.TemporaryDirectory(
@@ -199,28 +200,11 @@ def deploy(release: Path, campaign: dict[str, Any], destination: Path) -> None:
             str(COMMON.CONTROL_CLIENT), "client", "--ssh-config",
             str(COMMON.SSH_CONFIG), COMMON.RESEARCH_CONTROL, "deploy",
             installer.name, campaign["campaign_id"], campaign["source_commit"],
+            case_id,
         ]
         for path in files:
             argv.extend(("--file", str(path)))
-        result = COMMON.command(argv, timeout=120)
-        expected = (f"harness-lifecycle-acceptance-qualification:installed:"
-                    f"{campaign['campaign_id']}:{campaign['source_commit']}\n").encode()
-        if result.stdout != expected:
-            raise QualificationSupervisorError("qualification_deployment_invalid")
-
-
-def run_research(campaign: dict[str, Any], case_id: str) -> dict[str, Any]:
-    release = REMOTE_RELEASE_ROOT / campaign["source_commit"]
-    campaign_root = REMOTE_STATE_ROOT / campaign["campaign_id"]
-    result = COMMON.json_command([
-        str(COMMON.SSH), "-F", str(COMMON.SSH_CONFIG), COMMON.RESEARCH_ADMIN,
-        str(QUALIFICATION.PYTHON),
-        str(release / "scripts/harness-lifecycle-acceptance-qualification.py"),
-        "execute", "--campaign", str(campaign_root / "campaign.json"),
-        "--case", case_id, "--output-root",
-        str(campaign_root / "qualification-fixtures"),
-    ], timeout=180)
-    return result
+        return COMMON.json_command(argv, timeout=240)
 
 
 def protected_fixture_state(release: Path, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -328,8 +312,9 @@ def collect(campaign_path: Path, observations: Path, raw_root: Path,
         home or Path.home(), environment if environment is not None else dict(os.environ),
         runner,
     )
-    deploy(protected_release, campaign, destination)
-    research = run_research(campaign, case_id)
+    research = deploy_and_run(
+        protected_release, campaign, destination, case_id,
+    )
     try:
         QUALIFICATION.validate_result(research, campaign, case)
     except QUALIFICATION.QualificationDriverError as error:

@@ -890,3 +890,38 @@ until Gateway's unchanged protected proxy authenticates, then terminates that
 exact PID and continues under the existing lock. It does not weaken address,
 topology, VM-identity, or SSH-host-key verification. Campaign `dc6e469a...`
 remains empty; this is defect evidence, not an accepted observation.
+
+## Pre-close-control physical replay and protected bootstrap evidence
+
+The exact pre-close-control source was published to both authorized remotes,
+installed as the protected ten-driver release, and bound into a fresh
+campaign. The first
+all-stopped bootstrap transition exhausted its 120 probes just before Gateway
+control became healthy. Independent readback proved direct Gateway TCP live,
+then the fixed Parallels IPv4 and protected control appeared with the already
+bound GUI still open. Re-entry from that exact safe intermediate state
+succeeded: Gateway and Research were running and reachable, Target remained
+stopped, Shared was disconnected, and the transition emitted its canonical
+verified record. This demonstrates a bounded-window defect, not permission to
+weaken topology, address, VM-identity, SSH-host-key, or control attestation.
+
+The one-shot `bootstrap-clean-install` collector then succeeded. Its raw bundle
+and the root protected projector's canonical projection were retained by
+digest, and the projector published three root-owned mode-0444 observations. A
+diagnostic wrapper
+incorrectly expected group `wheel` rather than the contractually valid group
+`staff` and exited nonzero after projection; the immutable projected bytes and
+production suite validation independently advanced the next case to
+`bootstrap-no-production-material`.
+
+That next collector reserved its exact empty raw directory, then rejected
+before collection with `bootstrap_home_untrusted`: the operator home was an
+operator-owned directory at exact mode 0750. No evidence was removed or
+rewritten. Verified `labctl stop` returned Gateway, Research, and Target to
+stopped, kept Shared disconnected, and closed Parallels. The source repair
+adds a dedicated no-delete retention ceremony for exactly this mixed
+projected-plus-empty-reservation layout, moves the mode-0700 home requirement
+into morning preflight before campaign initialization, and extends the same
+fixed Gateway probe to 240 attempts. Until that descendant is published,
+installed, and the retained campaign independently verifies, no new campaign
+or accepted verdict is claimed.

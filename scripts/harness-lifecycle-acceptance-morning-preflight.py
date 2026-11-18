@@ -369,6 +369,15 @@ def production_material_absent(
     runner: Callable[..., Any] = subprocess.run,
     expected_uid: int | None = None,
 ) -> str:
+    try:
+        home_info = home.lstat()
+    except OSError as error:
+        raise PreflightError("preflight_operator_home_untrusted") from error
+    owner = os.geteuid() if expected_uid is None else expected_uid
+    if (not stat.S_ISDIR(home_info.st_mode) or stat.S_ISLNK(home_info.st_mode)
+            or home_info.st_uid != owner
+            or stat.S_IMODE(home_info.st_mode) != 0o700):
+        raise PreflightError("preflight_operator_home_untrusted")
     if any(environment.get(name) for name in ENROLLER.PROVIDER_ENVIRONMENT):
         raise PreflightError("preflight_production_material_present")
     other_paths = (
@@ -379,7 +388,7 @@ def production_material_absent(
         raise PreflightError("preflight_production_material_present")
     controller_state = bootstrap_controller_state(
         home=home,
-        expected_uid=os.geteuid() if expected_uid is None else expected_uid,
+        expected_uid=owner,
     )
     try:
         ENROLLER.keychain_absent(runner)

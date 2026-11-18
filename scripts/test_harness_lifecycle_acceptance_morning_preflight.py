@@ -709,6 +709,17 @@ class MorningPreflightTests(unittest.TestCase):
         ), self.assertRaisesRegex(preflight.PreflightError, "material_present"):
             preflight.production_material_absent(home=self.root, environment={})
 
+    def test_production_material_probe_rejects_nonprivate_operator_home(self):
+        self.root.chmod(0o750)
+        with mock.patch.object(preflight.ENROLLER, "keychain_absent") as keychain, \
+                self.assertRaisesRegex(
+                    preflight.PreflightError, "operator_home_untrusted",
+                ):
+            preflight.production_material_absent(
+                home=self.root, environment={}, expected_uid=os.geteuid(),
+            )
+        keychain.assert_not_called()
+
     def test_controller_state_allows_only_exact_empty_coordination_residue(self):
         application = self.root / "Library/Application Support/SecureSandbox"
         state = application / "controller-state"

@@ -983,6 +983,27 @@ campaign pathname must remain absent, and independent `verify` readback must
 accept the extended chain. This command grants retention authority only; it
 cannot initialize, resume, or relabel a campaign.
 
+The fifth literal `retain-bootstrap-home-rejection` command covers the later,
+more advanced physical state where `bootstrap-clean-install` is already fully
+projected as the exact three root-owned mode-0444 observations, its three raw
+inputs remain operator-owned mode 0600, and the next collector reserved an
+otherwise-empty `bootstrap-no-production-material` directory before rejecting
+the operator home at exact mode 0750. It accepts no other observation, raw
+file, reservation, owner, mode, next case, or error. An isolated interpreter
+loads the exact protected predecessor collector and must reproduce
+`bootstrap_home_untrusted` against the unchanged home before a self-digested
+plan is published. The entire campaign is then moved atomically into the
+retained namespace without deleting or rewriting any evidence. Independent
+verification repeats the complete inventory, plan, predecessor, ancestry,
+machine, and remote-tip checks.
+
+The morning preflight now rejects an operator home that is not an exact,
+non-symlink, operator-owned mode-0700 directory. This check precedes campaign
+initialization, so a future permissive home cannot consume another case
+reservation. Tightening the home is a separately observed operator mutation;
+the retention ceremony must complete first so the historical 0750 condition
+remains reproducible and attestable.
+
 ## Disposable recovery fixture driver
 
 `scripts/harness-lifecycle-acceptance-recovery.py` implements the recovery

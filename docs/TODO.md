@@ -1181,6 +1181,19 @@ in ignored local records, not in this file.
   immediately without weakening the proxy. Retain still-empty `dc6e469a...`
   without deletion, initialize a fresh exact descendant campaign, and replay
   bootstrap. Never relabel any rejection as an accepted observation.
+  The exact pre-close-control repair was subsequently published and installed;
+  its fresh campaign proved the pre-close Gateway authentication path, but its first
+  all-stopped attempt reached protected control immediately after the bounded
+  120-probe cutoff. Re-entry from the preserved safe intermediate state
+  succeeded and `bootstrap-clean-install` produced all three valid root-owned
+  observations. The next collector reserved only its empty
+  `bootstrap-no-production-material` directory and rejected because the Neo
+  operator home is mode 0750 rather than 0700. Preserve every byte. Publish
+  the exact no-delete `retain-bootstrap-home-rejection` repair, the preflight
+  mode-0700 gate, and the bounded 240-probe window; retain and independently
+  verify that campaign before tightening the home, reinstalling the
+  exact successor, and initializing a new campaign. No manual deletion,
+  relabeling, or reservation reuse is permitted.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

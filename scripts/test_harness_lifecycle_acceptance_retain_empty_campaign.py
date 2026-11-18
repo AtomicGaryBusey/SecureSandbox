@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
 import json
 import os
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -429,6 +432,111 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             "protected_projection_probe": (
                 self.protected_projection_diagnostic
             ),
+        }
+        arguments.update(overrides)
+        return self.execute(**arguments)
+
+    def seed_home_rejection(self) -> None:
+        self.seed_protected_projection()
+        first = acceptance.CASES[0]
+        for kind in first.evidence_kinds:
+            artifact = b"retained-protected-bootstrap-readback"
+            subject = hashlib.sha256(artifact).hexdigest()
+            collector = acceptance.EVIDENCE_KIND_COLLECTOR[kind]
+            evidence = {
+                "schema": acceptance.EVIDENCE_SCHEMA,
+                "evidence_id": str(uuid.uuid4()),
+                "campaign_id": self.campaign["campaign_id"],
+                "campaign_sha256": self.campaign["campaign_sha256"],
+                "case_id": first.case_id,
+                "kind": kind,
+                "collector": collector,
+                "machine_identity_sha256": self.campaign[
+                    "machine_identity_sha256"
+                ],
+                "source_commit": self.campaign["source_commit"],
+                "observed_at": self.campaign["created_at"],
+                "outcome": first.expected,
+                "subject_sha256": subject,
+                "source_schema": "secure-sandbox-test-source-v1",
+                "source_status": first.expected,
+                "source_sha256": subject,
+                "artifacts": [{
+                    "name": "protected-readback",
+                    "sha256": subject,
+                    "size": len(artifact),
+                    "media_type": "application/json",
+                    "authority": acceptance.COLLECTOR_PRIMARY_AUTHORITY[
+                        collector
+                    ],
+                    "content_base64": base64.b64encode(artifact).decode(
+                        "ascii"
+                    ),
+                }],
+                "candidate_statement_used": False,
+            }
+            evidence["evidence_sha256"] = acceptance.digest(evidence)
+            observation = {
+                "schema": acceptance.OBSERVATION_SCHEMA,
+                "observation_id": str(uuid.uuid4()),
+                "campaign_id": self.campaign["campaign_id"],
+                "campaign_sha256": self.campaign["campaign_sha256"],
+                "case_id": first.case_id,
+                "kind": kind,
+                "collector": collector,
+                "machine_identity_sha256": self.campaign[
+                    "machine_identity_sha256"
+                ],
+                "source_commit": self.campaign["source_commit"],
+                "started_at": self.campaign["created_at"],
+                "completed_at": self.campaign["created_at"],
+                "outcome": first.expected,
+                "subject_sha256": subject,
+                "evidence": evidence,
+                "evidence_sha256": evidence["evidence_sha256"],
+                "candidate_statement_used": False,
+            }
+            observation["observation_sha256"] = acceptance.digest(
+                observation
+            )
+            path = (
+                self.root / "observations"
+                / f"{first.case_id}.{kind}.json"
+            )
+            path.write_bytes(acceptance.canonical(observation))
+            path.chmod(0o444)
+        reservation = (
+            self.root / "raw/bootstrap" / retention.HOME_REJECTION_CASE_ID
+        )
+        reservation.mkdir(mode=0o700)
+        self.home.chmod(retention.HOME_REJECTION_EXPECTED_MODE)
+
+    def home_rejection_diagnostic(self, campaign, home, now):
+        self.assertEqual(campaign, self.campaign)
+        self.assertEqual(home, self.home)
+        info = home.lstat()
+        value = {
+            "schema": retention.HOME_REJECTION_DIAGNOSTIC_SCHEMA,
+            "status": "confirmed",
+            "case_id": retention.HOME_REJECTION_CASE_ID,
+            "error": retention.HOME_REJECTION_EXPECTED_ERROR,
+            "source_commit": campaign["source_commit"],
+            "observed_at": now,
+            "home_device": info.st_dev,
+            "home_inode": info.st_ino,
+            "home_uid": os.geteuid(),
+            "home_gid": info.st_gid,
+            "home_mode": retention.HOME_REJECTION_EXPECTED_MODE,
+        }
+        value["diagnostic_sha256"] = acceptance.digest(value)
+        return value
+
+    def execute_home_rejection(self, **overrides):
+        arguments = {
+            "acknowledgement": retention.HOME_REJECTION_ACKNOWLEDGEMENT,
+            "home_rejection": True,
+            "protected_observation_uid": os.geteuid(),
+            "home_rejection_probe": self.home_rejection_diagnostic,
         }
         arguments.update(overrides)
         return self.execute(**arguments)
@@ -860,6 +968,140 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
+
+    def test_bootstrap_home_rejection_retains_all_evidence_without_rewrite(self):
+        self.seed_home_rejection()
+        before = {
+            str(path.relative_to(self.root)): path.read_bytes()
+            for path in self.root.rglob("*.json")
+        }
+        result = self.execute_home_rejection()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        self.assertEqual(result["schema"], retention.HOME_REJECTION_RESULT_SCHEMA)
+        self.assertEqual(result["projected_case_id"], retention.RESERVED_CASE_ID)
+        self.assertEqual(
+            result["reserved_case_id"], retention.HOME_REJECTION_CASE_ID,
+        )
+        self.assertEqual(result["expected_error"], "bootstrap_home_untrusted")
+        self.assertEqual(
+            result["evidence_state"],
+            "root-projected-bootstrap-plus-empty-home-reservation",
+        )
+        self.assertFalse(self.root.exists())
+        self.assertEqual(
+            list((destination / "raw/bootstrap"
+                  / retention.HOME_REJECTION_CASE_ID).iterdir()),
+            [],
+        )
+        for relative, payload in before.items():
+            self.assertEqual((destination / relative).read_bytes(), payload)
+        plan = json.loads((destination / retention.PLAN_NAME).read_bytes())
+        self.assertEqual(plan["schema"], retention.HOME_REJECTION_SCHEMA)
+        self.assertEqual(
+            result["diagnostic_sha256"],
+            plan["rejection_diagnostic"]["diagnostic_sha256"],
+        )
+
+        with mock.patch.object(
+                retention.platform, "system", return_value="Darwin",
+                ), mock.patch.object(
+                    retention, "acl_absent", return_value=True,
+                ), mock.patch.object(
+                    retention.PREFLIGHT, "git_command", return_value=b"",
+                ):
+            verified = retention.verify_retained(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                expected_replacement_commit="b" * 40,
+                home_rejection=True,
+                protected_observation_uid=os.geteuid(),
+                home=self.home,
+                source_probe=lambda: ("b" * 40, {"origin": "b" * 40}),
+                identity_probe=lambda: self.campaign[
+                    "machine_identity_sha256"
+                ],
+                predecessor_probe=lambda commit: "c" * 64,
+            )
+        self.assertEqual(verified, result)
+
+    def test_bootstrap_home_rejection_requires_exact_reserved_shape(self):
+        self.seed_home_rejection()
+        artifact = (
+            self.root / "raw/bootstrap" / retention.HOME_REJECTION_CASE_ID
+            / "must-not-discard"
+        )
+        artifact.write_bytes(b"evidence")
+        artifact.chmod(0o600)
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_home_rejection_not_empty",
+                ):
+            self.execute_home_rejection()
+        self.assertTrue(self.root.exists())
+        self.assertFalse((self.root / retention.PLAN_NAME).exists())
+
+    def test_bootstrap_home_rejection_can_append_compatible_descendant(self):
+        self.seed_home_rejection()
+        initial = self.execute_home_rejection()
+        result = self.supersede_retained(
+            protected_observation_uid=os.geteuid(),
+        )
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        self.assertFalse(self.root.exists())
+        self.assertEqual(result["schema"], retention.HOME_REJECTION_RESULT_SCHEMA)
+        self.assertEqual(result["replacement_source_commit"], "c" * 40)
+        self.assertNotEqual(
+            result["retention_authority_sha256"],
+            initial["retention_authority_sha256"],
+        )
+        self.assertTrue((destination / (
+            f"{retention.SUPERSESSION_PREFIX}{'c' * 40}.json"
+        )).is_file())
+
+    def test_bootstrap_home_rejection_requires_root_projection_mode(self):
+        self.seed_home_rejection()
+        path = (
+            self.root / "observations"
+            / f"{retention.RESERVED_CASE_ID}.host-install-readback.json"
+        )
+        path.chmod(0o600)
+        with self.assertRaisesRegex(
+                retention.RetentionError, "retention_evidence_file_untrusted",
+                ):
+            self.execute_home_rejection()
+        self.assertTrue(self.root.exists())
+        self.assertFalse((self.root / retention.PLAN_NAME).exists())
+
+    def test_home_rejection_diagnostic_runs_predecessor_in_isolated_python(self):
+        self.seed_home_rejection()
+        now = int(time.time())
+        value = self.home_rejection_diagnostic(self.campaign, self.home, now)
+        completed = retention.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=acceptance.canonical(value), stderr=b"",
+        )
+        with mock.patch.object(
+                retention.subprocess, "run", return_value=completed) as runner:
+            observed = retention.confirm_home_rejection_failure(
+                self.campaign, self.home, now,
+            )
+        self.assertEqual(observed, value)
+        command = runner.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/python3", "-I", "-c"])
+        self.assertEqual(
+            command[4],
+            str(retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / self.campaign["source_commit"]),
+        )
+        self.assertEqual(command[5], str(self.home))
+        self.assertEqual(command[7], retention.HOME_REJECTION_CASE_ID)
+        self.assertEqual(command[8], retention.HOME_REJECTION_EXPECTED_ERROR)
+        self.assertEqual(runner.call_args.kwargs["cwd"], "/")
 
     def test_protected_projection_requires_exact_inventory_and_acknowledgement(self):
         self.seed_protected_projection()

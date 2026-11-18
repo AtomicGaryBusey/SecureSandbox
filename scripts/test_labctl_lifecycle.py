@@ -615,7 +615,7 @@ exit 2
                            side_effect=lambda _host: next(attempts)),
               patch.object(module.time, "sleep")):
             self.assertTrue(module.wait_guest("sandbox-gateway-control"))
-        self.assertEqual(module.GUEST_READY_ATTEMPTS, 120)
+        self.assertEqual(module.GUEST_READY_ATTEMPTS, 240)
 
     def test_stop_rejects_unknown_uplink_before_every_mutation(self):
         self.set_state(gateway="running", research="running", target="running",

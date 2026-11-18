@@ -725,6 +725,41 @@ failure record—not a reason to retry reflexively.
 
 ## Current handoff
 
+### Pre-close-control replay continuation
+
+The exact published pre-close-control commit is installed on the Neo. Its
+active campaign successfully projected `bootstrap-clean-install` into three root-owned,
+mode-0444 observations while retaining its three operator-owned, mode-0600 raw
+records. The following `bootstrap-no-production-material` invocation reserved
+its empty raw directory and rejected with `bootstrap_home_untrusted` because
+the operator home is mode 0750. All evidence remains in place. The stack was
+then returned to a verified all-stopped state with Gateway Shared disconnected
+and the Parallels GUI closed.
+
+Do not delete, chmod, reuse, or manually move that campaign. After publishing
+and installing the repair, run only:
+
+```bash
+campaign_id="$(/usr/bin/python3 -I -c \
+  'import json,pathlib; print(json.loads((pathlib.Path.home()/"Library/Application Support/SecureSandbox/harness-acceptance/campaign.json").read_bytes())["campaign_id"])')"
+source_commit="$(/usr/bin/python3 -I -c \
+  'import json,pathlib; print(json.loads((pathlib.Path.home()/"Library/Application Support/SecureSandbox/harness-acceptance/campaign.json").read_bytes())["source_commit"])')"
+/usr/bin/python3 -I \
+  scripts/harness-lifecycle-acceptance-retain-empty-campaign.py \
+  retain-bootstrap-home-rejection \
+  --expected-campaign-id "$campaign_id" \
+  --expected-source-commit "$source_commit" \
+  --acknowledge 'RETAIN PROJECTED BOOTSTRAP HOME REJECTION WITHOUT DELETION'
+```
+
+Independently run the corresponding
+`verify-bootstrap-home-rejection` command before changing the home. Only after
+verification may the operator set the operator home to exact mode 0700 and
+run a new preinstall/postinstall preflight and fresh campaign initialization.
+The successor also uses a bounded 240-probe Gateway readiness window; the
+physical replay showed protected control becoming healthy immediately after
+the former 120-probe limit. No rejection is acceptance evidence.
+
 The earlier transition beginning `15450635` and ending `96da` is closed. Its
 attributed expired-authority recovery selected no target, published immutable
 `source_restored`/`authorization_expired` terminal evidence and the matching

@@ -210,7 +210,11 @@ and the complete boundary verifier passes.
   every running VM's exact protected private-control path before the first
   shutdown dispatch. It remains fail-closed if any path is unavailable and
   never reconnects Shared merely to recover.
-- Cold starts receive a bounded 120-probe readiness budget. More importantly,
+- Cold starts receive a bounded 240-probe readiness budget. The earlier
+  120-probe physical replay ended immediately before Gateway's protected
+  control became healthy, so the doubled bound preserves the same fixed probe
+  and fail-closed outcome while covering the observed no-Guest-Tools boot.
+  More importantly,
   the stopped-service bridge keeps its one already-bound GUI PID alive until
   Gateway's exact protected control path authenticates. Physical macOS 27.2.1
   / Parallels 27.2.1 replay with no Guest Tools showed that closing the GUI

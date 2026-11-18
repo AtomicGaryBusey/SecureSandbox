@@ -741,13 +741,18 @@ Ordinary retention failed closed before plan publication or rename with
 its live path and no retained destination exists. The defect was that a clean
 newer checkout was required to present current source bytes as the older
 campaign commit before the already-installed protected predecessor was
-verified. The repair instead verifies every fixed driver through the exact
-root-owned `35dd424` protected manifest and payload closure while retaining
-the independent clean-descendant, ancestry, machine, and authorized-remote
-checks. Its focused 31-test suite and 172-test acceptance family pass; sealed
-security scan `43a3db46...` reports complete coverage
-and zero findings. Publish and install that exact repair before rerunning the
-same no-delete retention command.
+verified. The first repair instead targeted the exact root-owned `35dd424`
+protected release and was published as `3bf0b63...`. Physical replay still
+rejected before plan publication or rename because its descendant verifier
+compared the predecessor's historical seven-payload bootstrap closure with the
+expanded ten-payload closure. The next repair proves the historical verifier
+and shared contract byte-identical to the exact predecessor Git commit before
+isolated execution, then requires all ten historical drivers to converge on
+one canonical manifest while retaining the independent clean-descendant,
+ancestry, machine, and authorized-remote checks. The real Neo predecessor
+passes this read-only verifier. Its focused 33-test suite and 174-test
+acceptance family pass. Publish that exact repair before rerunning the same
+no-delete retention command.
 
 After the corrected retention is published and independently verified on the
 Neo, install the matching protected ten-driver release. The pinned installer,

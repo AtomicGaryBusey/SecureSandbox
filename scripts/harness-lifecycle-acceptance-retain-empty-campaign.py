@@ -19,6 +19,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -390,6 +391,58 @@ try:
 except BaseException:
     os._exit(70)
 '''
+PREDECESSOR_DRIVER_VERIFY_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-predecessor-driver-verification-v1"
+)
+PREDECESSOR_DRIVER_VERIFY_PROGRAM = r'''\
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    release = Path(sys.argv[1])
+    protected_root = Path(sys.argv[2])
+    source_commit = sys.argv[3]
+    schema = sys.argv[4]
+
+    sys.path.insert(0, str(release / "shared"))
+    entrypoint = release / "scripts/harness-lifecycle-acceptance.py"
+    specification = importlib.util.spec_from_file_location(
+        "retention_predecessor_acceptance_cli", entrypoint,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError("predecessor_verifier_unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+
+    manifests = [
+        module.verify_protected_driver(
+            protected_root, source_commit, driver, 0,
+        )
+        for driver in module.DRIVER_ENTRYPOINTS
+    ]
+    if (not manifests
+            or any(item != manifests[0] for item in manifests[1:])):
+        raise RuntimeError("predecessor_manifest_mismatch")
+    value = {
+        "schema": schema,
+        "status": "verified",
+        "source_commit": source_commit,
+        "drivers": sorted(module.DRIVER_ENTRYPOINTS),
+        "driver_count": len(manifests),
+        "manifest": manifests[0],
+    }
+    value["verification_sha256"] = module.digest(value)
+    sys.stdout.buffer.write(module.canonical(value))
+except BaseException:
+    os._exit(70)
+'''
+PREDECESSOR_VERIFIER_FILES = {
+    "scripts/harness-lifecycle-acceptance.py": 0o555,
+    "shared/harness_lifecycle_acceptance.py": 0o444,
+}
 OWNER_PROJECTION_KINDS = (
     "host-install-readback", "research-install-readback", "boundary-readback",
 )
@@ -1167,7 +1220,10 @@ def _remote_tips_for(commit: str, remote_tips: Any) -> bool:
     )
 
 
-def verify_predecessor_driver_inventory(source_commit: str) -> str:
+def verify_predecessor_driver_inventory(
+        source_commit: str, *, runner: Callable[..., Any] = subprocess.run,
+        git_probe: Callable[..., bytes] | None = None,
+        ) -> str:
     """Verify the campaign's immutable protected release, not newer source.
 
     Retention necessarily runs from a clean descendant checkout.  Requiring
@@ -1176,22 +1232,76 @@ def verify_predecessor_driver_inventory(source_commit: str) -> str:
     commit is instead represented by its complete root-owned protected
     release; the descendant checkout and remote tip are verified separately.
     """
-    manifests: list[dict[str, Any]] = []
+    if (len(source_commit) != 40
+            or any(value not in "0123456789abcdef" for value in source_commit)):
+        raise RetentionError("retention_predecessor_driver_invalid")
+    protected_root = ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT
+    releases = protected_root / "releases"
+    release = releases / source_commit
+    git_probe = PREFLIGHT.git_command if git_probe is None else git_probe
     try:
-        for driver in DRIVER_ENTRYPOINTS:
-            manifests.append(ACCEPTANCE_CLI.verify_protected_driver(
-                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
-                source_commit, driver, 0,
-            ))
-    except (AcceptanceError, FileNotFoundError, OSError) as error:
+        for directory in (protected_root, releases, release):
+            ACCEPTANCE_CLI._protected_directory(directory, 0)
+        for relative, mode in PREDECESSOR_VERIFIER_FILES.items():
+            installed = ACCEPTANCE_CLI._protected_file(
+                release / relative, 0, mode,
+            )
+            expected = git_probe(
+                ["show", f"{source_commit}:{relative}"], cwd=ROOT,
+            )
+            if not hmac.compare_digest(installed, expected):
+                raise RetentionError("retention_predecessor_driver_invalid")
+        completed = runner(
+            [
+                "/usr/bin/python3", "-I", "-c",
+                PREDECESSOR_DRIVER_VERIFY_PROGRAM,
+                str(release), str(protected_root), source_commit,
+                PREDECESSOR_DRIVER_VERIFY_SCHEMA,
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, cwd="/", timeout=45, check=False,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    except (AcceptanceError, FileNotFoundError, OSError,
+            PREFLIGHT.PreflightError, subprocess.SubprocessError) as error:
         raise RetentionError(
             "retention_predecessor_driver_invalid"
         ) from error
-    if (len(manifests) != len(DRIVER_ENTRYPOINTS)
-            or not manifests
-            or any(item != manifests[0] for item in manifests[1:])):
+    if (completed.returncode != 0 or completed.stderr
+            or not completed.stdout or len(completed.stdout) > 64 * 1024):
         raise RetentionError("retention_predecessor_driver_invalid")
-    return digest(manifests[0])
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RetentionError(
+            "retention_predecessor_driver_invalid"
+        ) from error
+    if canonical(value) != completed.stdout:
+        raise RetentionError("retention_predecessor_driver_invalid")
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "verification_sha256"
+    }
+    manifest = value.get("manifest")
+    if (set(value) != {
+            "schema", "status", "source_commit", "drivers",
+            "driver_count", "manifest", "verification_sha256",
+        }
+            or value.get("schema") != PREDECESSOR_DRIVER_VERIFY_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("source_commit") != source_commit
+            or value.get("drivers") != sorted(DRIVER_ENTRYPOINTS)
+            or value.get("driver_count") != len(DRIVER_ENTRYPOINTS)
+            or not isinstance(manifest, dict)
+            or manifest.get("source_commit") != source_commit
+            or value.get("verification_sha256") != digest(unsigned)):
+        raise RetentionError("retention_predecessor_driver_invalid")
+    return digest(manifest)
 
 
 def _is_ancestor(older: str, newer: str) -> None:

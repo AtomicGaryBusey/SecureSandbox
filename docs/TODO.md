@@ -1110,12 +1110,16 @@ in ignored local records, not in this file.
   `35dd424` campaign still has zero raw reservations and observations. Its
   first ordinary retention attempt failed closed before plan publication or
   rename because the newer checkout was incorrectly required to present old
-  source bytes. Publish the reviewed repair that instead verifies all ten
-  drivers from the exact root-owned protected predecessor while retaining
-  independent clean-descendant, ancestry, machine, and remote-tip gates, then
-  rerun and independently verify the same no-delete retention. The focused 31
-  tests and 172 acceptance-family tests pass; sealed security scan
-  `43a3db46...` reports zero findings.
+  source bytes. The published `3bf0b63...` repair reached the protected
+  predecessor, but physical replay exposed a second safe rejection: the
+  descendant verifier compared the historical seven-payload bootstrap closure
+  to its expanded ten-payload closure. Publish the repair that authenticates
+  the historical verifier and shared contract against the exact predecessor
+  Git blobs before isolated execution, then rerun and independently verify the
+  same no-delete retention. The live predecessor passes that read-only probe;
+  the focused 33 tests and 174 acceptance-family tests pass. Codex Security's
+  scan launcher rejected the working tree after its setup validator accepted
+  it, so no sealed scan is claimed for this repair.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

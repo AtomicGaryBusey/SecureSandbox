@@ -853,12 +853,21 @@ as the older campaign commit before reaching the exact installed predecessor.
 This rejected safely before plan publication or rename, but made legitimate
 post-upgrade retention impossible. The repaired boundary treats the immutable
 root-owned protected release named by the campaign commit as the predecessor
-authority. It verifies every fixed driver through the canonical protected
-manifest and payload verifier and requires all ten results to be identical,
-while the replacement checkout remains independently bound by cleanliness,
-ancestry, authorized remote tip, machine identity, and the existing
-descriptor-relative no-overwrite publication. No caller may choose a protected
-root, driver list, manifest, or predecessor probe through the CLI.
+authority. Physical replay exposed a second commit-domain error: invoking the
+descendant verifier over that release required the predecessor's historical
+seven-payload bootstrap closure to equal the descendant's expanded ten-payload
+closure. The release again rejected safely before plan publication or rename.
+The compatibility boundary now admits the historical verifier only after its
+executable and shared contract are root-owned, mode-exact, and byte-for-byte
+equal to those paths in the exact predecessor Git commit. A fixed isolated
+Python process then uses that authenticated historical verifier to validate all
+ten historical driver classes and requires one identical canonical manifest.
+The parent accepts only a canonical, self-digested result naming the fixed
+driver set and exact source commit. The replacement checkout remains
+independently bound by cleanliness, ancestry, authorized remote tip, machine
+identity, and the existing descriptor-relative no-overwrite publication. No
+caller may choose a protected root, driver list, manifest, verifier path, or
+predecessor probe through the CLI.
 
 ## Disposable recovery fixture driver
 

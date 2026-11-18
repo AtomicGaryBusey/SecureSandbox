@@ -186,12 +186,19 @@ first inspected the descendant checkout's current source files while labeling
 them with the older campaign commit. The immutable root-owned protected
 predecessor already existed and was the intended authority, but could not be
 reached through that false source-completeness prerequisite. Ordinary and
-read-only retention verification now iterate the fixed ten-driver inventory
-through `verify_protected_driver(PROTECTED_INSTALL_ROOT, campaign_commit, ...)`,
-require every call to return one identical canonical manifest, and retain the
-separate clean replacement, ancestry, authorized-remote, machine, descriptor,
-exclusive-rename, and post-move checks. The injectable predecessor probe is a
-callable-only test seam and is not represented in argparse or CLI input.
+read-only retention verification now target that exact protected release.
+Physical replay of the first repair exposed a second historical-compatibility
+error: the descendant verifier required the predecessor's seven-payload
+bootstrap closure to equal its expanded ten-payload closure. The corrected
+path first proves the root-owned historical verifier and shared contract are
+mode-correct and byte-identical to the exact predecessor Git commit, then runs
+that verifier under isolated Python. All ten historical driver classes must
+return one canonical manifest, and the parent validates a closed,
+self-digested result bound to the exact source commit and fixed driver names.
+Separate clean replacement, ancestry, authorized-remote, machine, descriptor,
+exclusive-rename, and post-move checks remain unchanged. The injectable
+predecessor probe and process runner are callable-only test seams and are not
+represented in argparse or CLI input.
 
 Physical bootstrap later reached the first raw reservation and exposed schema
 drift in the Host receipt validator: the production Host verifier now returns

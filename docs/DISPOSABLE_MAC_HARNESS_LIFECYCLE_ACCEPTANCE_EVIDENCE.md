@@ -714,14 +714,22 @@ attempt rejected before plan publication or rename with
 retained destination exists. The ordinary retention verifier had incorrectly
 asked the clean descendant checkout's current source files to satisfy the old
 campaign commit before verifying the immutable protected predecessor. The
-repair verifies all ten fixed drivers directly through the exact root-owned
-protected release named by the campaign commit, requires every driver to bind
-the same canonical manifest, and separately preserves clean replacement,
-ancestry, machine, remote-tip, descriptor, exclusive-rename, and post-move
-readback gates. Thirty-one focused tests and 172 acceptance-family tests pass.
-Sealed security scan `43a3db46...` reviewed the exact
-source diff with complete coverage and zero findings. Publication and physical
-no-delete replay remain pending.
+first repair verified the exact root-owned protected release rather than the
+descendant source and was published as `3bf0b63...`. Its physical replay again
+rejected before plan publication or rename because the descendant verifier
+required the predecessor's historical seven-payload bootstrap closure to equal
+the expanded ten-payload closure. The campaign remains unchanged at its live
+path and no retained destination exists. The next repair authenticates the
+historical verifier and shared contract against their exact predecessor Git
+blobs before isolated execution, then requires all ten historical driver
+classes to return one canonical manifest. A disposable detached Neo worktree
+ran that read-only verifier against the real root-owned predecessor and returned
+manifest digest `815b9e22...`; the worktree was removed and the live checkout
+remained clean. Thirty-three focused tests and 174 acceptance-family tests
+pass. Codex Security setup validation accepted the working tree, but its scan
+launcher incorrectly rejected the same resolvable worktree; no sealed scan is
+claimed for this second repair. Publication and physical no-delete replay
+remain pending.
 
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical

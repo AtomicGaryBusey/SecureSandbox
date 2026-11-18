@@ -102,39 +102,135 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             return retention.retain(**arguments)
 
     def test_predecessor_inventory_uses_exact_protected_release_not_source(self):
-        manifest = {"source_commit": self.campaign["source_commit"]}
+        historical_drivers = {
+            driver: list(payloads)
+            for driver, payloads in acceptance.PROTECTED_DRIVER_PAYLOADS.items()
+        }
+        historical_drivers["clean-machine-bootstrap"] = [
+            "scripts/harness-lifecycle-acceptance-bootstrap.py",
+            "scripts/harness-lifecycle-acceptance-supervisor.py",
+            "scripts/harness-lifecycle-acceptance-observe.py",
+            "scripts/harness-lifecycle-acceptance.py",
+            "scripts/host-controller-release.py",
+            "scripts/enroll-disposable-mac-harness-lifecycle.py",
+            "shared/harness_lifecycle_acceptance.py",
+        ]
+        manifest = {
+            "source_commit": self.campaign["source_commit"],
+            "drivers": historical_drivers,
+        }
+        value = {
+            "schema": retention.PREDECESSOR_DRIVER_VERIFY_SCHEMA,
+            "status": "verified",
+            "source_commit": self.campaign["source_commit"],
+            "drivers": sorted(acceptance.DRIVER_ENTRYPOINTS),
+            "driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
+            "manifest": manifest,
+        }
+        value["verification_sha256"] = acceptance.digest(value)
+        completed = mock.Mock(
+            returncode=0, stdout=acceptance.canonical(value), stderr=b"",
+        )
+        runner = mock.Mock(return_value=completed)
+        git_probe = mock.Mock(
+            side_effect=lambda arguments, **_kwargs:
+            arguments[1].split(":", 1)[1].encode(),
+        )
+
+        def protected_file(path, uid, mode):
+            self.assertEqual(uid, 0)
+            self.assertIn(mode, {0o444, 0o555})
+            return path.relative_to(
+                retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT
+                / "releases" / self.campaign["source_commit"]
+            ).as_posix().encode()
+
         with mock.patch.object(
-                retention.ACCEPTANCE_CLI, "verify_protected_driver",
-                return_value=manifest) as verifier:
+                retention.ACCEPTANCE_CLI, "_protected_directory",
+                ) as directory, mock.patch.object(
+                    retention.ACCEPTANCE_CLI, "_protected_file",
+                    side_effect=protected_file,
+                ):
             observed = retention.verify_predecessor_driver_inventory(
-                self.campaign["source_commit"],
+                self.campaign["source_commit"], runner=runner,
+                git_probe=git_probe,
             )
         self.assertEqual(observed, acceptance.digest(manifest))
-        self.assertEqual(verifier.call_count, len(acceptance.DRIVER_ENTRYPOINTS))
-        self.assertEqual(
-            [call.args for call in verifier.call_args_list],
-            [
-                (
-                    retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
-                    self.campaign["source_commit"], driver, 0,
-                )
-                for driver in acceptance.DRIVER_ENTRYPOINTS
-            ],
+        self.assertEqual(directory.call_count, 3)
+        self.assertEqual(git_probe.call_count, 2)
+        self.assertEqual(runner.call_count, 1)
+        command = runner.call_args.args[0]
+        self.assertEqual(command[:4], [
+            "/usr/bin/python3", "-I", "-c",
+            retention.PREDECESSOR_DRIVER_VERIFY_PROGRAM,
+        ])
+        self.assertIn(
+            "for driver in module.DRIVER_ENTRYPOINTS",
+            retention.PREDECESSOR_DRIVER_VERIFY_PROGRAM,
         )
 
     def test_predecessor_inventory_rejects_inconsistent_manifests(self):
-        manifests = [
-            {"source_commit": self.campaign["source_commit"], "version": n}
-            for n in range(len(acceptance.DRIVER_ENTRYPOINTS))
-        ]
+        runner = mock.Mock(return_value=mock.Mock(
+            returncode=70, stdout=b"", stderr=b"",
+        ))
         with mock.patch.object(
-                retention.ACCEPTANCE_CLI, "verify_protected_driver",
-                side_effect=manifests), self.assertRaisesRegex(
+                retention.ACCEPTANCE_CLI, "_protected_directory",
+                ), mock.patch.object(
+                    retention.ACCEPTANCE_CLI, "_protected_file",
+                    return_value=b"verified-source",
+                ), self.assertRaisesRegex(
                     retention.RetentionError,
                     "retention_predecessor_driver_invalid",
                 ):
             retention.verify_predecessor_driver_inventory(
                 self.campaign["source_commit"],
+                runner=runner,
+                git_probe=lambda *_args, **_kwargs: b"verified-source",
+            )
+
+    def test_predecessor_inventory_rejects_verifier_source_mismatch(self):
+        runner = mock.Mock()
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "_protected_directory",
+                ), mock.patch.object(
+                    retention.ACCEPTANCE_CLI, "_protected_file",
+                    return_value=b"installed-verifier",
+                ), self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_predecessor_driver_invalid",
+                ):
+            retention.verify_predecessor_driver_inventory(
+                self.campaign["source_commit"], runner=runner,
+                git_probe=lambda *_args, **_kwargs: b"different-git-blob",
+            )
+        runner.assert_not_called()
+
+    def test_predecessor_inventory_rejects_child_binding_mismatch(self):
+        manifest = {"source_commit": self.campaign["source_commit"]}
+        value = {
+            "schema": retention.PREDECESSOR_DRIVER_VERIFY_SCHEMA,
+            "status": "verified",
+            "source_commit": self.campaign["source_commit"],
+            "drivers": sorted(acceptance.DRIVER_ENTRYPOINTS)[:-1],
+            "driver_count": len(acceptance.DRIVER_ENTRYPOINTS) - 1,
+            "manifest": manifest,
+        }
+        value["verification_sha256"] = acceptance.digest(value)
+        runner = mock.Mock(return_value=mock.Mock(
+            returncode=0, stdout=acceptance.canonical(value), stderr=b"",
+        ))
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "_protected_directory",
+                ), mock.patch.object(
+                    retention.ACCEPTANCE_CLI, "_protected_file",
+                    return_value=b"verified-source",
+                ), self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_predecessor_driver_invalid",
+                ):
+            retention.verify_predecessor_driver_inventory(
+                self.campaign["source_commit"], runner=runner,
+                git_probe=lambda *_args, **_kwargs: b"verified-source",
             )
 
     def reserve_bootstrap_rejection(self) -> None:

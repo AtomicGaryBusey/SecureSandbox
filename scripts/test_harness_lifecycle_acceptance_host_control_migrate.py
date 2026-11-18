@@ -45,6 +45,8 @@ class FakeGui:
 
 
 class FakeTransport:
+    LEGACY_PREDECESSOR = b"legacy"
+
     @staticmethod
     def rules(address, *, host_control):
         return f"{address}:{host_control}".encode()
@@ -55,14 +57,21 @@ class FakeTransport:
         return hashlib.sha256(value).hexdigest()
 
 
-def transport_result(status="installed"):
-    predecessor = "1" * 64
+def transport_result(status="installed", admin_source="10.211.55.2"):
+    import hashlib
+    predecessor = hashlib.sha256(
+        FakeTransport.rules(admin_source, host_control=False)
+    ).hexdigest()
+    successor = hashlib.sha256(
+        FakeTransport.rules(admin_source, host_control=True)
+    ).hexdigest()
     return {
         "schema": "secure-sandbox-gateway-host-control-transport-v1",
         "status": status,
         "predecessor_sha256": predecessor,
-        "successor_sha256": "2" * 64,
+        "successor_sha256": successor,
         "backup_sha256": predecessor if status == "installed" else None,
+        "admin_source": admin_source,
         "host_control_address": "172.30.10.30",
         "authority": "guest-firewall-only",
     }
@@ -72,7 +81,7 @@ class HostControlMigrationTests(unittest.TestCase):
     def test_validates_exact_transport_result(self):
         self.assertEqual(
             MIGRATE.validate_result(
-                transport_result(), FakeTransport,
+                transport_result(), FakeTransport, "10.211.55.2",
             )["status"],
             "installed",
         )
@@ -81,12 +90,15 @@ class HostControlMigrationTests(unittest.TestCase):
             {"host_control_address": "172.30.10.29"},
             {"successor_sha256": "1" * 64},
             {"backup_sha256": None},
+            {"admin_source": "10.211.55.3"},
         ):
             value = {**transport_result(), **mutation}
             with self.subTest(mutation=mutation), self.assertRaisesRegex(
                 MIGRATE.MigrationError, "migration_result_invalid"
             ):
-                MIGRATE.validate_result(value, FakeTransport)
+                MIGRATE.validate_result(
+                    value, FakeTransport, "10.211.55.2",
+                )
 
     def test_migration_is_bound_to_protected_payload_and_exact_state(self):
         observed = dict(MIGRATE.EXPECTED_INITIAL)
@@ -111,6 +123,10 @@ class HostControlMigrationTests(unittest.TestCase):
                       MIGRATE, "trusted_operator_home",
                       return_value="/Users/tester",
                   ),
+                  mock.patch.object(
+                      MIGRATE, "trusted_shared_admin_source",
+                      return_value="10.211.55.2",
+                  ),
                   mock.patch.object(MIGRATE, "require_active_component")):
                 result = MIGRATE.migrate(
                     release, source_commit, manifest, lifecycle, gui,
@@ -127,11 +143,12 @@ class HostControlMigrationTests(unittest.TestCase):
             "/protected/ssh_config", "--timeout-seconds", "120",
             "--request-id", request_id, "sandbox-gateway-control",
         ])
-        self.assertEqual(command[9:12], [
-            "deploy", "install-gateway-host-control-transport.sh", "--file",
+        self.assertEqual(command[9:13], [
+            "deploy", "install-gateway-host-control-transport.sh",
+            "10.211.55.2", "--file",
         ])
-        self.assertEqual(command[12], str(installer))
-        self.assertEqual(command[13:], ["--file", str(payload)])
+        self.assertEqual(command[13], str(installer))
+        self.assertEqual(command[14:], ["--file", str(payload)])
         self.assertEqual(runner.call_args.kwargs["env"]["HOME"], "/Users/tester")
         self.assertEqual(lifecycle.observations, [])
         with self.assertRaises(OSError):
@@ -142,6 +159,10 @@ class HostControlMigrationTests(unittest.TestCase):
         lifecycle = FakeLifecycle((observed,))
         runner = mock.Mock()
         with (mock.patch.object(MIGRATE.os, "geteuid", return_value=501),
+              mock.patch.object(
+                  MIGRATE, "trusted_shared_admin_source",
+                  return_value="10.211.55.2",
+              ),
               mock.patch.object(MIGRATE, "require_active_component")):
             with self.assertRaisesRegex(
                 MIGRATE.MigrationError, "migration_initial_state_invalid"
@@ -182,6 +203,10 @@ class HostControlMigrationTests(unittest.TestCase):
         lifecycle = FakeLifecycle((observed,))
         runner = mock.Mock()
         with (mock.patch.object(MIGRATE.os, "geteuid", return_value=501),
+              mock.patch.object(
+                  MIGRATE, "trusted_shared_admin_source",
+                  return_value="10.211.55.2",
+              ),
               mock.patch.object(MIGRATE, "require_active_component")):
             with self.assertRaisesRegex(
                 MIGRATE.MigrationError, "migration_request_id_invalid"
@@ -199,6 +224,10 @@ class HostControlMigrationTests(unittest.TestCase):
         lifecycle = FakeLifecycle((observed,))
         completed = subprocess.CompletedProcess([], 17, b"", b"bounded")
         with (mock.patch.object(MIGRATE.os, "geteuid", return_value=501),
+              mock.patch.object(
+                  MIGRATE, "trusted_shared_admin_source",
+                  return_value="10.211.55.2",
+              ),
               mock.patch.object(MIGRATE, "require_active_component")):
             with self.assertRaisesRegex(
                 MIGRATE.MigrationError, "migration_control_rejected"
@@ -209,6 +238,54 @@ class HostControlMigrationTests(unittest.TestCase):
                     FakeTransport, "11111111-1111-4111-8111-111111111111",
                     runner=mock.Mock(return_value=completed),
                 )
+
+    def test_shared_admin_source_comes_only_from_trusted_parallels_xml(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "network.desktop.xml"
+            path.write_text(
+                "<ParallelsNetworkConfig><VirtualNetworks><VirtualNetwork>"
+                "<NetworkID>Shared</NetworkID><Enabled>1</Enabled>"
+                "<NetworkType>1</NetworkType><HostOnlyNetwork>"
+                "<HostIPAddress>10.211.55.2</HostIPAddress>"
+                "<ParallelsAdapter><Enabled>1</Enabled></ParallelsAdapter>"
+                "</HostOnlyNetwork></VirtualNetwork></VirtualNetworks>"
+                "</ParallelsNetworkConfig>",
+                encoding="ascii",
+            )
+            path.chmod(0o644)
+            self.assertEqual(
+                MIGRATE.trusted_shared_admin_source(
+                    path, expected_uid=os.geteuid(),
+                ),
+                "10.211.55.2",
+            )
+            path.chmod(0o664)
+            with self.assertRaisesRegex(
+                MIGRATE.MigrationError, "migration_shared_network_untrusted",
+            ):
+                MIGRATE.trusted_shared_admin_source(
+                    path, expected_uid=os.geteuid(),
+                )
+            path.chmod(0o644)
+            added = subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow write", str(path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if added.returncode == 0:
+                try:
+                    with self.assertRaisesRegex(
+                        MIGRATE.MigrationError,
+                        "migration_shared_network_untrusted",
+                    ):
+                        MIGRATE.trusted_shared_admin_source(
+                            path, expected_uid=os.geteuid(),
+                        )
+                finally:
+                    subprocess.run(
+                        ["/bin/chmod", "-N", str(path)], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
 
 
 if __name__ == "__main__":

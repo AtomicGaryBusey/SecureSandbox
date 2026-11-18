@@ -235,6 +235,23 @@ repaired attempt. Recovery independently restored every VM stopped and Shared
 disconnected. The standalone Parallels topology verifier also uses postponed
 annotation evaluation so the Neo's system Python 3.9 can execute it.
 
+That repaired attempt did reach Gateway and therefore consumed the fixed UUID,
+but the guest command failed before mutation. A hash-bound root diagnostic
+proved the historical Gateway predates deterministic seed provisioning: its
+admin-source record is absent, `/etc/nftables.conf` is the exact root-owned
+mode-0755 empty Ubuntu skeleton with SHA-256 `60dac93f...`, nftables has no live
+filter table, and no migration state directory exists. The migration now
+accepts only those exact legacy bytes and metadata in addition to the strict
+modern predecessor/successor pair. The Host derives the Shared source address
+from a stable descriptor read of the root-owned Parallels network XML and sends
+it through the protected deployment. The guest exclusively publishes a
+mode-0600 source record, preserves the actual predecessor content-addressed,
+and atomically installs the strict successor. The result binds the exact source
+and all hashes, which the Host recomputes before acceptance. Unknown bytes,
+modes, source disagreement, XML mutation, and partial unrecognized state remain
+fail-closed. The consumed UUID is never reused; a new protected descendant and
+fresh UUID are required.
+
 Physical bootstrap later reached the first raw reservation and exposed schema
 drift in the Host receipt validator: the production Host verifier now returns
 pair, candidate-authority, release-tree, and Developer ID floor bindings that

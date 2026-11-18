@@ -12,7 +12,10 @@ separate, independently read-back transitions.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import importlib.util
+import ipaddress
 import json
 import os
 import pwd
@@ -21,6 +24,7 @@ import stat
 import subprocess
 import sys
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -33,6 +37,9 @@ CONTROL_CLIENT = Path(
     "/usr/local/libexec/secure-sandbox-host/current/control_client"
 )
 SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
+PARALLELS_NETWORKS = Path(
+    "/Library/Preferences/Parallels/network.desktop.xml"
+)
 DRIVER = "clean-machine-bootstrap"
 SCRIPT = "scripts/harness-lifecycle-acceptance-host-control-migrate.py"
 INSTALLER = "scripts/install-gateway-host-control-transport.sh"
@@ -43,6 +50,8 @@ REQUEST_ID = re.compile(
     r"[0-9a-f]{12}"
 )
 MAX_OUTPUT = 64 * 1024
+MAX_NETWORK_CONFIG = 1024 * 1024
+ACL_TYPE_EXTENDED = 0x00000100
 SCHEMA = "secure-sandbox-harness-lifecycle-host-control-migration-v1"
 EXPECTED_INITIAL = {
     "gateway": "running",
@@ -54,6 +63,29 @@ EXPECTED_INITIAL = {
 
 class MigrationError(RuntimeError):
     """Stable, content-free migration failure."""
+
+
+def reject_extended_acl(descriptor: int) -> None:
+    """Require mode bits to be the complete authority for trusted Host data."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        free_acl = libc.acl_free
+    except (AttributeError, OSError) as error:
+        raise MigrationError("migration_shared_network_untrusted") from error
+    get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+    get_acl.restype = ctypes.c_void_p
+    free_acl.argtypes = [ctypes.c_void_p]
+    free_acl.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = get_acl(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise MigrationError("migration_shared_network_untrusted")
+    if free_acl(acl) != 0:
+        raise MigrationError("migration_shared_network_untrusted")
+    raise MigrationError("migration_shared_network_untrusted")
 
 
 def trusted_operator_home(uid: int) -> str:
@@ -70,6 +102,64 @@ def trusted_operator_home(uid: int) -> str:
             or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         raise MigrationError("migration_operator_home_untrusted")
     return str(home)
+
+
+def trusted_shared_admin_source(
+    path: Path = PARALLELS_NETWORKS, *, expected_uid: int = 0,
+) -> str:
+    """Read the exact Host IPv4 address of the root-owned Shared network."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise MigrationError("migration_shared_network_untrusted") from error
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != expected_uid
+                or before.st_nlink != 1
+                or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not 0 < before.st_size <= MAX_NETWORK_CONFIG):
+            raise MigrationError("migration_shared_network_untrusted")
+        reject_extended_acl(descriptor)
+        raw = bytearray()
+        while chunk := os.read(descriptor, MAX_NETWORK_CONFIG + 1 - len(raw)):
+            raw.extend(chunk)
+            if len(raw) > MAX_NETWORK_CONFIG:
+                raise MigrationError("migration_shared_network_untrusted")
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if identity(before) != identity(after) or identity(after) != identity(named):
+            raise MigrationError("migration_shared_network_changed")
+    finally:
+        os.close(descriptor)
+    try:
+        root = ET.fromstring(bytes(raw))
+    except ET.ParseError as error:
+        raise MigrationError("migration_shared_network_invalid") from error
+    shared = [
+        network for network in root.iter("VirtualNetwork")
+        if network.findtext("NetworkID") == "Shared"
+    ]
+    if len(shared) != 1:
+        raise MigrationError("migration_shared_network_invalid")
+    network = shared[0]
+    host = network.find("HostOnlyNetwork")
+    if (network.findtext("Enabled") != "1"
+            or network.findtext("NetworkType") != "1" or host is None
+            or host.findtext("ParallelsAdapter/Enabled") != "1"):
+        raise MigrationError("migration_shared_network_invalid")
+    address = host.findtext("HostIPAddress") or ""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError as error:
+        raise MigrationError("migration_shared_network_invalid") from error
+    if not isinstance(parsed, ipaddress.IPv4Address):
+        raise MigrationError("migration_shared_network_invalid")
+    return str(parsed)
 
 
 def canonical(value: dict[str, Any]) -> bytes:
@@ -147,36 +237,37 @@ def protected_modules(
     return release, manifest, lifecycle, gui
 
 
-def validate_result(value: Any, transport: ModuleType) -> dict[str, Any]:
+def validate_result(
+    value: Any, transport: ModuleType, admin_source: str,
+) -> dict[str, Any]:
     try:
         predecessor = transport.digest(
-            transport.rules("192.0.2.1", host_control=False)
+            transport.rules(admin_source, host_control=False)
         )
         successor = transport.digest(
-            transport.rules("192.0.2.1", host_control=True)
+            transport.rules(admin_source, host_control=True)
         )
+        legacy = transport.digest(transport.LEGACY_PREDECESSOR)
     except (AttributeError, TypeError, ValueError) as error:
         raise MigrationError("migration_transport_module_invalid") from error
-    # The admin address is intentionally excluded from the reported hashes: it
-    # is machine-local, and the transport module already binds its exact value
-    # to the predecessor and successor files.  Validate hash shape here and the
-    # invariant-independent result fields below.
     if (not isinstance(predecessor, str) or not isinstance(successor, str)
-            or len(predecessor) != 64 or len(successor) != 64):
+            or not isinstance(legacy, str) or len(predecessor) != 64
+            or len(successor) != 64 or len(legacy) != 64):
         raise MigrationError("migration_transport_module_invalid")
     if (not isinstance(value, dict)
             or set(value) != {
                 "schema", "status", "predecessor_sha256", "successor_sha256",
-                "backup_sha256", "host_control_address", "authority",
+                "backup_sha256", "admin_source", "host_control_address",
+                "authority",
             }
             or value.get("schema")
                 != "secure-sandbox-gateway-host-control-transport-v1"
             or value.get("status") not in {"installed", "verified"}
             or not isinstance(value.get("predecessor_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", value["predecessor_sha256"])
+            or value["predecessor_sha256"] not in {predecessor, legacy}
             or not isinstance(value.get("successor_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", value["successor_sha256"])
-            or value["predecessor_sha256"] == value["successor_sha256"]
+            or value["successor_sha256"] != successor
+            or value.get("admin_source") != admin_source
             or value.get("host_control_address") != "172.30.10.30"
             or value.get("authority") != "guest-firewall-only"):
         raise MigrationError("migration_result_invalid")
@@ -193,6 +284,7 @@ def migrate(
     lifecycle: ModuleType, gui: ModuleType, transport: ModuleType,
     request_id: str, *, runner: Callable[..., Any] = subprocess.run,
     control_client: Path = CONTROL_CLIENT, ssh_config: Path = SSH_CONFIG,
+    parallels_networks: Path = PARALLELS_NETWORKS,
 ) -> dict[str, Any]:
     operator_uid = os.geteuid()
     if operator_uid == 0:
@@ -209,6 +301,7 @@ def migrate(
         raise MigrationError("migration_request_id_invalid")
     require_active_component(control_client, executable=True)
     require_active_component(ssh_config, executable=False)
+    admin_source = trusted_shared_admin_source(parallels_networks)
     installer = release / INSTALLER
     payload = release / PAYLOAD
     if not isinstance(manifest.get("manifest_sha256"), str):
@@ -227,7 +320,7 @@ def migrate(
             str(control_client), "client", "--ssh-config", str(ssh_config),
             "--timeout-seconds", "120", "--request-id", request_id,
             "sandbox-gateway-control", "deploy", installer.name,
-            "--file", str(installer), "--file", str(payload),
+            admin_source, "--file", str(installer), "--file", str(payload),
         ]
         try:
             completed = runner(
@@ -250,7 +343,9 @@ def migrate(
         if completed.stderr:
             raise MigrationError("migration_control_output_invalid")
         try:
-            deployed = validate_result(json.loads(completed.stdout), transport)
+            deployed = validate_result(
+                json.loads(completed.stdout), transport, admin_source,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise MigrationError("migration_result_invalid") from error
         final, _ = lifecycle.observe()

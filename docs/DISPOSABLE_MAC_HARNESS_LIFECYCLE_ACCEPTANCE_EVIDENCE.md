@@ -798,7 +798,25 @@ contract. Authenticated recovery powered off Gateway, immediately disconnected
 Shared, and independently proved Gateway, Research, and Target stopped with
 all uplinks disconnected and Parallels closed. The repair supplies only a
 passwd-derived, ownership-validated operator HOME; it does not accept caller
-environment authority. Because the already-retained plan terminates at
-`45cc17b...`, the append-only post-retention supersession ceremony must bind
-the eventual published descendant before installing and retrying the exact
-same UUID. No campaign verdict is claimed.
+environment authority. At that checkpoint, because the retained plan
+terminated at `45cc17b...`, the append-only post-retention supersession
+ceremony still had to bind the published descendant before one retry of the
+same UUID. No campaign verdict was claimed.
+
+The passwd-derived-HOME descendant was published and the retained authority
+chain was extended to exact commit `3e58666...`. Apple accepted and notarized
+the exact protected candidate, whose release was installed and independently
+verified on the Neo. Replaying `89311c21...` then reached Gateway; its audit
+contains the exact deploy request as `started` followed by `command_failed`
+with status 1. The UUID is therefore consumed and will not be reused. A
+hash-identified root-read-only diagnostic proved the failure was pre-mutation:
+the admin-source record and migration directory were absent, nftables had no
+live filter table, and `/etc/nftables.conf` was the exact root-owned mode-0755
+empty Ubuntu skeleton with SHA-256 abbreviated `60dac93f...`.
+No backup, successor rule, or other migration state existed. Authenticated
+shutdown returned Gateway to stopped; Research and Target remained stopped;
+the Parallels GUI was closed. The next source repair admits only that exact
+legacy baseline, derives `10.211.55.2` from the stable root-owned Parallels
+Shared-network descriptor, binds it into the canonical guest result and exact
+successor hash, and rejects any other legacy state. This remains source work,
+not a successful migration or campaign verdict.

@@ -111,6 +111,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             "lifecycle.acquire_lock()", '"gateway_net0": "connected"',
             '"research": "stopped"', '"target": "stopped"',
             '"--request-id"', "migration_final_state_invalid",
+            "trusted_shared_admin_source", "LEGACY_PREDECESSOR",
+            "reject_extended_acl",
+            'value.get("admin_source") != admin_source',
         ):
             self.assertIn(phrase, combined)
         self.assertNotIn("prlctl stop", self.host_control_migration)

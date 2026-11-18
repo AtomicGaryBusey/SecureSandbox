@@ -12,4 +12,4 @@ source=/tmp/gateway-host-control-transport.py
   echo "Gateway Host-control transport payload is unavailable." >&2
   exit 1
 }
-exec /usr/bin/python3 -I "$source" install
+exec /usr/bin/python3 -I "$source" install "$@"

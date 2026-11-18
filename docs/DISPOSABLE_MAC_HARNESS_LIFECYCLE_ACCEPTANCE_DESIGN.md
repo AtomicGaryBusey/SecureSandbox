@@ -824,12 +824,23 @@ shutdown, and recovery without sacrificing authenticated control.
 
 Existing disposable guests adopt only the new Gateway input rule through the
 authenticated privileged-control deployment channel. The migration installer
-accepts byte-exact predecessor or successor nftables content, preserves the
-predecessor under a root-only content-addressed path, validates the successor
-with `nft -c`, publishes atomically with identity recheck and directory fsync,
-loads it, and requires runtime rule readback. It cannot change netplan, NAT,
-Research policy, provider policy, or any other guest state. Fresh guests receive
-the same rule from deterministic seed provisioning.
+accepts byte-exact predecessor or successor nftables content. It also admits
+one historical baseline only: the root-owned, mode-0755, SHA-256
+`60dac93f...` empty Ubuntu nftables skeleton physically observed on the
+preserved Gateway. No other legacy bytes or mode are accepted. For that
+baseline, the protected Host driver reads the Shared adapter IPv4 address only
+from the stable, root-owned Parallels network descriptor, and the guest requires
+that value to agree with any already-published root-owned admin-source record.
+The exact old bytes are preserved under a root-only content-addressed path; a
+missing admin-source record is published exclusively as mode 0600. The
+installer validates the successor with `nft -c`, publishes atomically with
+identity recheck and directory fsync, loads it, and requires runtime rule
+readback. Its canonical result carries the admin source and exact predecessor,
+successor, and backup hashes; the Host recomputes and verifies all of them.
+Crash recovery may converge from an exclusively published admin record or
+successor file, but cannot reinterpret unknown state. It cannot change netplan,
+NAT, Research policy, provider policy, or any other guest state. Fresh guests
+receive the same rule from deterministic seed provisioning.
 
 The Host invokes that installer only through the protected one-shot migration
 driver, before successor Host activation and while the predecessor Shared-
@@ -858,6 +869,16 @@ caller-provided HOME remains ignored. Because the failed request never crossed
 the Host boundary, its fixed UUID remains reusable for exactly one repaired
 attempt. Recovery powered off Gateway, disconnected Shared immediately, and
 independently restored all three VMs stopped with the GUI closed.
+
+Physical replay of that source repair reached Gateway with the same UUID, so
+the reusable-request exception ended. The guest command failed before mutation:
+root-read-only diagnostics proved the preserved Gateway had no
+`gateway-admin-source-ipv4`, its exact mode-0755 `60dac93f...` empty nftables
+skeleton was not loaded, and no migration state directory existed. That UUID is
+now durably consumed as `command_failed` and must never be retried. The legacy
+baseline support above uses a fresh UUID only after a new protected descendant
+is published and installed. Recovery again used authenticated shutdown and
+independently proved all three VMs stopped and the Parallels GUI closed.
 
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only

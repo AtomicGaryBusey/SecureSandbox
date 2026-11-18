@@ -23,6 +23,22 @@ NFT = Path("/usr/sbin/nft")
 HOST_CONTROL_ADDRESS = "172.30.10.30"
 MAX_FILE = 64 * 1024
 SCHEMA = "secure-sandbox-gateway-host-control-transport-v1"
+LEGACY_PREDECESSOR = b'''#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+\tchain input {
+\t\ttype filter hook input priority filter;
+\t}
+\tchain forward {
+\t\ttype filter hook forward priority filter;
+\t}
+\tchain output {
+\t\ttype filter hook output priority filter;
+\t}
+}
+'''
 
 
 class HostControlError(RuntimeError):
@@ -72,6 +88,29 @@ def trusted_file(
         return bytes(raw), after
     finally:
         os.close(descriptor)
+
+
+def trusted_directory(path: Path, *, expected_uid: int = 0) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise HostControlError("host_control_input_untrusted") from error
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != expected_uid
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise HostControlError("host_control_input_untrusted")
+
+
+def trusted_nftables(
+    path: Path, *, expected_uid: int = 0,
+) -> tuple[bytes, os.stat_result]:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise HostControlError("host_control_input_untrusted") from error
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode not in {0o600, 0o755}:
+        raise HostControlError("host_control_input_untrusted")
+    return trusted_file(path, mode=mode, expected_uid=expected_uid)
 
 
 def rules(admin_source: str, *, host_control: bool) -> bytes:
@@ -172,28 +211,61 @@ def run_nft(arguments: list[str], *, runner: Callable[..., Any]) -> subprocess.C
 def install(
     *, nftables: Path = NFTABLES, admin_path: Path = ADMIN_SOURCE,
     state_root: Path = STATE_ROOT, runner: Callable[..., Any] = subprocess.run,
-    expected_uid: int = 0,
+    expected_uid: int = 0, admin_source_override: str | None = None,
 ) -> dict[str, Any]:
     if os.geteuid() != expected_uid:
         raise HostControlError("host_control_root_required")
-    admin_raw, _ = trusted_file(admin_path, expected_uid=expected_uid)
+    if admin_source_override is not None:
+        try:
+            override = ipaddress.ip_address(admin_source_override)
+        except ValueError as error:
+            raise HostControlError("host_control_admin_source_invalid") from error
+        if not isinstance(override, ipaddress.IPv4Address):
+            raise HostControlError("host_control_admin_source_invalid")
+        admin_source_override = str(override)
     try:
-        admin_source = admin_raw.decode("ascii").strip()
-    except UnicodeDecodeError as error:
-        raise HostControlError("host_control_admin_source_invalid") from error
-    before_raw, before_identity = trusted_file(nftables, expected_uid=expected_uid)
+        admin_path.lstat()
+    except FileNotFoundError:
+        if admin_source_override is None:
+            raise HostControlError("host_control_admin_source_required")
+        admin_source = admin_source_override
+        admin_present = False
+    except OSError as error:
+        raise HostControlError("host_control_input_untrusted") from error
+    else:
+        admin_raw, _ = trusted_file(admin_path, expected_uid=expected_uid)
+        try:
+            admin_source = admin_raw.decode("ascii").strip()
+        except UnicodeDecodeError as error:
+            raise HostControlError("host_control_admin_source_invalid") from error
+        if (admin_source_override is not None
+                and admin_source_override != admin_source):
+            raise HostControlError("host_control_admin_source_mismatch")
+        admin_present = True
+    before_raw, before_identity = trusted_nftables(
+        nftables, expected_uid=expected_uid,
+    )
     predecessor = rules(admin_source, host_control=False)
     successor = rules(admin_source, host_control=True)
-    if before_raw not in {predecessor, successor}:
+    before_mode = stat.S_IMODE(before_identity.st_mode)
+    legacy = before_mode == 0o755
+    if ((legacy and before_raw != LEGACY_PREDECESSOR)
+            or (not legacy and before_raw not in {predecessor, successor})):
         raise HostControlError("host_control_predecessor_invalid")
+    trusted_directory(admin_path.parent, expected_uid=expected_uid)
     require_state_root(state_root, expected_uid=expected_uid)
-    changed = before_raw == predecessor
+    changed = before_raw != successor
     backup = None
     temporary = nftables.parent / f".{nftables.name}.host-control.{uuid.uuid4()}"
     try:
         if changed:
-            backup = state_root / f"pre-host-control-{digest(predecessor)}.conf"
-            publish_exclusive(backup, predecessor, expected_uid=expected_uid)
+            backup = state_root / f"pre-host-control-{digest(before_raw)}.conf"
+            publish_exclusive(backup, before_raw, expected_uid=expected_uid)
+            if not admin_present:
+                publish_exclusive(
+                    admin_path, f"{admin_source}\n".encode("ascii"),
+                    expected_uid=expected_uid,
+                )
             publish_exclusive(temporary, successor, expected_uid=expected_uid)
             run_nft(["-c", "-f", str(temporary)], runner=runner)
             current = nftables.lstat()
@@ -212,6 +284,11 @@ def install(
             finally:
                 os.close(directory)
         else:
+            if not admin_present:
+                publish_exclusive(
+                    admin_path, f"{admin_source}\n".encode("ascii"),
+                    expected_uid=expected_uid,
+                )
             run_nft(["-c", "-f", str(nftables)], runner=runner)
         installed, _ = trusted_file(nftables, expected_uid=expected_uid)
         if installed != successor:
@@ -227,9 +304,12 @@ def install(
             raise HostControlError("host_control_runtime_readback_invalid")
         return {
             "schema": SCHEMA, "status": "installed" if changed else "verified",
-            "predecessor_sha256": digest(predecessor),
+            "predecessor_sha256": (
+                digest(LEGACY_PREDECESSOR) if legacy else digest(predecessor)
+            ),
             "successor_sha256": digest(successor),
-            "backup_sha256": digest(predecessor) if backup is not None else None,
+            "backup_sha256": digest(before_raw) if backup is not None else None,
+            "admin_source": admin_source,
             "host_control_address": HOST_CONTROL_ADDRESS,
             "authority": "guest-firewall-only",
         }
@@ -243,13 +323,16 @@ def install(
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
     value.add_argument("operation", choices=("install",))
+    value.add_argument("admin_source", nargs="?")
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
     if args.operation == "install":
-        sys.stdout.buffer.write(canonical(install()))
+        sys.stdout.buffer.write(canonical(install(
+            admin_source_override=args.admin_source,
+        )))
         return 0
     raise HostControlError("host_control_operation_invalid")
 

@@ -854,3 +854,23 @@ TERM/KILL GUI sequence, Gateway remained running, the VM runtime remained
 present, and `prlctl` still reported the exact intermediate inventory. The
 source repair now makes that policy a creation/readback/start invariant. This
 is defect evidence, not an accepted campaign observation or verdict.
+
+Exact descendant `d4c004f...` was published to both authorized remotes under a
+one-user, one-push GitHub ruleset bypass that was immediately removed; live
+readback again showed active enforcement with zero bypass actors. The Neo's
+empty `a267b113...` campaign was retained without deletion and independently
+verified, the exact protected ten-driver release installed, and fresh campaign
+`6845c998...` initialized with zero observations. Its first bootstrap replay
+physically proved the headless/keep-running repair: Gateway and Research kept
+running, Target stayed stopped, and Parallels remained readable after the GUI
+closed. The transition then rejected with
+`acceptance_stack_control_unreachable` at the cold-boot readiness window.
+Immediately afterward both `172.30.10.1:22` and `172.30.10.2:22` were reachable
+and both exact protected control-status calls succeeded. Ordinary `labctl stop`
+then exposed a second stale assumption by rejecting a running stack solely
+because Shared was already disconnected. Recovery did not reconnect Shared:
+exact authenticated private-control poweroff succeeded for Research and
+Gateway, and independent Parallels readback proved all three VMs stopped. The
+repair doubles the bounded cold-boot probe budget and permits an already-
+isolated stop only after every running guest's protected private-control path
+is proven. This remains defect evidence, not campaign acceptance evidence.

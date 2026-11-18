@@ -43,6 +43,7 @@ MAX_OUTPUT = 64 * 1024
 COMMAND_TERMINATION_GRACE = 2
 CONTROL_STATUS_TIMEOUT = 3
 CONTROL_MUTATION_TIMEOUT = 12
+GUEST_READY_ATTEMPTS = 120
 
 
 class LifecycleError(RuntimeError):
@@ -379,7 +380,7 @@ def wait_vm(name: str, desired: str, attempts: int = 60) -> bool:
     return False
 
 
-def wait_guest(host: str, attempts: int = 60) -> bool:
+def wait_guest(host: str, attempts: int = GUEST_READY_ATTEMPTS) -> bool:
     for _ in range(attempts):
         try:
             if guest_reachable(host):
@@ -576,11 +577,17 @@ def stop(*, inherited_lock: int | None = None) -> int:
                 or initial["gateway_net0"] not in ("connected", "disconnected")):
             emit("stop", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
-        if initial["gateway_net0"] == "disconnected" and any(
-                initial[key] == "running" for key, _, _ in VMS):
-            emit("stop", "rejected", "preflight", outcomes,
-                 ["guest_control_unreachable_after_isolation"])
-            return 1
+        if initial["gateway_net0"] == "disconnected":
+            # The private Host endpoint on control-net remains authenticated
+            # and reachable after Shared is disconnected. Prove every running
+            # guest's protected control path before the first shutdown
+            # dispatch. A legacy or broken topology still rejects without
+            # reconnecting Shared or mutating a VM.
+            for key, _, host in VMS:
+                if initial[key] == "running" and not wait_guest(host):
+                    emit("stop", "rejected", "preflight", outcomes,
+                         ["guest_control_unreachable_after_isolation"])
+                    return 1
         isolation_required = initial["gateway_net0"] == "connected"
 
         # Target and Research cannot reach an external network except through

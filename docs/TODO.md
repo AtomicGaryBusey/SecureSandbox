@@ -1171,6 +1171,13 @@ in ignored local records, not in this file.
   rollback, revocation, containment, reclamation, and independent off-machine
   evidence export. Do not treat source tests as physical evidence or begin the
   First Exact Claude Generation Admission DDD before this campaign passes.
+  The exact `d4c004f...` replay proved VMs survive deliberate Parallels GUI
+  closure, then exposed a later cold-boot readiness-window miss and the stale
+  stop assumption that Shared disconnection implies loss of control. Publish
+  and install the bounded 120-probe/private-control-stop repair, retain the
+  still-empty `6845c998...` campaign without deletion, initialize a fresh exact
+  descendant campaign, and replay bootstrap. Never relabel either rejection as
+  an accepted observation.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

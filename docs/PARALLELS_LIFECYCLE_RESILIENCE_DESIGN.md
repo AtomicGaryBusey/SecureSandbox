@@ -204,6 +204,16 @@ and the complete boundary verifier passes.
   lock. Direct clock-check SSH calls use bounded keepalives as well.
 - The exact three VM names, start/stop orders, control roles, Gateway adapter,
   and permitted state vocabulary are fixed in source.
+- The isolated Host-control successor changes one historical recovery premise:
+  disconnecting Gateway Shared networking no longer makes protected guest
+  control unreachable. A stop that begins with Shared disconnected proves
+  every running VM's exact protected private-control path before the first
+  shutdown dispatch. It remains fail-closed if any path is unavailable and
+  never reconnects Shared merely to recover.
+- Cold starts receive a bounded 120-probe readiness budget. Physical macOS
+  27.2.1 / Parallels 27.2.1 replay on the disposable Mac exceeded the former
+  60-probe window even though both private TCP endpoints and protected control
+  became healthy shortly afterward.
 - Lifecycle code never invokes `prlctl` as root and gains no new guest or host
   authority.
 - GUI detection occurs before the transition lock is allowed to issue a
@@ -248,6 +258,11 @@ Automated tests must prove:
     autostop `stop`, startup view `headless`, and window-close
     `keep-running`; both start paths reject legacy `same`/`ask` policy before
     starting Gateway.
+14. an already-isolated stop authenticates every running guest over the
+    private control plane before mutation, succeeds without reconnecting
+    Shared when those paths are live, and rejects before dispatch otherwise;
+    the cold-boot readiness budget admits a control endpoint that becomes live
+    after the former sixty-probe boundary while remaining finite.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or
 ordinary publication gate. The operator must first quit Parallels Desktop and

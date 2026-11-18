@@ -582,16 +582,40 @@ exit 2
         self.assertNotIn("sandbox-research-control --timeout", actions)
         self.assertIn("--device-disconnect net0", actions)
 
-    def test_stop_rejects_running_guest_when_uplink_is_already_disconnected(self):
+    def test_stop_uses_private_control_when_uplink_is_already_disconnected(self):
         self.set_state(gateway="running", research="stopped", target="stopped",
                        uplink="disconnected")
         result = self.run_labctl("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record(result)
+        self.assertEqual(record["status"], "verified")
+        self.assertEqual(record["observed"]["gateway"], "stopped")
+        self.assertEqual(record["observed"]["gateway_net0"], "disconnected")
+        self.assertIn("run poweroff", self.log.read_text(encoding="utf-8"))
+
+    def test_stop_rejects_disconnected_uplink_when_private_control_unreachable(self):
+        self.set_state(gateway="running", research="stopped", target="stopped",
+                       uplink="disconnected")
+        result = self.run_labctl("stop", MOCK_UNREACHABLE="gateway")
         self.assertNotEqual(result.returncode, 0)
         record = self.record(result)
         self.assertEqual(record["phase"], "preflight")
         self.assertEqual(record["action_failures"],
                          ["guest_control_unreachable_after_isolation"])
         self.assertNotIn("run poweroff", self.log.read_text(encoding="utf-8"))
+
+    def test_guest_readiness_budget_accepts_slow_cold_boot(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_cold_boot_readiness_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        attempts = iter([False] * 60 + [True])
+        with (patch.object(module, "guest_reachable",
+                           side_effect=lambda _host: next(attempts)),
+              patch.object(module.time, "sleep")):
+            self.assertTrue(module.wait_guest("sandbox-gateway-control"))
+        self.assertEqual(module.GUEST_READY_ATTEMPTS, 120)
 
     def test_stop_rejects_unknown_uplink_before_every_mutation(self):
         self.set_state(gateway="running", research="running", target="running",

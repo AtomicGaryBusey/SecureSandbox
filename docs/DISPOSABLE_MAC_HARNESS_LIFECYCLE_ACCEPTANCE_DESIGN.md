@@ -822,6 +822,17 @@ selects only `172.30.10.1`; it never falls back to Shared DHCP. Thus Gateway's
 Shared adapter can remain physically disconnected for bootstrap, collection,
 shutdown, and recovery without sacrificing authenticated control.
 
+The stopped-service bridge also requires a durable background-VM policy.
+Parallels 27.2.1 physically suspended Gateway when its GUI was terminated while
+the VM retained the vendor defaults `Startup view: same` and
+`On window close: ask`. SecureSandbox now fixes every VM to
+`Startup view: headless` and `On window close: keep-running`, with autostart
+still off and autostop still stop. Creation reads those values back from fresh
+Parallels JSON, and the ordinary start controller and acceptance bootstrap
+reject legacy policy before mutation. This preserves the design requirement
+that the bound GUI be removed before the ordinary lifecycle controller runs;
+it does not weaken that boundary by allowing GUI-bound lifecycle mutation.
+
 Existing disposable guests adopt only the new Gateway input rule through the
 authenticated privileged-control deployment channel. The migration installer
 accepts byte-exact predecessor or successor nftables content. It also admits

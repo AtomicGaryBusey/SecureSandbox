@@ -141,6 +141,23 @@ any changed post-quit inventory. Its Gateway-only recovery state exists solely
 to resolve an interrupted prior bootstrap without issuing a duplicate start.
 Operators must inspect fresh state before retrying a rejected transition.
 
+Physical replay on Parallels Desktop 27.2.1 exposed one additional vendor
+precondition. A VM whose startup view remains `same` and whose window-close
+policy remains `ask` is suspended when the bound GUI is terminated, so the
+service bridge cannot obtain its required closed-GUI running readback. Every
+SecureSandbox VM therefore uses startup view `headless` and window-close policy
+`keep-running`, while retaining autostart `off` and autostop `stop`. VM creation
+independently reads those four values back, and both ordinary start and the
+stopped-service bridge reject before mutation if any fixed VM differs.
+
+This is not permission to leave the GUI open during lifecycle mutation. The
+single bound GUI remains only a stopped-service bootstrap dependency; it is
+terminated before ordinary lifecycle continuation. `headless`/`keep-running`
+makes that deliberate termination non-destructive to the already-started
+Gateway. A disposable-Neo probe physically confirmed that Gateway remained
+running and the Parallels API remained readable after the exact TERM/KILL
+sequence, with Shared `net0` still disconnected.
+
 ## Evidence contract
 
 The final record retains the restart-safety schema used by the operator
@@ -227,6 +244,10 @@ Automated tests must prove:
     all-stopped state, accepts only the exact Gateway-only recovery state,
     rejects GUI PID change and post-termination service loss, and delegates through the
     same already-held lock only after an exact closed-GUI readback.
+13. VM creation configures and independently reads back autostart `off`,
+    autostop `stop`, startup view `headless`, and window-close
+    `keep-running`; both start paths reject legacy `same`/`ask` policy before
+    starting Gateway.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or
 ordinary publication gate. The operator must first quit Parallels Desktop and

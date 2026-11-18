@@ -164,6 +164,14 @@ def run(*, continuation: Callable[..., int] | None = None,
                 ["parallels_service_bootstrap_state_invalid"],
             )
             return 1
+        try:
+            LIFECYCLE.require_background_vm_policy()
+        except LIFECYCLE.LifecycleError as error:
+            LIFECYCLE.emit(
+                "start", "rejected", "preflight", outcomes,
+                [str(error) or "parallels_background_policy_invalid"],
+            )
+            return 1
         if initial_validator is not None:
             initial_validator(initial)
         if gui_process_ids() != (gui_pid,):

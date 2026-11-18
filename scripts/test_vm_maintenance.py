@@ -665,6 +665,35 @@ class VmMaintenanceTests(unittest.TestCase):
         self.assertEqual(events[1], ("journal", identity["uuid"]))
         self.assertTrue(all(event[0] == "run" for event in events[2:]))
 
+    def test_new_vm_uses_headless_keep_running_background_policy(self):
+        identity = {
+            "name": VM.NAMES[0],
+            "uuid": "{11111111-1111-4111-8111-111111111111}",
+            "expected_home": "/tmp/new.pvm", "state": "stopped",
+            "bundle_device": 1, "bundle_inode": 2,
+        }
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[1] == "list":
+                return json.dumps([{"Hardware": {}}])
+            return ""
+
+        with (mock.patch.object(VM, "run", side_effect=fake_run),
+              mock.patch.object(VM, "vm_identity", return_value=identity)):
+            VM.create_one(Path("/repo"), VM.NAMES[0], 1, 2048, 12288,
+                          Path("/seed"), Path("/installer"), [], None)
+
+        startup = [command for command in commands if (
+            command[1] == "set" and "--startup-view" in command
+        )]
+        self.assertEqual(len(startup), 1)
+        self.assertIn("headless", startup[0])
+        self.assertIn("--on-window-close", startup[0])
+        self.assertIn("keep-running", startup[0])
+        self.assertNotIn("ask", startup[0])
+
     def test_absent_optional_default_device_is_already_hardened(self):
         commands = []
 

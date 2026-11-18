@@ -633,6 +633,18 @@ in ignored local records, not in this file.
   exact successor protected release, initialize the replacement, and prove
   the fixed final inventory before invoking the one-shot collector. Never
   collect on an ambiguous or partially recovered startup.
+  Exact descendant `08907f8...` completed the protected legacy migration,
+  signed successor activation, private-plane Gateway control proof, and final
+  10/10-driver preflight. Fresh campaign `a267b113...` then rejected its first
+  bootstrap transition as `efed98d9...` with zero observations because
+  Parallels suspended Gateway when the bridge terminated a GUI-bound
+  `same`/`ask` VM. Physical replay proved `headless`/`keep-running` preserves
+  Gateway and the service across that exact termination. The source repair now
+  configures and independently reads back that policy and rejects legacy policy
+  before start. Retain the still-empty `a267b113...` campaign before publishing
+  the repair descendant, install its exact protected release, configure/read
+  back all three preserved VMs to the new policy, initialize a fresh campaign,
+  and replay bootstrap without relabeling `efed98d9...` as evidence.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

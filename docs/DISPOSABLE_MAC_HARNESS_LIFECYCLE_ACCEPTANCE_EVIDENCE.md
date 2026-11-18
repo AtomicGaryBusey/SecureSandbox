@@ -820,3 +820,37 @@ legacy baseline, derives `10.211.55.2` from the stable root-owned Parallels
 Shared-network descriptor, binds it into the canonical guest result and exact
 successor hash, and rejects any other legacy state. This remains source work,
 not a successful migration or campaign verdict.
+
+Exact published commit `08907f8...` subsequently completed the legacy-baseline
+migration on the disposable Neo. Although the Host wrapper reported an
+ambiguous result, Gateway audit and a separate root-read-only diagnostic proved
+the exact successor nftables bytes, root-only backup, admin-source record, and
+live Host-control rule. Gateway then powered off through authenticated control,
+Shared `net0` was disconnected, and all three stopped states were independently
+read back. Apple-accepted signed Host release `ed989c9d...` activated after
+Touch ID; its immutable release manager independently verified the release,
+Team ID, payload map, release-tree identity, previous-release selector, and
+absence of pending transaction markers despite a client-side recovery-plan
+mismatch.
+
+With Shared still disconnected, the successor proxy reached Gateway's
+privileged dispatcher at `172.30.10.1`. Two optional read-only operations
+returned authenticated role-bound missing-file errors on the preserved legacy
+guest, then the universal authenticated `poweroff` operation succeeded. Direct
+Host TCP access to Research `172.30.10.2:22` remained unavailable. Canonical
+closure receipt `b1529b26...` proved all VMs stopped, the GUI closed, and VM
+runtimes absent. Final preflight `e6169778...` verified exact source
+`08907f8...`, source/protected driver counts 10/10, and initialized fresh empty
+campaign `a267b113...`.
+
+That campaign's first `acceptance-bootstrap-start` created no observation and
+rejected as transition `efed98d9...`: after the bridge started Gateway and
+terminated the GUI, Parallels reported the service unavailable and left Gateway
+suspended. Independent recovery proved Research and Target stopped, Shared
+disconnected, the campaign observation directory empty, and no GUI or VM
+runtime alive. A bounded physical experiment then changed only Gateway from
+vendor defaults `same`/`ask` to `headless`/`keep-running`; after the exact
+TERM/KILL GUI sequence, Gateway remained running, the VM runtime remained
+present, and `prlctl` still reported the exact intermediate inventory. The
+source repair now makes that policy a creation/readback/start invariant. This
+is defect evidence, not an accepted campaign observation or verdict.

@@ -968,7 +968,8 @@ def create_one(repo: Path, name: str, cpus: int, memory: int, disk: int,
         ("--3d-accelerate", "off", "--vertical-sync", "off"),
         ("--high-resolution", "off", "--high-resolution-in-guest", "off", "--native-scaling-in-guest", "off"),
         ("--time-sync", "off", "--disable-timezone-sync", "on"),
-        ("--autostart", "off", "--autostop", "stop", "--on-window-close", "ask"),
+        ("--autostart", "off", "--autostop", "stop",
+         "--startup-view", "headless", "--on-window-close", "keep-running"),
         ("--tools-autoupdate", "no", "--usedefanswers", "off"),
     ]:
         set_vm(identifier, *args)
@@ -1061,6 +1062,7 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
             raise MaintenanceError(f"effective_configuration_invalid:{name}")
         value = values[0]
         hardware = value.get("Hardware", {})
+        startup = value.get("Startup and Shutdown", {})
         networks = sorted([
             {
                 "key": key,
@@ -1074,6 +1076,11 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
         sharing = value.get("USB and Bluetooth", {})
         expected_seed = str(protected_seed_paths()[role])
         if (value.get("State") != "stopped" or networks != expected_networks[name]
+                or not isinstance(startup, dict)
+                or startup.get("Autostart") != "off"
+                or startup.get("Autostop") != "stop"
+                or startup.get("Startup view") != "headless"
+                or startup.get("On window close") != "keep-running"
                 or hardware.get("cdrom0", {}).get("image") != str(installer)
                 or hardware.get("cdrom1", {}).get("image") != expected_seed
                 or any(sharing.get(label) != "off" for label in (

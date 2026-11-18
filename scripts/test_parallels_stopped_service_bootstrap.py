@@ -50,8 +50,10 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             mock.patch.object(
                 bootstrap.LIFECYCLE, "acquire_lock", side_effect=self.descriptor,
             ),
-            mock.patch.object(
-                bootstrap.LIFECYCLE, "require_mutation_prerequisites",
+            mock.patch.multiple(
+                bootstrap.LIFECYCLE,
+                require_mutation_prerequisites=mock.DEFAULT,
+                require_background_vm_policy=mock.DEFAULT,
             ),
             mock.patch.object(
                 bootstrap.LIFECYCLE, "PROGRESS_PATH", self.progress,
@@ -186,6 +188,53 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
         start.assert_not_called()
         self.assertIn("parallels_service_bootstrap_state_invalid",
                       emit.call_args.args[4])
+
+    def test_invalid_background_policy_rejects_before_gateway_start(self):
+        patches = self.common([(self.initial, {}), (self.initial, {})], [(62,)])
+        with patches[0], patches[1], patches[2] as prerequisites, patches[3], \
+                patches[4], patches[5], patches[6], patches[7] as emit, \
+                mock.patch.object(bootstrap.LIFECYCLE, "mutate") as mutate:
+            prerequisites["require_background_vm_policy"].side_effect = (
+                bootstrap.LIFECYCLE.LifecycleError(
+                    "gateway_background_policy_invalid"
+                )
+            )
+            self.assertEqual(bootstrap.run(), 1)
+        mutate.assert_not_called()
+        self.assertIn("gateway_background_policy_invalid", emit.call_args.args[4])
+
+    def test_background_policy_requires_headless_keep_running_for_every_vm(self):
+        valid = [{
+            "Startup and Shutdown": {
+                "Autostart": "off", "Autostop": "stop",
+                "Startup view": "headless",
+                "On window close": "keep-running",
+            },
+        }]
+        with mock.patch.object(
+            bootstrap.LIFECYCLE, "command",
+        ) as command, mock.patch.object(
+            bootstrap.LIFECYCLE, "parse_json_output",
+            side_effect=[valid, valid, valid],
+        ):
+            bootstrap.LIFECYCLE.require_background_vm_policy()
+        self.assertEqual(command.call_count, 3)
+
+        invalid = [{
+            "Startup and Shutdown": {
+                "Autostart": "off", "Autostop": "stop",
+                "Startup view": "same", "On window close": "ask",
+            },
+        }]
+        with mock.patch.object(
+            bootstrap.LIFECYCLE, "command",
+        ), mock.patch.object(
+            bootstrap.LIFECYCLE, "parse_json_output", return_value=invalid,
+        ), self.assertRaisesRegex(
+            bootstrap.LIFECYCLE.LifecycleError,
+            "gateway_background_policy_invalid",
+        ):
+            bootstrap.LIFECYCLE.require_background_vm_policy()
 
     def test_gui_pid_change_after_gateway_start_rejects_before_close(self):
         patches = self.common(

@@ -257,6 +257,31 @@ def gui_running() -> bool:
     return result.returncode == 0
 
 
+def require_background_vm_policy() -> None:
+    """Require VMs to survive deliberate Parallels GUI termination.
+
+    Parallels 27 suspends a window-bound VM when its GUI process exits.  The
+    stopped-service bridge intentionally closes that GUI before handing the
+    lifecycle lock to the ordinary controller, so every fixed VM must start
+    headlessly and keep running when its window closes.
+    """
+    for key, name, _ in VMS:
+        value = parse_json_output(
+            command([str(PRLCTL), "list", "-a", "-i", "-j", name]),
+            f"{key}_background_policy",
+        )
+        if (not isinstance(value, list) or len(value) != 1
+                or not isinstance(value[0], dict)):
+            raise LifecycleError(f"{key}_background_policy_invalid")
+        startup = value[0].get("Startup and Shutdown")
+        if (not isinstance(startup, dict)
+                or startup.get("Autostart") != "off"
+                or startup.get("Autostop") != "stop"
+                or startup.get("Startup view") != "headless"
+                or startup.get("On window close") != "keep-running"):
+            raise LifecycleError(f"{key}_background_policy_invalid")
+
+
 def acquire_lock() -> int:
     try:
         runtime_metadata = RUNTIME_DIR.lstat()
@@ -461,6 +486,11 @@ def start(*, inherited_lock: int | None = None,
                 emit("start", "rejected", "preflight", outcomes,
                      ["parallels_gui_state_unavailable"])
                 return 1
+        try:
+            require_background_vm_policy()
+        except LifecycleError as error:
+            emit("start", "rejected", "preflight", outcomes, [str(error)])
+            return 1
         publish_progress("start", "preflight")
         initial, _ = observe()
         if (any(initial[key] not in ("running", "stopped") for key, _, _ in VMS)

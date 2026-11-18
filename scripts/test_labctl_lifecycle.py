@@ -106,6 +106,12 @@ if [[ "$1" == list && "$2" == --all && "$3" == --json && "$#" == 3 ]]; then
   printf '[]\n'
   exit 0
 fi
+if [[ "$1" == list && "$2" == -a && "$3" == -i && "$4" == -j ]]; then
+  name="$5"
+  cat "$(state_file "$name")" >/dev/null
+  printf '[{"Startup and Shutdown":{"Autostart":"off","Autostop":"stop","Startup view":"headless","On window close":"keep-running"}}]\n'
+  exit 0
+fi
 if [[ "$1" == list && "$2" == --all && "$3" == --json ]]; then
   name="$4"; value="$(cat "$(state_file "$name")")"
   [[ "$value" == invalid ]] && { printf 'not-json\n'; exit 0; }

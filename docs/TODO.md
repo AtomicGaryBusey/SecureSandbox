@@ -581,11 +581,16 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The current live campaign is bound to exact source `35dd424` with zero raw
+  The historical `35dd424` campaign was retained without deletion. The current
+  live Neo campaign is abbreviated `d5322a07...`, bound to exact public source
+  abbreviated `f447613...`, with zero raw
   reservations and zero observations; its next case remains
-  `bootstrap-clean-install`. Retain it through the existing no-delete empty-
-  campaign path before installing or initializing a replacement. Before
-  collecting, publish and physically exercise the corrected explicit Parallels
+  `bootstrap-clean-install`. Its protected ten-driver release is installed and
+  ready, and bounded recovery proves all three VMs stopped, Gateway `net0`
+  disconnected, and Parallels GUI/runtime absent. Preserve and retain it
+  through the no-delete path before installing or initializing a replacement;
+  do not replay its known-broken bootstrap. Before collecting, publish and
+  physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also
   proved Parallels vetoes Apple-event quit and SIGTERM once Gateway runs. Use
@@ -614,11 +619,20 @@ in ignored local records, not in this file.
   dispatches Gateway poweroff last, immediately disconnects and rereads its
   uplink, and independently proves every stopped state. Any earlier shutdown
   failure or post-preflight lifecycle exception isolates Gateway before
-  rejection. Publish and physically replay
-  that repair, then retain the old campaign, install the exact protected
-  release, initialize the replacement, and prove the fixed final inventory
-  before invoking the one-shot collector. Never collect on an ambiguous or
-  partially recovered startup.
+  rejection. Physical replay then exposed the deeper transport contradiction:
+  the Host proxy depended on Shared DHCP even though acceptance requires
+  Gateway Shared `net0` disconnected before start. The current source repair
+  moves Host-to-Gateway control onto non-NAT `control-net`
+  (`172.30.10.30` to `172.30.10.1`) and adds an exact protected Gateway
+  firewall migration. Its one-shot bridge must run under the predecessor
+  signed Host controller while Shared remains temporarily connected; only
+  after authenticated migration, poweroff, disconnection, and independent
+  all-stopped readback may the successor Host release activate. Then prove
+  Gateway control over the private plane and prove direct Host-to-Research
+  access still unavailable. Retain the empty `f447613` campaign, install the
+  exact successor protected release, initialize the replacement, and prove
+  the fixed final inventory before invoking the one-shot collector. Never
+  collect on an ambiguous or partially recovered startup.
   The first exact private-network request on macOS 27.2 exposed Foundation
   `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
   Python broker's canonical code-point order. The request failed before its

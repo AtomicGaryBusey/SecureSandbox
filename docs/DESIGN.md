@@ -180,7 +180,8 @@ and [OCSF export](https://docs.nvidia.com/openshell/latest/observability/ocsf-js
 
 Create two dedicated Parallels host-only networks:
 
-- **Control subnet**: `172.30.10.0/27`; Research VM and Gateway VM only.
+- **Control subnet**: `172.30.10.0/27`; Research VM and Gateway VM, plus the
+  Mac's exact non-NAT lifecycle endpoint at `172.30.10.30`.
 - **Lab subnet**: `172.30.20.0/27`; Research VM and Target VM only.
 
 Use static DHCP reservations or static addresses. The Research VM has one NIC
@@ -194,11 +195,15 @@ outside world but can communicate with the Parallels gateway, so macOS packet
 filter rules must also deny traffic from both lab subnets to every address on
 the Mac. [Parallels network modes](https://kb.parallels.com/en/4948)
 
-DHCP, DHCPv6, IPv6 host assignment, and "Connect Mac to this network" are
-disabled on both networks. Parallels requires a virtual subnet with at least 16
-usable host addresses, so `/27` is the smallest accepted prefix. Static guest
-addresses use only the first few addresses; the larger prefix does not broaden
-routing or connectivity.
+DHCP, DHCPv6, NAT, and IPv6 host assignment are disabled on both networks.
+"Connect Mac to this network" is enabled only for `control-net`, with the
+Mac fixed at `172.30.10.30`; it remains disabled for `lab-net`. Gateway is
+`172.30.10.1` and Research is `172.30.10.2`. Gateway's firewall admits the Mac
+address only to SSH, while Research admits SSH only from Gateway and therefore
+continues to reject direct Host access. This dedicated non-NAT control path
+keeps lifecycle control available while Gateway's separate Shared uplink is
+physically disconnected. Parallels requires a virtual subnet with at least 16
+usable host addresses, so `/27` is the smallest accepted prefix.
 
 ### 3.2 Gateway behavior
 

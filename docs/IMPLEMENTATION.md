@@ -200,6 +200,21 @@ exclusive-rename, and post-move checks remain unchanged. The injectable
 predecessor probe and process runner are callable-only test seams and are not
 represented in argparse or CLI input.
 
+The first exact `f447613` bootstrap on the disposable Mac subsequently proved
+that the predecessor Host proxy's Shared-DHCP discovery was incompatible with
+the required pre-start physical disconnection of Gateway Shared `net0`. The
+successor topology gives `control-net` an enabled, non-NAT Host endpoint at
+`172.30.10.30`; Gateway is fixed at `172.30.10.1`, while Research remains
+reachable only through Gateway. A protected one-shot migration driver runs
+before successor Host activation, using the predecessor controller while
+Shared is temporarily connected. It verifies the exact protected release,
+holds the lifecycle lock, binds a reusable request UUID, requires one stable
+Parallels GUI PID and the exact Gateway-running/others-stopped inventory,
+deploys only the fixed firewall delta, and re-reads an unchanged inventory.
+Subsequent authenticated poweroff, Shared disconnection, successor activation,
+and private-plane reachability are distinct fail-closed transitions; the
+migration cannot silently substitute for any of them.
+
 Physical bootstrap later reached the first raw reservation and exposed schema
 drift in the Host receipt validator: the production Host verifier now returns
 pair, candidate-authority, release-tree, and Developer ID floor bindings that

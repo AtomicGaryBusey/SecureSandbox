@@ -1,12 +1,9 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
-Status: queued, not authorized to run on the development Mac. All ten driver
-classes are source-complete and source-tested, but remain physically
-unavailable until the exact reviewed commit is installed on the disposable
-Mac. This
-queue becomes executable only after all ten drivers are source-complete,
-reviewed, committed, published at one exact commit, and installed on the
-dedicated disposable Mac.
+Status: active only on the dedicated disposable Mac. All ten driver classes
+are source-complete, source-tested, and an exact protected release has been
+installed there. Physical bootstrap remains fenced while the isolated Host
+control-plane repair below is reviewed, published, installed, and proved.
 
 ## Current-Mac gate
 
@@ -20,28 +17,45 @@ development Mac.
 
 ## Current Neo resumption
 
-The retained live Neo campaign is still the empty exact `35dd424` campaign;
-do not collect from it under newer source. Read-only resumption on November 17
-found Gateway running, Research and Target stopped, and the Parallels Gateway
-VM application resident. That mixed inventory is not a campaign collection
-baseline and authorizes no lifecycle mutation. The acceptance-start repair was
-published; its first physical stop safely isolated Gateway but
-exposed that the old guest shutdown transport used the same Shared adapter.
-The first local repair then exposed that Parallels 27.1.0 `--acpi` implicitly
-force-stops after 120 seconds. A later physical probe proved
-that `--noforce` requires Parallels Tools and cannot stop these guests. Publish
-the reviewed no-`prlctl stop` descendant, establish actual VM and GUI state
-read-only, explicitly recover the already-isolated Gateway control transport,
-and use that controller to reach all-stopped with Gateway `net0` independently
-proven disconnected. Retain and
-independently verify the old campaign through the existing no-delete empty-
-campaign continuation, install the exact newly published protected ten-driver
-release, and initialize a fresh exact-source campaign.
+The Neo currently holds the empty campaign abbreviated `d5322a07...`, bound
+to exact public source abbreviated `f447613...`, with zero raw reservations and
+zero observations. Its exact ten-driver protected release is installed and
+ready. Independent recovery readback proves Gateway, Research, and Target are
+all stopped, Gateway `net0` is disconnected, and the Parallels GUI and runtime
+are absent. Preserve those records and do not replay the `f447613` bootstrap.
 
-Then run `labctl acceptance-bootstrap-start`. Only a verified record showing
-Gateway and Research running, Target stopped, and Gateway `net0` disconnected
-makes the separate one-shot collector eligible. The start transition does not
-itself collect an observation or request Touch ID.
+That bootstrap exposed a physical architecture contradiction: the predecessor
+Host proxy discovered Gateway only through Shared DHCP, while the acceptance
+invariant requires that same Shared adapter physically disconnected before
+start. The reviewed successor uses non-NAT `control-net` as an exact Host
+control plane: Mac `172.30.10.30`, Gateway `172.30.10.1`, Research
+`172.30.10.2`, `/27`, with DHCP and NAT disabled. Gateway admits the Mac only
+to SSH on `ctl0`; Research still admits SSH only from Gateway, so direct Host
+access to Research remains prohibited.
+
+Migration order is security-critical. After publishing the repair, first
+retain and independently verify the empty `f447613` campaign. Install the new
+exact protected acceptance release before using any of its migration bytes.
+With all VMs stopped, configure and verify the exact private networks. Then,
+while the predecessor signed Host controller is still active, start only
+Gateway with Shared `net0` temporarily connected and one stable Parallels GUI
+session. Run the protected one-shot
+`harness-lifecycle-acceptance-host-control-migrate.py`; it must bind the exact
+release, lifecycle lock, GUI PID, VM inventory, request UUID, deployed bytes,
+and unchanged final inventory. Power Gateway off through authenticated control,
+disconnect `net0`, and independently prove all-stopped/disconnected again.
+Only then activate the successor signed Host release and prove authenticated
+Gateway control over `172.30.10.1` while Shared remains disconnected and
+direct Research access remains unavailable. Any rejection or ambiguous
+control outcome stops this sequence; preserve its request UUID and do not
+advance or invent a fresh retry.
+
+After that isolated transport proof, install/read back the final exact release,
+initialize a fresh exact-source campaign, and run
+`labctl acceptance-bootstrap-start`. Only a verified record showing Gateway
+and Research running, Target stopped, and Gateway `net0` disconnected makes
+the separate one-shot collector eligible. The start transition does not itself
+collect an observation or request Touch ID.
 
 ## Before asking for a root password
 
@@ -475,9 +489,13 @@ Two physical `vm-create` requests are retained terminal failures and are spent.
 The first localized Parallels 27.1's absent optional `serial0`; the second
 proved the erased host lacked the named private networks. Before another
 request, `control-net` must read back as `172.30.10.0/27` and `lab-net` as
-`172.30.20.0/27`, with `.2` host addresses, `.1` DHCP addresses/range starts,
-`.30` range ends, and Mac adapter, DHCPv4, DHCPv6, NAT, and host IPv6 assignment
-all disabled. Fully quit Parallels and obtain a successful live inventory
+`172.30.20.0/27`. The current isolated lifecycle contract supersedes the
+original both-adapters-disabled setup: `control-net` has exact Mac address
+`172.30.10.30`, range `.1`–`.29`, and its Mac adapter enabled; `lab-net` keeps
+host address `.2`, range `.1`–`.30`, and its Mac adapter disabled. DHCPv4,
+DHCPv6, NAT, and host IPv6 assignment remain disabled on both. Gateway admits
+the Mac control address only to SSH and Research rejects it. Fully quit
+Parallels and obtain a successful live inventory
 readback; a brief 27.1 post-quit service transition may be waited out before any
 authorization exists. The repaired planner must reject a missing or unsafe
 plane before Touch ID and bind both exact network records into the plan and

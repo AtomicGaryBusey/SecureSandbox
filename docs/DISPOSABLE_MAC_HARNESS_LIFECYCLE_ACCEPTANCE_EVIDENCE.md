@@ -734,3 +734,47 @@ remain pending.
 The source test matrix is necessary but insufficient. Documentation, generated
 fixtures, and locally injected crash tests must not be relabeled as physical
 disposable-Mac evidence.
+
+## Isolated lifecycle control transport discovery
+
+The replacement campaign at exact published source `f447613` was initialized
+after its ten-driver protected release and stopped-inventory postflight both
+verified. Its first `acceptance-bootstrap-start` invocation rejected before
+mutation because the operator wrapper had closed Parallels although the
+stopped-service bridge requires one stable GUI session. The corrected wrapper
+established one GUI PID, exact all-stopped inventory, and disconnected Gateway
+uplink. Its transition then started Gateway and rejected with
+`parallels_closed_service_readback_invalid` after closing the GUI. No raw case
+directory or observation was created.
+
+Independent recovery readback found Gateway running, Research and Target
+stopped, and Gateway `net0` disconnected. A retained Parallels console capture
+proved Ubuntu had fully booted, but protected Gateway control remained
+unreachable. Source and installed-transport analysis proved the contradiction:
+the Host proxy selected only Gateway's Shared DHCP address although the
+acceptance invariant required that adapter physically disconnected. A bounded
+recovery reconnected only Gateway `net0`, obtained authenticated protected
+control, dispatched poweroff, immediately disconnected `net0`, and independently
+verified all three VMs stopped with the uplink disconnected. Parallels GUI and
+all VM runtimes were then proved absent. The campaign remains empty and this
+rejection is not acceptance evidence.
+
+The source repair introduces an exact non-NAT Host endpoint on `control-net`,
+Gateway-only SSH admission for that address, direct static Host proxying to
+Gateway, root-owned topology validation, and a predecessor-preserving guest
+firewall migration. The protected one-shot Host driver additionally binds its
+exact release, one stable GUI PID, lifecycle lock, exact intermediate VM/uplink
+inventory, canonical reusable request UUID, fixed deployed files, canonical
+guest result, and unchanged final inventory. It deliberately does not claim
+poweroff, Shared disconnection, successor activation, or private-plane
+reachability.
+
+The 203-test acceptance family passes after the protected provenance closure
+was corrected to carry its transitive `harness_archive_preflight` import. The
+focused isolated-network, Gateway transaction, migration, VM-maintenance, and
+DDD contract tests pass. All 296 Host release tests executed; one temporary
+Unix-listener test was denied by the command sandbox, then passed alone with
+that local socket permission. No product assertion failed. Physical network
+reconfiguration, signed Host activation, empty-campaign retention, exact
+protected-release installation, guest migration, and replay remain pending;
+no campaign verdict is claimed.

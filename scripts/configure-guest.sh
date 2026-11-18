@@ -196,6 +196,7 @@ table inet filter {
     ct state established,related accept
     iifname "uplink0" ip saddr ${SECURE_SANDBOX_ADMIN_SOURCE_IPV4} tcp dport 22 accept
     iifname "uplink0" udp sport 67 udp dport 68 accept
+    iifname "ctl0" ip saddr 172.30.10.30 tcp dport 22 accept
     iifname "ctl0" ip saddr 172.30.10.2 icmp type echo-request accept
     iifname "ctl0" ip saddr 172.30.10.2 tcp dport { 8443, 9443 } accept
     limit rate 5/second burst 10 packets log prefix "sandbox-gw-in-deny " flags all counter

@@ -460,11 +460,24 @@ def trusted_network_root(path: Path = NETWORK_CONFIG,
 
 def private_network_config(path: Path = NETWORK_CONFIG,
                            expected_uid: int = 0) -> dict[str, dict[str, str]]:
-    """Read and validate the two fail-closed host-only network planes."""
+    """Read and validate the two fail-closed host-only network planes.
+
+    ``control-net`` deliberately exposes one non-NAT Host adapter at the last
+    usable address.  It is the Host-to-Gateway lifecycle control path while
+    the Gateway Shared uplink is physically disconnected.  Guest firewall
+    policy admits that address only to Gateway SSH and continues to reject it
+    at Research.  ``lab-net`` remains entirely detached from the Host.
+    """
     root = trusted_network_root(path, expected_uid)
     expected = {
-        "control-net": ("172.30.10.2", "172.30.10.1", "172.30.10.30"),
-        "lab-net": ("172.30.20.2", "172.30.20.1", "172.30.20.30"),
+        "control-net": {
+            "host_ip": "172.30.10.30", "dhcp_ip": "172.30.10.1",
+            "range_end": "172.30.10.29", "adapter_enabled": "1",
+        },
+        "lab-net": {
+            "host_ip": "172.30.20.2", "dhcp_ip": "172.30.20.1",
+            "range_end": "172.30.20.30", "adapter_enabled": "0",
+        },
     }
     all_networks = list(root.iter("VirtualNetwork"))
     result: dict[str, dict[str, str]] = {}
@@ -477,7 +490,7 @@ def private_network_config(path: Path = NETWORK_CONFIG,
         host = network.find("HostOnlyNetwork")
         if host is None:
             raise MaintenanceError("vm_network_config_invalid")
-        host_ip, dhcp_ip, range_end = expected[name]
+        admitted = expected[name]
         values = {
             "uuid": (network.findtext("Uuid") or "").lower(),
             "host_ip": host.findtext("HostIPAddress") or "",
@@ -494,12 +507,15 @@ def private_network_config(path: Path = NETWORK_CONFIG,
         if (not VM_UUID.fullmatch(values["uuid"])
                 or network.findtext("Enabled") != "1"
                 or network.findtext("NetworkType") != "1"
-                or values["host_ip"] != host_ip or values["dhcp_ip"] != dhcp_ip
+                or values["host_ip"] != admitted["host_ip"]
+                or values["dhcp_ip"] != admitted["dhcp_ip"]
                 or values["netmask"] != "255.255.255.224"
-                or values["range_start"] != dhcp_ip or values["range_end"] != range_end
+                or values["range_start"] != admitted["dhcp_ip"]
+                or values["range_end"] != admitted["range_end"]
+                or values["adapter_enabled"] != admitted["adapter_enabled"]
                 or any(values[field] != "0" for field in (
-                    "adapter_enabled", "dhcp4_enabled", "dhcp6_enabled",
-                    "nat_enabled", "host_assign_ipv6",
+                    "dhcp4_enabled", "dhcp6_enabled", "nat_enabled",
+                    "host_assign_ipv6",
                 ))):
             raise MaintenanceError(f"vm_network_config_invalid:{name}")
         result[name] = values
@@ -588,7 +604,13 @@ def trusted_root_executable(path: Path) -> None:
 
 def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
                            network_path: Path = NETWORK_CONFIG) -> str:
-    """Resolve only the exact running Gateway VM inside validated Shared DHCP."""
+    """Resolve only the exact running Gateway on isolated ``control-net``.
+
+    The Shared adapter is an egress boundary, not a control dependency.  The
+    endpoint is therefore the Gateway's fixed private address and is admitted
+    only after the root-owned Parallels network config proves the exact
+    non-NAT Host adapter at ``172.30.10.30``.
+    """
     if uid <= 0 or os.geteuid() != uid or os.getuid() != uid:
         raise MaintenanceError("gateway_proxy_unprivileged_user_required")
     account = pwd.getpwuid(uid)
@@ -596,8 +618,15 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
     resolved_repo = trusted_repo(str(expected_repo), uid)
     trusted_root_executable(PRLCTL)
     trusted_root_executable(NC)
-    root = trusted_network_root(network_path)
-    subnet, start, end, excluded = shared_network_scope(root)
+    networks_config = private_network_config(network_path)
+    control = networks_config.get("control-net")
+    if (not isinstance(control, dict)
+            or control.get("host_ip") != "172.30.10.30"
+            or control.get("adapter_enabled") != "1"
+            or control.get("nat_enabled") != "0"
+            or control.get("dhcp4_enabled") != "0"
+            or control.get("dhcp6_enabled") != "0"):
+        raise MaintenanceError("gateway_proxy_network_invalid")
     values = json.loads(run([
         str(PRLCTL), "list", "-a", "-i", "-j", NAMES[0],
     ], capture=True))
@@ -673,21 +702,10 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
                                 else "ipv6")
                    for declared, address in zip(declared_types, addresses))):
         raise MaintenanceError("gateway_proxy_address_invalid")
-    # Parallels reports addresses from every enabled guest NIC in this one
-    # inventory.  The Gateway legitimately has a static address on the
-    # isolated control plane in addition to its dynamic Shared-network
-    # address.  Transport discovery is authoritative only for the latter:
-    # require exactly one IPv4 inside the independently validated Shared
-    # subnet and then apply the DHCP/exclusion bounds to that address.
-    # Duplicate/type validation above still covers the complete inventory.
-    shared_ipv4 = [
-        address for address in addresses
-        if isinstance(address, ipaddress.IPv4Address) and address in subnet
-    ]
-    if (len(shared_ipv4) != 1 or shared_ipv4[0] in excluded
-            or not int(start) <= int(shared_ipv4[0]) <= int(end)):
+    gateway_control = ipaddress.IPv4Address("172.30.10.1")
+    if addresses.count(gateway_control) != 1:
         raise MaintenanceError("gateway_proxy_address_invalid")
-    return str(shared_ipv4[0])
+    return str(gateway_control)
 
 
 def exec_gateway_proxy(port: int) -> None:

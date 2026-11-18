@@ -2883,9 +2883,13 @@ class OperatorAuthorizationTests(unittest.TestCase):
     def test_vm_displayed_component_hashes_are_forwarded_to_coordinator(self):
         networks = {
             name: {"uuid": uuid,
-                   "host_ip": f"172.30.{prefix}.2", "dhcp_ip": f"172.30.{prefix}.1",
+                   "host_ip": ("172.30.10.30" if name == "control-net"
+                               else "172.30.20.2"),
+                   "dhcp_ip": f"172.30.{prefix}.1",
                    "netmask": "255.255.255.224", "range_start": f"172.30.{prefix}.1",
-                   "range_end": f"172.30.{prefix}.30", "adapter_enabled": "0",
+                   "range_end": ("172.30.10.29" if name == "control-net"
+                                 else "172.30.20.30"),
+                   "adapter_enabled": ("1" if name == "control-net" else "0"),
                    "dhcp4_enabled": "0", "dhcp6_enabled": "0",
                    "nat_enabled": "0", "host_assign_ipv6": "0"}
             for name, prefix, uuid in (
@@ -2927,7 +2931,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
         for network_name, field, bad_value in (
             ("control-net", "dhcp6_enabled", "1"),
-            ("control-net", "range_end", "172.30.10.31"),
+            ("control-net", "range_end", "172.30.10.30"),
             ("lab-net", "host_ip", "172.30.20.3"),
             ("lab-net", "uuid", networks["control-net"]["uuid"]),
         ):

@@ -799,6 +799,53 @@ or ambiguous reachability therefore rejects before producing clean-install
 artifacts. A second emit-time readback must still match the verified final
 inventory; a change or readback failure downgrades the transition to rejected.
 
+Physical execution on Parallels 27.2.1 exposed a previously contradictory
+transport assumption: the acceptance transition correctly requires Gateway's
+Shared `net0` disconnected before power-on, while the installed Host proxy
+resolved Gateway SSH only through that Shared adapter's DHCP address. The
+stopped-service bridge could start Gateway but then lost both Parallels API
+readback and authenticated control; no raw reservation or observation was
+created. Reconnecting `net0` solely for authenticated poweroff, immediately
+disconnecting it, and independently reading all three VMs stopped recovered
+the machine without relabeling the rejection as evidence.
+
+The repaired topology makes lifecycle control independent of egress.
+`control-net` remains non-NAT with DHCPv4, DHCPv6, and host IPv6 disabled, but
+its exact Mac adapter is enabled at `172.30.10.30`. Gateway remains
+`172.30.10.1`; Research remains `172.30.10.2`. Gateway's nftables policy admits
+the Host address only to SSH, while Research continues to admit SSH only from
+Gateway and therefore rejects direct Host control. The root-owned Parallels
+network descriptor, network UUIDs, exact address/range, adapter state, VM
+identity, NIC topology, MACs, media absence, reported Gateway control address,
+and runtime firewall rule are all fail-closed readbacks. The Host proxy now
+selects only `172.30.10.1`; it never falls back to Shared DHCP. Thus Gateway's
+Shared adapter can remain physically disconnected for bootstrap, collection,
+shutdown, and recovery without sacrificing authenticated control.
+
+Existing disposable guests adopt only the new Gateway input rule through the
+authenticated privileged-control deployment channel. The migration installer
+accepts byte-exact predecessor or successor nftables content, preserves the
+predecessor under a root-only content-addressed path, validates the successor
+with `nft -c`, publishes atomically with identity recheck and directory fsync,
+loads it, and requires runtime rule readback. It cannot change netplan, NAT,
+Research policy, provider policy, or any other guest state. Fresh guests receive
+the same rule from deterministic seed provisioning.
+
+The Host invokes that installer only through the protected one-shot migration
+driver, before successor Host activation and while the predecessor Shared-
+network proxy is still authoritative. The driver verifies its own exact
+root-owned protected release, the active root-owned Host components, one
+stable Parallels GUI PID, the lifecycle lock, Gateway running, Research and
+Target stopped, and Gateway Shared `net0` connected. It binds one canonical
+request UUID so an ambiguous control outcome can be diagnosed without
+inventing a different request, deploys only the two fixed protected files, and
+requires the same GUI PID and VM inventory after the guest's canonical result.
+It does not disconnect Shared, power off Gateway, activate the successor Host,
+or claim private-plane reachability; those are later independently read-back
+transitions. This ordering avoids both a loss of the predecessor route before
+guest migration and a false claim that deployment output alone proves the new
+transport.
+
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only
 tool therefore has three disjoint ceremonies. Its original command accepts only

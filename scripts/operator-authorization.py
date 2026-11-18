@@ -2242,8 +2242,14 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 raise AuthorizationError(f"{name}_invalid")
         networks = parameters["network_config"]
         expected_networks = {
-            "control-net": ("172.30.10.2", "172.30.10.1", "172.30.10.30"),
-            "lab-net": ("172.30.20.2", "172.30.20.1", "172.30.20.30"),
+            "control-net": {
+                "host_ip": "172.30.10.30", "dhcp_ip": "172.30.10.1",
+                "range_end": "172.30.10.29", "adapter_enabled": "1",
+            },
+            "lab-net": {
+                "host_ip": "172.30.20.2", "dhcp_ip": "172.30.20.1",
+                "range_end": "172.30.20.30", "adapter_enabled": "0",
+            },
         }
         network_fields = {
             "uuid", "host_ip", "dhcp_ip", "netmask", "range_start", "range_end",
@@ -2256,18 +2262,21 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 or hashlib.sha256(canonical(networks)).hexdigest()
                     != parameters["network_config_sha256"]):
             raise AuthorizationError("vm_network_config_invalid")
-        for name, (host_ip, dhcp_ip, range_end) in expected_networks.items():
+        for name, admitted in expected_networks.items():
             item = networks[name]
             if (not isinstance(item, dict) or set(item) != network_fields
                     or not isinstance(item["uuid"], str)
                     or len(item["uuid"]) != 38 or item["uuid"][0] != "{"
                     or item["uuid"][-1] != "}" or UUID.fullmatch(item["uuid"][1:-1]) is None
-                    or item["host_ip"] != host_ip or item["dhcp_ip"] != dhcp_ip
+                    or item["host_ip"] != admitted["host_ip"]
+                    or item["dhcp_ip"] != admitted["dhcp_ip"]
                     or item["netmask"] != "255.255.255.224"
-                    or item["range_start"] != dhcp_ip or item["range_end"] != range_end
+                    or item["range_start"] != admitted["dhcp_ip"]
+                    or item["range_end"] != admitted["range_end"]
+                    or item["adapter_enabled"] != admitted["adapter_enabled"]
                     or any(item[field] != "0" for field in (
-                        "adapter_enabled", "dhcp4_enabled", "dhcp6_enabled",
-                        "nat_enabled", "host_assign_ipv6",
+                        "dhcp4_enabled", "dhcp6_enabled", "nat_enabled",
+                        "host_assign_ipv6",
                     ))):
                 raise AuthorizationError("vm_network_config_invalid")
         if networks["control-net"]["uuid"] == networks["lab-net"]["uuid"]:

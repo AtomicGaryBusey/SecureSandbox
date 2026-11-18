@@ -37,6 +37,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.bootstrap = (ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py").read_text()
+        cls.host_control_migration = (
+            ROOT / "scripts/harness-lifecycle-acceptance-host-control-migrate.py"
+        ).read_text()
         cls.morning_preflight = (
             ROOT / "scripts/harness-lifecycle-acceptance-morning-preflight.py"
         ).read_text()
@@ -99,6 +102,18 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             "cold-boot-readback-fixture", "independent-export-fixture",
         ):
             self.assertIn(f'"{driver}"', self.contract)
+
+    def test_isolated_host_control_migration_is_protected_and_bounded(self):
+        combined = self.contract + self.host_installer + self.host_control_migration
+        for phrase in (
+            "harness-lifecycle-acceptance-host-control-migrate.py",
+            "verify_protected_driver(", "migration_must_run_from_protected_release",
+            "lifecycle.acquire_lock()", '"gateway_net0": "connected"',
+            '"research": "stopped"', '"target": "stopped"',
+            '"--request-id"', "migration_final_state_invalid",
+        ):
+            self.assertIn(phrase, combined)
+        self.assertNotIn("prlctl stop", self.host_control_migration)
 
     def test_campaign_has_no_admission_or_candidate_authority(self):
         for phrase in (

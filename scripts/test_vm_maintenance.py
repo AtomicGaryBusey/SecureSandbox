@@ -23,9 +23,9 @@ SPEC.loader.exec_module(VM)
 class VmMaintenanceTests(unittest.TestCase):
     NETWORKS = {
         "control-net": {"uuid": "{11111111-1111-4111-8111-111111111111}",
-                        "host_ip": "172.30.10.2", "dhcp_ip": "172.30.10.1",
+                        "host_ip": "172.30.10.30", "dhcp_ip": "172.30.10.1",
                         "netmask": "255.255.255.224", "range_start": "172.30.10.1",
-                        "range_end": "172.30.10.30", "adapter_enabled": "0",
+                        "range_end": "172.30.10.29", "adapter_enabled": "1",
                         "dhcp4_enabled": "0", "dhcp6_enabled": "0",
                         "nat_enabled": "0", "host_assign_ipv6": "0"},
         "lab-net": {"uuid": "{22222222-2222-4222-8222-222222222222}",
@@ -64,6 +64,7 @@ class VmMaintenanceTests(unittest.TestCase):
                 "Conditioned": "off",
                 "ipAddresses": [
                     {"type": "ipv4", "ip": "10.211.55.5"},
+                    {"type": "ipv4", "ip": "172.30.10.1"},
                     {"type": "ipv6", "ip": "fe80::21c:42ff:febc:794f"},
                 ],
             },
@@ -148,13 +149,16 @@ class VmMaintenanceTests(unittest.TestCase):
 
     def test_private_networks_require_exact_closed_topology(self):
         def network(name, uuid, prefix):
+            host = "30" if name == "control-net" else "2"
+            end = "29" if name == "control-net" else "30"
+            adapter = "1" if name == "control-net" else "0"
             return f"""<VirtualNetwork><Uuid>{uuid}</Uuid><NetworkID>{name}</NetworkID>
 <Enabled>1</Enabled><NetworkType>1</NetworkType><HostOnlyNetwork>
-<HostIPAddress>172.30.{prefix}.2</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
+<HostIPAddress>172.30.{prefix}.{host}</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
 <IPNetMask>255.255.255.224</IPNetMask><HostAssignIPv6>0</HostAssignIPv6>
-<ParallelsAdapter><Enabled>0</Enabled></ParallelsAdapter>
+<ParallelsAdapter><Enabled>{adapter}</Enabled></ParallelsAdapter>
 <DHCPServer><Enabled>0</Enabled><IPScopeStart>172.30.{prefix}.1</IPScopeStart>
-<IPScopeEnd>172.30.{prefix}.30</IPScopeEnd></DHCPServer>
+<IPScopeEnd>172.30.{prefix}.{end}</IPScopeEnd></DHCPServer>
 <DHCPv6Server><Enabled>0</Enabled></DHCPv6Server>
 <NATServer><Enabled>0</Enabled></NATServer></HostOnlyNetwork></VirtualNetwork>"""
         with tempfile.TemporaryDirectory() as temporary:
@@ -179,20 +183,33 @@ class VmMaintenanceTests(unittest.TestCase):
                 network("lab-net", "{22222222-2222-4222-8222-222222222222}", "20") +
                 "</Root>", encoding="utf-8")
             path.write_text(path.read_text().replace(
-                "<IPScopeEnd>172.30.10.30</IPScopeEnd>",
+                "<ParallelsAdapter><Enabled>1</Enabled></ParallelsAdapter>",
+                "<ParallelsAdapter><Enabled>0</Enabled></ParallelsAdapter>", 1),
+                encoding="utf-8")
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid:control-net"):
+                VM.private_network_config(path, os.getuid())
+            path.write_text("<Root>" +
+                network("control-net", "{11111111-1111-4111-8111-111111111111}", "10") +
+                network("lab-net", "{22222222-2222-4222-8222-222222222222}", "20") +
+                "</Root>", encoding="utf-8")
+            path.write_text(path.read_text().replace(
+                "<IPScopeEnd>172.30.10.29</IPScopeEnd>",
                 "<IPScopeEnd>172.30.10.31</IPScopeEnd>", 1), encoding="utf-8")
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid:control-net"):
                 VM.private_network_config(path, os.getuid())
 
     def test_private_networks_reject_overlapping_or_duplicate_other_planes(self):
         def network(name, uuid, prefix):
+            host = "30" if name == "control-net" else "2"
+            end = "29" if name == "control-net" else "30"
+            adapter = "1" if name == "control-net" else "0"
             return f"""<VirtualNetwork><Uuid>{uuid}</Uuid><NetworkID>{name}</NetworkID>
 <Enabled>1</Enabled><NetworkType>1</NetworkType><HostOnlyNetwork>
-<HostIPAddress>172.30.{prefix}.2</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
+<HostIPAddress>172.30.{prefix}.{host}</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
 <IPNetMask>255.255.255.224</IPNetMask><HostAssignIPv6>0</HostAssignIPv6>
-<ParallelsAdapter><Enabled>0</Enabled></ParallelsAdapter>
+<ParallelsAdapter><Enabled>{adapter}</Enabled></ParallelsAdapter>
 <DHCPServer><Enabled>0</Enabled><IPScopeStart>172.30.{prefix}.1</IPScopeStart>
-<IPScopeEnd>172.30.{prefix}.30</IPScopeEnd></DHCPServer>
+<IPScopeEnd>172.30.{prefix}.{end}</IPScopeEnd></DHCPServer>
 <DHCPv6Server><Enabled>0</Enabled></DHCPv6Server><NATServer><Enabled>0</Enabled></NATServer>
 </HostOnlyNetwork></VirtualNetwork>"""
         control = network("control-net", "{11111111-1111-4111-8111-111111111111}", "10")
@@ -236,7 +253,7 @@ class VmMaintenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(VM.MaintenanceError, "vm_shared_network_invalid"):
                     VM.shared_network_scope(root)
 
-    def test_gateway_proxy_resolves_only_exact_running_vm_in_shared_scope(self):
+    def test_gateway_proxy_resolves_only_exact_running_vm_on_control_plane(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary) / "SecureSandbox"
             home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
@@ -245,36 +262,71 @@ class VmMaintenanceTests(unittest.TestCase):
             with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
                   mock.patch.object(VM, "trusted_repo", return_value=repo),
                   mock.patch.object(VM, "trusted_root_executable"),
-                  mock.patch.object(VM, "trusted_network_root",
-                                    return_value=self.shared_network_xml()),
+                  mock.patch.object(VM, "private_network_config",
+                                    return_value=self.NETWORKS),
                   mock.patch.object(VM, "run", return_value=json.dumps([value])) as run):
                 self.assertEqual(
-                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo), "10.211.55.5",
+                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo), "172.30.10.1",
                 )
             run.assert_called_once_with([
                 str(VM.PRLCTL), "list", "-a", "-i", "-j", VM.NAMES[0],
             ], capture=True)
 
-    def test_gateway_proxy_ignores_exact_private_plane_addresses(self):
+    def test_gateway_proxy_ignores_shared_address_when_control_address_is_exact(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary) / "SecureSandbox"
             home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
             home.mkdir(parents=True)
             value = self.gateway_value(home)
             value["Network"]["ipAddresses"].extend([
-                {"type": "ipv4", "ip": "172.30.10.1"},
                 {"type": "ipv6", "ip": "fe80::21c:42ff:fe92:ea7f"},
             ])
             with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
                   mock.patch.object(VM, "trusted_repo", return_value=repo),
                   mock.patch.object(VM, "trusted_root_executable"),
-                  mock.patch.object(VM, "trusted_network_root",
-                                    return_value=self.shared_network_xml()),
+                  mock.patch.object(VM, "private_network_config",
+                                    return_value=self.NETWORKS),
                   mock.patch.object(VM, "run", return_value=json.dumps([value]))):
                 self.assertEqual(
                     VM.gateway_proxy_endpoint(os.geteuid(), repo=repo),
-                    "10.211.55.5",
+                    "172.30.10.1",
                 )
+
+    def test_gateway_proxy_accepts_disconnected_shared_adapter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "SecureSandbox"
+            home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
+            home.mkdir(parents=True)
+            value = self.gateway_value(home)
+            value["Network"]["ipAddresses"] = [
+                {"type": "ipv4", "ip": "172.30.10.1"},
+            ]
+            with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
+                  mock.patch.object(VM, "trusted_repo", return_value=repo),
+                  mock.patch.object(VM, "trusted_root_executable"),
+                  mock.patch.object(VM, "private_network_config",
+                                    return_value=self.NETWORKS),
+                  mock.patch.object(VM, "run", return_value=json.dumps([value]))):
+                self.assertEqual(
+                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo),
+                    "172.30.10.1",
+                )
+
+    def test_gateway_proxy_rejects_control_host_adapter_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "SecureSandbox"
+            home = repo / "vms" / f"{VM.NAMES[0]}.pvm"
+            home.mkdir(parents=True)
+            changed = json.loads(json.dumps(self.NETWORKS))
+            changed["control-net"]["adapter_enabled"] = "0"
+            with (mock.patch.object(VM.os, "getuid", return_value=os.geteuid()),
+                  mock.patch.object(VM, "trusted_repo", return_value=repo),
+                  mock.patch.object(VM, "trusted_root_executable"),
+                  mock.patch.object(VM, "private_network_config",
+                                    return_value=changed)):
+                with self.assertRaisesRegex(
+                        VM.MaintenanceError, "gateway_proxy_network_invalid"):
+                    VM.gateway_proxy_endpoint(os.geteuid(), repo=repo)
 
     def test_gateway_proxy_rejects_vm_identity_topology_media_and_address_drift(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -319,6 +371,12 @@ class VmMaintenanceTests(unittest.TestCase):
                         {"type": "ipv4", "ip": "10.211.55.6"},
                     ],
                 }},
+                "duplicate-control-ip": {**canonical, "Network": {
+                    "Conditioned": "off", "ipAddresses": [
+                        {"type": "ipv4", "ip": "172.30.10.1"},
+                        {"type": "ipv4", "ip": "172.30.10.1"},
+                    ],
+                }},
                 "missing-ip": {**canonical, "Network": {
                     "Conditioned": "off", "ipAddresses": [],
                 }},
@@ -336,8 +394,8 @@ class VmMaintenanceTests(unittest.TestCase):
                      mock.patch.object(VM.os, "getuid", return_value=os.geteuid()), \
                      mock.patch.object(VM, "trusted_repo", return_value=repo), \
                      mock.patch.object(VM, "trusted_root_executable"), \
-                     mock.patch.object(VM, "trusted_network_root",
-                                       return_value=self.shared_network_xml()), \
+                     mock.patch.object(VM, "private_network_config",
+                                       return_value=self.NETWORKS), \
                      mock.patch.object(VM, "run", return_value=json.dumps([value])):
                     with self.assertRaisesRegex(
                             VM.MaintenanceError,
@@ -347,12 +405,12 @@ class VmMaintenanceTests(unittest.TestCase):
     def test_gateway_proxy_exec_is_port_22_only_and_content_free_on_rejection(self):
         with self.assertRaisesRegex(VM.MaintenanceError, "gateway_proxy_port_invalid"):
             VM.exec_gateway_proxy(2222)
-        with (mock.patch.object(VM, "gateway_proxy_endpoint", return_value="10.211.55.5"),
+        with (mock.patch.object(VM, "gateway_proxy_endpoint", return_value="172.30.10.1"),
               mock.patch.object(VM.os, "execve", side_effect=RuntimeError("exec intercepted")) as execute):
             with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
                 VM.exec_gateway_proxy(22)
         execute.assert_called_once_with(
-            str(VM.NC), [str(VM.NC), "-w", "10", "10.211.55.5", "22"],
+            str(VM.NC), [str(VM.NC), "-w", "10", "172.30.10.1", "22"],
             {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
         )
         with (mock.patch.object(VM.sys, "argv", [

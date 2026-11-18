@@ -53,6 +53,9 @@ payloads=(
   scripts/harness-lifecycle-acceptance-bootstrap-stack.py
   scripts/parallels-stopped-service-bootstrap.py
   scripts/parallels-lifecycle.py
+  scripts/harness-lifecycle-acceptance-host-control-migrate.py
+  scripts/gateway-host-control-transport.py
+  scripts/install-gateway-host-control-transport.sh
   scripts/harness-lifecycle-acceptance-archive.py
   scripts/harness-lifecycle-acceptance-authorization.py
   scripts/harness-lifecycle-acceptance-authorization-observe.py

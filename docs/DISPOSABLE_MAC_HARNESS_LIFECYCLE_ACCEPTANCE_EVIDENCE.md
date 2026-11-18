@@ -778,3 +778,27 @@ that local socket permission. No product assertion failed. Physical network
 reconfiguration, signed Host activation, empty-campaign retention, exact
 protected-release installation, guest migration, and replay remain pending;
 no campaign verdict is claimed.
+
+The disposable Neo subsequently completed exact network reconfiguration and
+readback: `control-net` is the enabled, non-NAT Host plane and `lab-net` remains
+Host-disabled, with DHCP, NAT, and IPv6 disabled as designed. The empty
+`d5322a07...` campaign was atomically retained without deletion and independently
+verified from source `f447613...` to published replacement `45cc17b...`; its
+live pathname is absent. The exact `45cc17b...` protected acceptance release
+was installed and its stopped-inventory postflight verified. The active signed
+predecessor Host release `bd5c8e55...` was also independently reverified.
+
+The first protected guest migration used the fixed request UUID abbreviated
+`89311c21...` and terminalized as
+`migration_control_rejected` before Host dispatch. A same-environment
+read-only controller probe reproduced `KeyError: 'HOME'`, and Gateway audit
+readback proves the UUID was never reserved or observed. This is not migration
+acceptance evidence and does not consume the UUID under the reusable-request
+contract. Authenticated recovery powered off Gateway, immediately disconnected
+Shared, and independently proved Gateway, Research, and Target stopped with
+all uplinks disconnected and Parallels closed. The repair supplies only a
+passwd-derived, ownership-validated operator HOME; it does not accept caller
+environment authority. Because the already-retained plan terminates at
+`45cc17b...`, the append-only post-retention supersession ceremony must bind
+the eventual published descendant before installing and retrying the exact
+same UUID. No campaign verdict is claimed.

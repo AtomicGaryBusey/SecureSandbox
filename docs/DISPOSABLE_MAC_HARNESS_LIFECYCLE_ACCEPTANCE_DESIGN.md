@@ -846,6 +846,19 @@ transitions. This ordering avoids both a loss of the predecessor route before
 guest migration and a false claim that deployment output alone proves the new
 transport.
 
+Physical execution of the first migration attempt exposed a predecessor
+environment defect before Host dispatch: the migration driver supplied a
+minimal environment without `HOME`, while the active predecessor controller's
+maintenance proxy resolves its SSH configuration from `HOME`. The controller
+failed with `KeyError: 'HOME'`; Gateway audit readback proves the request UUID
+was never reserved or observed there. The driver now derives HOME from the
+operator's passwd record and accepts it only when it is an absolute,
+non-symlink directory owned by that UID and not group- or other-writable. A
+caller-provided HOME remains ignored. Because the failed request never crossed
+the Host boundary, its fixed UUID remains reusable for exactly one repaired
+attempt. Recovery powered off Gateway, disconnected Shared immediately, and
+independently restored all three VMs stopped with the GUI closed.
+
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only
 tool therefore has three disjoint ceremonies. Its original command accepts only
@@ -915,6 +928,18 @@ independently bound by cleanliness, ancestry, authorized remote tip, machine
 identity, and the existing descriptor-relative no-overwrite publication. No
 caller may choose a protected root, driver list, manifest, verifier path, or
 predecessor probe through the CLI.
+
+If a later compatible correction is discovered only after the atomic move has
+completed, the retained campaign is never moved back to its live pathname and
+the original plan is never rewritten. The literal `supersede-retained`
+ceremony locks the retained directory, validates its complete bytes and
+terminal authority chain, requires the caller to name that exact terminal
+replacement, proves the new checkout is a clean authorized descendant, and
+appends one exclusive self-digested supersession record. The retained parent
+and child identities are checked before and after publication, the live
+campaign pathname must remain absent, and independent `verify` readback must
+accept the extended chain. This command grants retention authority only; it
+cannot initialize, resume, or relabel a campaign.
 
 ## Disposable recovery fixture driver
 

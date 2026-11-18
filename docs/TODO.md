@@ -1134,6 +1134,17 @@ in ignored local records, not in this file.
   the focused 33 tests and 174 acceptance-family tests pass. Codex Security's
   scan launcher rejected the working tree after its setup validator accepted
   it, so no sealed scan is claimed for this repair.
+  The later `d5322a07...` empty campaign is now retained and independently
+  verified through replacement `45cc17b...`; the exact protected replacement
+  is installed, and both isolated Parallels planes are configured and read
+  back. The first fixed-UUID guest migration rejected before Host dispatch
+  because its allowlisted environment omitted the operator HOME required by
+  the active predecessor proxy. Gateway audit proves the UUID was never
+  reserved, and recovery restored all VMs stopped with Shared disconnected.
+  Publish the passwd-derived HOME repair plus the append-only post-retention
+  supersession command, extend the retained authority chain without recreating
+  a live campaign, install the exact descendant release, and retry that same
+  UUID once before successor Host activation and private-plane proof.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

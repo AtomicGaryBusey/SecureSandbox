@@ -522,6 +522,128 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             )
         self.assertEqual(verified, result)
 
+    def supersede_retained(self, replacement="c" * 40, **overrides):
+        arguments = {
+            "expected_campaign_id": self.campaign["campaign_id"],
+            "expected_source_commit": self.campaign["source_commit"],
+            "expected_prior_replacement_commit": "b" * 40,
+            "acknowledgement": retention.SUPERSEDE_ACKNOWLEDGEMENT,
+            "now": int(time.time()),
+            "home": self.home,
+            "source_probe": lambda: (
+                replacement, {"origin": replacement},
+            ),
+            "identity_probe": lambda: self.campaign[
+                "machine_identity_sha256"
+            ],
+            "predecessor_probe": lambda commit: "c" * 64,
+        }
+        arguments.update(overrides)
+        with mock.patch.object(
+                retention.platform, "system", return_value="Darwin",
+                ), mock.patch.object(
+                    retention, "acl_absent", return_value=True,
+                ), mock.patch.object(
+                    retention.PREFLIGHT, "git_command", return_value=b"",
+                ):
+            return retention.supersede_retained(**arguments)
+
+    def test_completed_retention_can_append_one_verified_descendant(self):
+        initial = self.execute()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        plan_before = (destination / retention.PLAN_NAME).read_bytes()
+        result = self.supersede_retained()
+        self.assertFalse(self.root.exists())
+        self.assertEqual(
+            (destination / retention.PLAN_NAME).read_bytes(), plan_before,
+        )
+        path = destination / (
+            f"{retention.SUPERSESSION_PREFIX}{'c' * 40}.json"
+        )
+        supersession = json.loads(path.read_bytes())
+        self.assertEqual(
+            supersession["prior_authority_sha256"],
+            initial["retention_authority_sha256"],
+        )
+        self.assertEqual(result["replacement_source_commit"], "c" * 40)
+        self.assertEqual(
+            result["retention_authority_sha256"],
+            supersession["supersession_sha256"],
+        )
+
+        with mock.patch.object(
+                retention.platform, "system", return_value="Darwin",
+                ), mock.patch.object(
+                    retention, "acl_absent", return_value=True,
+                ), mock.patch.object(
+                    retention.PREFLIGHT, "git_command", return_value=b"",
+                ):
+            verified = retention.verify_retained(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                expected_replacement_commit="c" * 40,
+                home=self.home,
+                source_probe=lambda: (
+                    "c" * 40, {"origin": "c" * 40},
+                ),
+                identity_probe=lambda: self.campaign[
+                    "machine_identity_sha256"
+                ],
+                predecessor_probe=lambda commit: "d" * 64,
+            )
+        self.assertEqual(verified, result)
+
+    def test_completed_retention_supersession_rejects_wrong_prior(self):
+        self.execute()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        before = set(destination.iterdir())
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_prior_replacement_mismatch",
+                ):
+            self.supersede_retained(
+                expected_prior_replacement_commit="d" * 40,
+            )
+        self.assertEqual(set(destination.iterdir()), before)
+
+    def test_completed_retention_supersession_requires_live_path_absent(self):
+        self.execute()
+        self.root.mkdir(parents=True, mode=0o700)
+        with self.assertRaisesRegex(
+                retention.RetentionError, "retention_source_still_present",
+                ):
+            self.supersede_retained()
+
+    def test_completed_retention_supersession_rejects_path_substitution(self):
+        self.execute()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        displaced = destination.with_name("displaced")
+
+        def substitute():
+            destination.rename(displaced)
+            destination.mkdir(mode=0o700)
+            return "c" * 40, {"origin": "c" * 40}
+
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_destination_identity_changed",
+                ):
+            self.supersede_retained(source_probe=substitute)
+        self.assertEqual(set(destination.iterdir()), set())
+        self.assertFalse(any(
+            path.name.startswith(retention.SUPERSESSION_PREFIX)
+            for path in displaced.iterdir()
+        ))
+
     def test_new_plan_mode_is_exact_even_under_restrictive_umask(self):
         previous = os.umask(0o777)
         try:

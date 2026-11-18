@@ -107,6 +107,10 @@ class HostControlMigrationTests(unittest.TestCase):
             )
             runner = mock.Mock(return_value=completed)
             with (mock.patch.object(MIGRATE.os, "geteuid", return_value=501),
+                  mock.patch.object(
+                      MIGRATE, "trusted_operator_home",
+                      return_value="/Users/tester",
+                  ),
                   mock.patch.object(MIGRATE, "require_active_component")):
                 result = MIGRATE.migrate(
                     release, source_commit, manifest, lifecycle, gui,
@@ -128,6 +132,7 @@ class HostControlMigrationTests(unittest.TestCase):
         ])
         self.assertEqual(command[12], str(installer))
         self.assertEqual(command[13:], ["--file", str(payload)])
+        self.assertEqual(runner.call_args.kwargs["env"]["HOME"], "/Users/tester")
         self.assertEqual(lifecycle.observations, [])
         with self.assertRaises(OSError):
             os.fstat(lifecycle.lock)
@@ -148,6 +153,29 @@ class HostControlMigrationTests(unittest.TestCase):
                     runner=runner,
                 )
         runner.assert_not_called()
+
+    def test_trusted_operator_home_rejects_symlink_and_writable_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            link = root / "link"
+            link.symlink_to(home, target_is_directory=True)
+            account = SimpleNamespace(pw_dir=str(link))
+            with (mock.patch.object(MIGRATE.pwd, "getpwuid", return_value=account),
+                  self.assertRaisesRegex(
+                      MIGRATE.MigrationError,
+                      "migration_operator_home_untrusted",
+                  )):
+                MIGRATE.trusted_operator_home(os.geteuid())
+            home.chmod(0o770)
+            account = SimpleNamespace(pw_dir=str(home))
+            with (mock.patch.object(MIGRATE.pwd, "getpwuid", return_value=account),
+                  self.assertRaisesRegex(
+                      MIGRATE.MigrationError,
+                      "migration_operator_home_untrusted",
+                  )):
+                MIGRATE.trusted_operator_home(os.geteuid())
 
     def test_rejects_noncanonical_request_id_before_deployment(self):
         observed = dict(MIGRATE.EXPECTED_INITIAL)

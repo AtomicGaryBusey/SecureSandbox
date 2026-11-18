@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -53,6 +54,22 @@ EXPECTED_INITIAL = {
 
 class MigrationError(RuntimeError):
     """Stable, content-free migration failure."""
+
+
+def trusted_operator_home(uid: int) -> str:
+    """Resolve HOME from the login account, never from caller environment."""
+    try:
+        raw = pwd.getpwuid(uid).pw_dir
+        home = Path(raw)
+        resolved = home.resolve(strict=True)
+        info = home.lstat()
+    except (KeyError, OSError, RuntimeError) as error:
+        raise MigrationError("migration_operator_home_untrusted") from error
+    if (not raw or not home.is_absolute() or resolved != home
+            or not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise MigrationError("migration_operator_home_untrusted")
+    return str(home)
 
 
 def canonical(value: dict[str, Any]) -> bytes:
@@ -177,8 +194,10 @@ def migrate(
     request_id: str, *, runner: Callable[..., Any] = subprocess.run,
     control_client: Path = CONTROL_CLIENT, ssh_config: Path = SSH_CONFIG,
 ) -> dict[str, Any]:
-    if os.geteuid() == 0:
+    operator_uid = os.geteuid()
+    if operator_uid == 0:
         raise MigrationError("migration_must_not_run_as_root")
+    operator_home = trusted_operator_home(operator_uid)
     if not isinstance(request_id, str):
         raise MigrationError("migration_request_id_invalid")
     supplied_request_id = request_id
@@ -218,6 +237,7 @@ def migrate(
                 env={
                     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                     "LANG": "C", "LC_ALL": "C",
+                    "HOME": operator_home,
                 },
             )
         except (OSError, subprocess.SubprocessError) as error:

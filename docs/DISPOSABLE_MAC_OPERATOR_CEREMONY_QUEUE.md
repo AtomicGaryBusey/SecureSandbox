@@ -219,6 +219,17 @@ and bytes, the exact embedded plan and append-only supersession chain, current m
 replacement ancestry, clean checkout, and both current remote tips. It returns
 the same canonical retention result and performs no recovery mutation.
 
+If a compatible repair is published after that move has already completed,
+do not restore or copy the retained campaign to the live path. Run the distinct
+`supersede-retained` command with the exact campaign UUID, original source
+commit, terminal replacement commit currently named by `verify`, and its
+literal acknowledgement. It requires a clean authorized descendant on both
+remotes, locks the retained directory, revalidates its full chain and machine,
+and appends one exclusive record without changing the original plan. Then run
+ordinary read-only `verify` against the new replacement commit. Any prior-tip,
+identity, ancestry, live-path, collision, or readback mismatch stops the
+ceremony; never rename the retained directory back and never remove a record.
+
 Only after independent readback proves the original pathname absent and the
 same campaign plus plan present at that fixed retained pathname may the normal
 pre-install gate be run for the replacement commit. Install the new protected

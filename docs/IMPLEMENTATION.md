@@ -200,6 +200,15 @@ exclusive-rename, and post-move checks remain unchanged. The injectable
 predecessor probe and process runner are callable-only test seams and are not
 represented in argparse or CLI input.
 
+An already completed atomic retention may be extended only through the
+literal `supersede-retained` command. It never recreates the live campaign or
+changes the original plan. It locks and fully validates the retained campaign,
+requires the exact current terminal replacement, proves the new public tip is
+a descendant, verifies machine and protected predecessor identity, and writes
+one exclusive digest-linked record through the retained directory descriptor.
+Trusted-parent child identity, descriptor identity, live-path absence, and
+complete post-write readback are checked around publication.
+
 The first exact `f447613` bootstrap on the disposable Mac subsequently proved
 that the predecessor Host proxy's Shared-DHCP discovery was incompatible with
 the required pre-start physical disconnection of Gateway Shared `net0`. The
@@ -214,6 +223,17 @@ deploys only the fixed firewall delta, and re-reads an unchanged inventory.
 Subsequent authenticated poweroff, Shared disconnection, successor activation,
 and private-plane reachability are distinct fail-closed transitions; the
 migration cannot silently substitute for any of them.
+
+The first physical invocation rejected before Host dispatch because the
+minimal migration environment omitted `HOME`, which the active predecessor
+maintenance proxy requires to locate its SSH configuration. The migration
+driver now ignores caller HOME and derives the operator home from the passwd
+database, requiring an absolute canonical directory owned by the operator and
+not group- or other-writable. Gateway audit evidence proves the fixed UUID was
+never observed, so the reusable-request contract permits the same UUID on the
+repaired attempt. Recovery independently restored every VM stopped and Shared
+disconnected. The standalone Parallels topology verifier also uses postponed
+annotation evaluation so the Neo's system Python 3.9 can execute it.
 
 Physical bootstrap later reached the first raw reservation and exposed schema
 drift in the Host receipt validator: the production Host verifier now returns

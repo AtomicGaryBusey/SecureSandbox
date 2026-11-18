@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Assert the persisted Parallels custom-network isolation controls."""
 
+from __future__ import annotations
+
 import xml.etree.ElementTree as ET
 from pathlib import Path
 

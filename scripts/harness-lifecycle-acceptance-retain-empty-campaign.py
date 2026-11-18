@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import hmac
 import importlib.util
@@ -102,6 +103,9 @@ OWNER_PROJECTION_ACKNOWLEDGEMENT = (
 )
 PROTECTED_PROJECTION_ACKNOWLEDGEMENT = (
     "RETAIN PROTECTED BOOTSTRAP PROJECTION REJECTION WITHOUT DELETION"
+)
+SUPERSEDE_ACKNOWLEDGEMENT = (
+    "EXTEND RETAINED CAMPAIGN TO COMPATIBLE DESCENDANT WITHOUT DELETION"
 )
 RESERVED_CASE_ID = "bootstrap-clean-install"
 RESERVED_EXPECTED_ERROR = "bootstrap_host_receipt_invalid"
@@ -1554,6 +1558,163 @@ def verify_retained(*, expected_campaign_id: str,
     return _result(campaign, replacement, plan, supersessions)
 
 
+def supersede_retained(*, expected_campaign_id: str,
+                       expected_source_commit: str,
+                       expected_prior_replacement_commit: str,
+                       acknowledgement: str, now: int | None = None,
+                       home: Path | None = None,
+                       source_probe: Callable[
+                           [], tuple[str, dict[str, str]]
+                       ] | None = None,
+                       identity_probe: Callable[[], str] | None = None,
+                       predecessor_probe: Callable[[str], str] | None = None,
+                       ) -> dict[str, Any]:
+    """Append one descendant binding after an atomic retention completed.
+
+    The retained campaign never returns to the live path.  A directory lock,
+    complete byte/identity validation, the prior terminal authority digest,
+    remote-tip equality, and Git ancestry all precede the exclusive append.
+    """
+    if acknowledgement != SUPERSEDE_ACKNOWLEDGEMENT:
+        raise RetentionError("retention_acknowledgement_required")
+    if platform.system() != "Darwin":
+        raise RetentionError("retention_disposable_mac_required")
+    home = Path.home() if home is None else home
+    uid = os.geteuid()
+    live = home / CAMPAIGN_RELATIVE
+    destination = home / RETAINED_RELATIVE / expected_campaign_id
+    if os.path.lexists(live):
+        raise RetentionError("retention_source_still_present")
+    parent_descriptor = _directory(destination.parent, uid)
+    try:
+        descriptor = _directory(destination, uid)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RetentionError("retention_supersession_active") from error
+            initial_identity = _directory_identity(os.fstat(descriptor))
+            named_identity = _directory_identity(os.stat(
+                destination.name, dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            ))
+            if named_identity != initial_identity:
+                raise RetentionError("retention_destination_identity_changed")
+            campaign, inventory_sha256 = validate_empty_layout(destination, uid)
+            if (campaign["campaign_id"] != expected_campaign_id
+                    or campaign["source_commit"] != expected_source_commit):
+                raise RetentionError("retention_expected_campaign_mismatch")
+            plan = _trusted_plan(destination / PLAN_NAME, uid)
+            _validate_plan_binding(plan, campaign, inventory_sha256, uid)
+            supersessions = _supersession_chain(
+                destination, uid, plan, campaign, inventory_sha256,
+            )
+            prior_replacement = (
+                supersessions[-1]["replacement_source_commit"]
+                if supersessions else plan["replacement_source_commit"]
+            )
+            prior_authority = (
+                supersessions[-1]["supersession_sha256"]
+                if supersessions else plan["plan_sha256"]
+            )
+            if prior_replacement != expected_prior_replacement_commit:
+                raise RetentionError("retention_prior_replacement_mismatch")
+
+            source_probe = (
+                PREFLIGHT.source_checkout if source_probe is None else source_probe
+            )
+            replacement, remote_tips = source_probe()
+            if replacement == prior_replacement:
+                raise RetentionError("retention_supersession_replacement_required")
+            _is_ancestor(prior_replacement, replacement)
+            if not _remote_tips_for(replacement, remote_tips):
+                raise RetentionError("retention_remote_tips_mismatch")
+            identity_probe = (
+                SUPERVISOR.current_machine_identity
+                if identity_probe is None else identity_probe
+            )
+            if identity_probe() != campaign["machine_identity_sha256"]:
+                raise RetentionError("retention_machine_identity_mismatch")
+            predecessor_probe = (
+                verify_predecessor_driver_inventory
+                if predecessor_probe is None else predecessor_probe
+            )
+            predecessor_probe(campaign["source_commit"])
+
+            observed_at = int(time.time()) if now is None else now
+            prior_observed_at = (
+                supersessions[-1]["observed_at"]
+                if supersessions else plan["observed_at"]
+            )
+            if observed_at < prior_observed_at:
+                raise RetentionError("retention_supersession_time_invalid")
+            supersession = {
+                "schema": SUPERSESSION_SCHEMA,
+                "status": "prepared",
+                "campaign_id": campaign["campaign_id"],
+                "campaign_sha256": campaign["campaign_sha256"],
+                "campaign_source_commit": campaign["source_commit"],
+                "prior_replacement_source_commit": prior_replacement,
+                "replacement_source_commit": replacement,
+                "prior_authority_sha256": prior_authority,
+                "remote_tips": remote_tips,
+                "machine_identity_sha256": campaign[
+                    "machine_identity_sha256"
+                ],
+                "operator_uid": uid,
+                "reason": "retention-plan-compatible-descendant",
+                "observed_at": observed_at,
+                "inventory_sha256": inventory_sha256,
+                "destination_name": campaign["campaign_id"],
+            }
+            supersession["supersession_sha256"] = digest(supersession)
+            name = f"{SUPERSESSION_PREFIX}{replacement}.json"
+            if os.path.lexists(live):
+                raise RetentionError("retention_source_still_present")
+            named_identity = _directory_identity(os.stat(
+                destination.name, dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            ))
+            if (named_identity != initial_identity
+                    or _directory_identity(os.fstat(descriptor))
+                    != initial_identity):
+                raise RetentionError("retention_destination_identity_changed")
+            _write_new_at(descriptor, name, supersession)
+
+            named_identity = _directory_identity(os.stat(
+                destination.name, dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            ))
+            if (named_identity != initial_identity
+                    or _directory_identity(os.fstat(descriptor))
+                    != initial_identity):
+                raise RetentionError("retention_destination_identity_changed")
+            retained_campaign, retained_inventory = validate_empty_layout(
+                destination, uid,
+            )
+            retained_plan = _trusted_plan(destination / PLAN_NAME, uid)
+            retained_supersessions = _supersession_chain(
+                destination, uid, retained_plan,
+                retained_campaign, retained_inventory,
+            )
+            if (retained_campaign != campaign
+                    or retained_inventory != inventory_sha256
+                    or retained_plan != plan
+                    or retained_supersessions != [*supersessions, supersession]):
+                raise RetentionError("retention_readback_failed")
+            return _result(
+                retained_campaign, replacement,
+                retained_plan, retained_supersessions,
+            )
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
 def retain(*, expected_campaign_id: str, expected_source_commit: str,
            acknowledgement: str, now: int | None = None,
            reserved_bootstrap: bool = False,
@@ -1868,11 +2029,32 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--expected-campaign-id", required=True)
         command.add_argument("--expected-source-commit", required=True)
         command.add_argument("--expected-replacement-commit", required=True)
+    supersede = commands.add_parser("supersede-retained")
+    supersede.add_argument("--expected-campaign-id", required=True)
+    supersede.add_argument("--expected-source-commit", required=True)
+    supersede.add_argument(
+        "--expected-prior-replacement-commit", required=True,
+    )
+    supersede.add_argument(
+        "--acknowledge", required=True,
+        help=f"must equal {SUPERSEDE_ACKNOWLEDGEMENT!r}",
+    )
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
+    if args.command == "supersede-retained":
+        result = supersede_retained(
+            expected_campaign_id=args.expected_campaign_id,
+            expected_source_commit=args.expected_source_commit,
+            expected_prior_replacement_commit=(
+                args.expected_prior_replacement_commit
+            ),
+            acknowledgement=args.acknowledge,
+        )
+        sys.stdout.buffer.write(canonical(result))
+        return 0
     reserved_bootstrap = args.command.endswith("reserved-bootstrap")
     owner_projection = args.command.endswith("owner-projected-bootstrap")
     protected_projection = args.command.endswith(

@@ -210,10 +210,13 @@ and the complete boundary verifier passes.
   every running VM's exact protected private-control path before the first
   shutdown dispatch. It remains fail-closed if any path is unavailable and
   never reconnects Shared merely to recover.
-- Cold starts receive a bounded 120-probe readiness budget. Physical macOS
-  27.2.1 / Parallels 27.2.1 replay on the disposable Mac exceeded the former
-  60-probe window even though both private TCP endpoints and protected control
-  became healthy shortly afterward.
+- Cold starts receive a bounded 120-probe readiness budget. More importantly,
+  the stopped-service bridge keeps its one already-bound GUI PID alive until
+  Gateway's exact protected control path authenticates. Physical macOS 27.2.1
+  / Parallels 27.2.1 replay with no Guest Tools showed that closing the GUI
+  before this proof can leave the fixed IPv4 absent from Parallels readback
+  indefinitely even though direct TCP is live. The proxy's VM, topology,
+  address, and SSH-host-key checks remain unchanged.
 - Lifecycle code never invokes `prlctl` as root and gains no new guest or host
   authority.
 - GUI detection occurs before the transition lock is allowed to issue a
@@ -261,8 +264,9 @@ Automated tests must prove:
 14. an already-isolated stop authenticates every running guest over the
     private control plane before mutation, succeeds without reconnecting
     Shared when those paths are live, and rejects before dispatch otherwise;
-    the cold-boot readiness budget admits a control endpoint that becomes live
-    after the former sixty-probe boundary while remaining finite.
+    the stopped-service bridge authenticates Gateway control before closing
+    its bound GUI PID, and the later closed-GUI readiness budget remains
+    finite.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or
 ordinary publication gate. The operator must first quit Parallels Desktop and

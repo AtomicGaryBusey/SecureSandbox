@@ -1174,10 +1174,13 @@ in ignored local records, not in this file.
   The exact `d4c004f...` replay proved VMs survive deliberate Parallels GUI
   closure, then exposed a later cold-boot readiness-window miss and the stale
   stop assumption that Shared disconnection implies loss of control. Publish
-  and install the bounded 120-probe/private-control-stop repair, retain the
-  still-empty `6845c998...` campaign without deletion, initialize a fresh exact
-  descendant campaign, and replay bootstrap. Never relabel either rejection as
-  an accepted observation.
+  and install the pre-close Gateway-control proof that followed the bounded
+  120-probe/private-control-stop repair. The `6ccfd5b...` replay proved the stop
+  path but showed the no-Guest-Tools Gateway never gains Parallels IPv4
+  attestation after premature GUI closure; a bounded GUI refresh produced it
+  immediately without weakening the proxy. Retain still-empty `dc6e469a...`
+  without deletion, initialize a fresh exact descendant campaign, and replay
+  bootstrap. Never relabel any rejection as an accepted observation.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

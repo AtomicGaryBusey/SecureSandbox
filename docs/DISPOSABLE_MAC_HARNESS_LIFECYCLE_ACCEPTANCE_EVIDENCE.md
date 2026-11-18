@@ -874,3 +874,19 @@ Gateway, and independent Parallels readback proved all three VMs stopped. The
 repair doubles the bounded cold-boot probe budget and permits an already-
 isolated stop only after every running guest's protected private-control path
 is proven. This remains defect evidence, not campaign acceptance evidence.
+
+Exact `6ccfd5b...` then physically proved the private-control stop repair, but
+its fresh bootstrap replay rejected with the same zero-observation control
+classification after the expanded window. Readback isolated the actual vendor
+dependency: with Parallels Guest Tools absent, the headless running Gateway had
+live TCP at fixed `172.30.10.1:22`, while Parallels exposed only link-local
+IPv6. The protected proxy correctly rejected because its exact Parallels
+address attestation was absent. Opening one bounded GUI session caused the
+exact fixed IPv4 to appear immediately; it remained in readback after normal
+GUI closure, both protected control paths authenticated, and repaired
+`labctl stop` powered Research and Gateway off without reconnecting Shared.
+The next repair therefore keeps the bootstrap's already-bound GUI PID alive
+until Gateway's unchanged protected proxy authenticates, then terminates that
+exact PID and continues under the existing lock. It does not weaken address,
+topology, VM-identity, or SSH-host-key verification. Campaign `dc6e469a...`
+remains empty; this is defect evidence, not an accepted observation.

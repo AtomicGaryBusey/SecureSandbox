@@ -31,6 +31,11 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
             "gateway": "running", "research": "stopped", "target": "stopped",
             "gateway_net0": "connected",
         }
+        self.wait_guest = mock.patch.object(
+            bootstrap.LIFECYCLE, "wait_guest", return_value=True,
+        )
+        self.wait_guest_mock = self.wait_guest.start()
+        self.addCleanup(self.wait_guest.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -252,6 +257,30 @@ class StoppedServiceBootstrapTests(unittest.TestCase):
         terminate_gui.assert_not_called()
         start.assert_not_called()
         self.assertIn("parallels_gui_session_changed", emit.call_args.args[4])
+
+    def test_gateway_control_must_authenticate_before_gui_close(self):
+        patches = self.common(
+            [(self.initial, {}), (self.intermediate, {}), (self.intermediate, {})],
+            [(75,), (75,)],
+        )
+        self.wait_guest_mock.return_value = False
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6] as terminate_gui, patches[7] as emit, \
+                mock.patch.object(
+                    bootstrap.LIFECYCLE, "mutate", side_effect=self.applied_mutation,
+                ), mock.patch.object(
+                    bootstrap.LIFECYCLE, "wait_vm", return_value=True,
+                ), mock.patch.object(bootstrap.LIFECYCLE, "start") as start:
+            self.assertEqual(bootstrap.run(), 1)
+        self.wait_guest_mock.assert_called_once_with(
+            bootstrap.GATEWAY_CONTROL,
+        )
+        terminate_gui.assert_not_called()
+        start.assert_not_called()
+        self.assertIn(
+            "gateway_control_unreachable_before_gui_close",
+            emit.call_args.args[4],
+        )
 
     def test_closed_service_loss_rejects_without_ordinary_start(self):
         unavailable = {

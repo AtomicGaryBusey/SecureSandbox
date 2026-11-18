@@ -779,9 +779,15 @@ evidence proved the first requires Parallels Tools and the second silently
 escalates to a forced stop. The final all-stopped baseline therefore has no
 transient egress window during later vendor-service bootstrap.
 
-With the Parallels GUI closed and the same lock still held, the acceptance
-transition starts only Research, leaves Target stopped, disables automatic
-gamepad sharing, and waits only for Gateway and Research protected control.
+The stopped-service bridge binds one exact Parallels GUI PID while holding the
+same lifecycle lock, starts only Gateway, and requires Gateway's exact
+protected private-control path to authenticate before terminating that bound
+PID. This is a discovery barrier, not an alternate control path: the proxy
+still requires the exact VM identity, NIC topology, fixed `172.30.10.1`
+Parallels address readback, and SSH host key. After independently proving that
+the GUI is closed, the acceptance transition starts only Research, leaves
+Target stopped, disables automatic gamepad sharing, and waits for Gateway and
+Research protected control.
 It rejects active or unreconciled Research run markers, changes and
 independently reads back only those two guest clocks, and invokes the same
 read-only Host release, Research zero-generation store, and independent
@@ -829,9 +835,13 @@ the VM retained the vendor defaults `Startup view: same` and
 `Startup view: headless` and `On window close: keep-running`, with autostart
 still off and autostop still stop. Creation reads those values back from fresh
 Parallels JSON, and the ordinary start controller and acceptance bootstrap
-reject legacy policy before mutation. This preserves the design requirement
-that the bound GUI be removed before the ordinary lifecycle controller runs;
-it does not weaken that boundary by allowing GUI-bound lifecycle mutation.
+reject legacy policy before mutation. Physical replay without Guest Tools also
+proved that terminating the bound GUI before Parallels publishes Gateway's
+fixed IPv4 can strand an otherwise-live private endpoint outside the protected
+proxy's attestation boundary. The bridge therefore keeps only that bound PID
+alive through the exact Gateway-control proof, terminates it, and independently
+proves the GUI closed before the ordinary lifecycle continuation runs. It does
+not permit GUI-bound ordinary lifecycle mutation or weaken proxy verification.
 
 Existing disposable guests adopt only the new Gateway input rule through the
 authenticated privileged-control deployment channel. The migration installer

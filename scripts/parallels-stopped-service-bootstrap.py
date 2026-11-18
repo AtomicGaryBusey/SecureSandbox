@@ -26,6 +26,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent.parent
 MAX_OUTPUT = 4096
 GATEWAY_NAME = "SecureSandbox-Gateway"
+GATEWAY_CONTROL = "sandbox-gateway-control"
 
 
 class ServiceBootstrapError(RuntimeError):
@@ -203,6 +204,18 @@ def run(*, continuation: Callable[..., int] | None = None,
             LIFECYCLE.emit(
                 "start", "rejected", "transition", outcomes,
                 ["parallels_service_bootstrap_readback_invalid"],
+            )
+            return 1
+        # Parallels without Guest Tools may not publish the Gateway's fixed
+        # control-plane IPv4 until its GUI session performs one live address
+        # discovery.  Keep the already-bound GUI PID alive until the exact
+        # protected control path authenticates.  The proxy still verifies the
+        # VM identity, topology, address and SSH host key; this adds no fallback
+        # endpoint and closes no security check.
+        if not LIFECYCLE.wait_guest(GATEWAY_CONTROL):
+            LIFECYCLE.emit(
+                "start", "rejected", "transition", outcomes,
+                ["gateway_control_unreachable_before_gui_close"],
             )
             return 1
         if gui_process_ids() != (gui_pid,):

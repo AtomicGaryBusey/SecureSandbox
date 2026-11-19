@@ -1,11 +1,11 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
 Status: active only on the dedicated disposable Mac. The live campaign is
-abbreviated `a4b764b6...`, bound to exact source `cf46041...`, and has completed
-30 cases with 34 protected observations. Its first qualification attempt used
-authenticated privileged control and the protected Research worker succeeded,
-but the outer driver failed closed on systemd's normalized deny-all and removed-
-cgroup readback. Source repair and a no-delete progressed-campaign retention
+abbreviated `8fb982a9...`, bound to exact source `469c3e4...`, and has completed
+30 cases with 34 protected observations. Its first qualification attempt
+reached authenticated privileged control but deadlocked on the contradictory
+`systemd-run --wait` plus `RemainAfterExit=yes` lifecycle until the fixed
+120-second bound. Source repair and a no-delete progressed-campaign retention
 ceremony are under review. No operator prompt is currently runnable.
 
 ## Current-Mac gate
@@ -20,15 +20,15 @@ development Mac.
 
 ## Current Neo resumption
 
-The current campaign is abbreviated `a4b764b6...`, bound to exact source
-abbreviated `cf46041...`. It retains 30 completed cases,
+The current campaign is abbreviated `8fb982a9...`, bound to exact source
+abbreviated `469c3e4...`. It retains 30 completed cases,
 34 root-owned mode-0444 observations, and an empty private reservation for the
 exact next case `qualification-no-preexecution`. Gateway and Research are
 running, Target is stopped, and Shared is disconnected. Preserve all of that
 state. Do not rerun qualification, delete the reservation, reuse the campaign,
 stop the stack, or reconnect Shared while the repair is unpublished.
 
-After the systemd-readback descendant is reviewed, committed, published to both
+After the systemd-wait descendant is reviewed, committed, published to both
 authorized `public-release` tips, and installed as the exact protected
 ten-driver release, run only the explicit
 `retain-qualification-control-rejection` ceremony with the old campaign UUID,
@@ -37,9 +37,10 @@ old source commit, and its literal acknowledgement. Then run
 validate the exact 30-case/34-observation prefix, immutable observation modes,
 historical raw bundles, empty qualification reservation, and predecessor
 diagnostic before its exclusive atomic rename. The diagnostic must identify
-`authenticated-control-systemd-readback-rejected`; the earlier
-`direct-research-admin-nonroot` form remains valid only for its already-retained
-historical campaign. It leaves the
+`authenticated-control-systemd-wait-deadlock`; the earlier
+`authenticated-control-systemd-readback-rejected` and
+`direct-research-admin-nonroot` forms remain valid only for their
+already-retained historical campaigns. It leaves the
 campaign-keyed Host and Research protected state in place. Any ambiguity stops
 the sequence; never rerun retention speculatively.
 

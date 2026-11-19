@@ -213,6 +213,9 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             NOW, Path("/evidence/stdout"), Path("/evidence/stderr"),
         )
         joined = "\n".join(argv)
+        self.assertNotIn("--wait", argv)
+        self.assertNotIn("--no-block", argv)
+        self.assertIn("--property=RemainAfterExit=yes", argv)
         for required in (
             "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any", "ProtectSystem=strict", "ProtectHome=yes",
@@ -226,6 +229,17 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             "worker", "--case", "qualification-deny-network",
             "--now", str(NOW),
         ])
+
+    def test_retained_oneshot_does_not_deadlock_waiting_for_its_own_stop(self):
+        argv = qualification.systemd_argv(
+            "secure-sandbox-qualification-campaign-case.service",
+            Path("/protected/release"), "qualification-no-preexecution",
+            NOW, Path("/evidence/stdout"), Path("/evidence/stderr"),
+        )
+        self.assertIn("--property=Type=oneshot", argv)
+        self.assertIn("--property=RemainAfterExit=yes", argv)
+        self.assertNotIn("--wait", argv)
+        self.assertNotIn("--no-block", argv)
 
     def test_worker_digest_or_physical_claim_tampering_is_rejected(self):
         value = qualification.worker("qualification-deny-login", NOW)

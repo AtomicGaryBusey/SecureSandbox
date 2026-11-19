@@ -224,17 +224,27 @@ elif (len(deploy_matches) == 1 and not run_research_matches):
     deploy = ast.dump(deploy_matches[0])
     validation_matches = functions(driver_tree, "validate_unit_properties")
     cgroup_matches = functions(driver_tree, "empty_control_group")
-    if len(validation_matches) != 1 or len(cgroup_matches) != 1:
+    systemd_matches = functions(driver_tree, "systemd_argv")
+    if (len(validation_matches) != 1 or len(cgroup_matches) != 1
+            or len(systemd_matches) != 1):
         raise RuntimeError("historical_function_invalid")
     validation = ast.dump(validation_matches[0])
     cgroup = ast.dump(cgroup_matches[0])
+    systemd = ast.dump(systemd_matches[0])
     if ("CONTROL_CLIENT" not in deploy or "RESEARCH_CONTROL" not in deploy
-            or "RESEARCH_ADMIN" in deploy or "deploy" not in deploy
-            or "ControlGroup" not in validation or "startswith" not in validation
-            or "IPAddressDeny" not in validation or "any" not in validation
-            or "cgroup.procs" not in cgroup or "cgroup.events" not in cgroup):
-        raise RuntimeError("historical_systemd_readback_defect_not_reproduced")
-    execution_path = "authenticated-control-systemd-readback-rejected"
+            or "RESEARCH_ADMIN" in deploy or "deploy" not in deploy):
+        raise RuntimeError("historical_control_path_not_reproduced")
+    if ("--wait" in systemd and "RemainAfterExit=yes" in systemd
+            and "0.0.0.0/0" in validation and "::/0" in validation
+            and "lexists" in cgroup and "cgroup.procs" in cgroup
+            and "cgroup.events" in cgroup):
+        execution_path = "authenticated-control-systemd-wait-deadlock"
+    elif ("ControlGroup" in validation and "startswith" in validation
+            and "IPAddressDeny" in validation and "any" in validation
+            and "cgroup.procs" in cgroup and "cgroup.events" in cgroup):
+        execution_path = "authenticated-control-systemd-readback-rejected"
+    else:
+        raise RuntimeError("historical_systemd_defect_not_reproduced")
 else:
     raise RuntimeError("historical_control_path_not_reproduced")
 if "geteuid" not in execute or "qualification_root_required" not in execute:
@@ -1216,6 +1226,7 @@ def _validate_qualification_rejection_diagnostic(
             or value.get("execution_path") not in {
                 "direct-research-admin-nonroot",
                 "authenticated-control-systemd-readback-rejected",
+                "authenticated-control-systemd-wait-deadlock",
             }
             or not isinstance(observed_at, int)
             or isinstance(observed_at, bool)

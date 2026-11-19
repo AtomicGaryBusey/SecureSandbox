@@ -665,6 +665,20 @@ file dependency closure beneath a root-owned immutable release and campaign
 state root, refuses active or unreconciled agent runs, and never admits a
 generation.
 
+Physical replay at exact release `469c3e4...` exposed a separate lifecycle
+contradiction before that readback could run. The transient command combined
+`RemainAfterExit=yes` with `systemd-run --wait`; the installed systemd help
+defines `--wait` as waiting until the service is stopped again, while the
+driver stopped the retained unit only in its later `finally` block. Research
+therefore held the request for exactly the driver's 120-second bound and the
+privileged deploy returned status 120. The Host retained an empty raw
+reservation and projected no observation. The driver now omits `--wait` and
+uses systemd-run's default blocking start-job behavior: for `Type=oneshot`, it
+waits for `ExecStart` to complete while leaving the successful unit
+`active/exited` for independent property and cgroup readback. `--no-block`
+remains prohibited. A regression binds all three facts so a future change
+cannot recreate the wait/stop cycle.
+
 The protected Host supervisor and fixed projector close the source path. The
 supervisor accepts only the next qualification case, rebinds the enrolled Mac
 and exact root-owned Host manifest, reserves raw evidence before remote

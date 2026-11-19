@@ -334,7 +334,13 @@ def systemd_argv(unit: str, release: Path, case_id: str, now: int,
                  stdout_path: Path, stderr_path: Path) -> list[str]:
     unset = " ".join(FORBIDDEN_ENVIRONMENT)
     return [
-        str(SYSTEMD_RUN), "--quiet", "--wait", f"--unit={unit}",
+        # Do not use systemd-run --wait here.  With RemainAfterExit=yes that
+        # option waits for the unit to be stopped, but this driver must retain
+        # the completed active/exited unit long enough to read its isolation
+        # properties and cgroup state.  systemd-run's default blocking mode
+        # waits for the Type=oneshot start job (and therefore ExecStart) to
+        # finish without waiting for the retained unit to be stopped.
+        str(SYSTEMD_RUN), "--quiet", f"--unit={unit}",
         "--property=Type=oneshot", "--property=RemainAfterExit=yes",
         "--property=DynamicUser=yes", "--property=PrivateNetwork=yes",
         "--property=RestrictAddressFamilies=AF_UNIX",

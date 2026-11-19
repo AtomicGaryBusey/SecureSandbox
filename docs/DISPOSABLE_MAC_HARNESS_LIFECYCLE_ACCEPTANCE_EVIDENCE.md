@@ -3,13 +3,38 @@
 Status: every superseded or failed exact-commit campaign on the disposable Neo
 is retained without deletion, including historical protected collections and
 their unchanged raw bytes. The current live campaign is abbreviated
-`a4b764b6...`, bound to source abbreviated `cf46041...`. It has completed 30
+`8fb982a9...`, bound to source abbreviated `469c3e4...`. It has completed 30
 ordered cases and retains 34 root-owned, mode-0444 observations. Its exact next
 case is `qualification-no-preexecution`, with one empty Host raw reservation
-after the protected Research worker succeeded but its systemd readback was
-rejected. No complete acceptance verdict has been issued.
+after authenticated Research control hit a contradictory retained-unit wait
+path. No complete acceptance verdict has been issued.
 
 ## Current physical checkpoint — 2026-11-18
+
+The fresh `469c3e4...` campaign physically replayed both bootstrap cases, all
+sixteen provenance cases, and all twelve archive cases. Independent inventory
+readback found exactly 34 observations, each root-owned, mode 0444,
+single-linked, and accepted by the production ordering validator. Its first
+qualification request reached the authenticated Research root dispatcher, but
+the protected installer returned status 120 after exactly 120 seconds. The
+installed systemd-run help proves why: `--wait` waits until the service is
+stopped again, while the driver also set `RemainAfterExit=yes` and deferred its
+stop to the `finally` block that could run only after `--wait` returned. The
+Host reservation remains empty and no qualification observation exists. The
+campaign must not be retried.
+
+The source repair removes only `--wait`, retains default blocking start-job
+behavior, and continues to prohibit `--no-block`. Thus the Type=oneshot worker
+must finish before readback while the retained successful unit remains
+`active/exited`. The progressed-campaign retention diagnostic now binds this
+third historical path as
+`authenticated-control-systemd-wait-deadlock`; the direct-admin and normalized
+readback forms remain valid only for their exact retained predecessors.
+Focused qualification and retention tests pass. Publication, no-delete
+retention of `8fb982a9...`, successor installation, and fresh replay remain
+pending.
+
+## Retained normalized-readback checkpoint
 
 The `cf46041...` successor release was published to both authorized remotes,
 installed root-owned on the Neo, and passed the complete ten-driver readiness
@@ -39,10 +64,11 @@ a present cgroup still must have no processes and `populated 0`. The existing
 progressed-campaign retention diagnostic now distinguishes the historical
 direct-admin defect from this authenticated-control systemd-readback defect
 while preserving both old verifier forms. Focused qualification and retention
-tests pass. Publication, physical no-delete retention of `a4b764b6...`, exact
-successor installation, and fresh replay remain pending.
+tests passed. The campaign was then retained by its no-delete ceremony and
+independently verified; exact successor `469c3e4...` was installed and the
+fresh `8fb982a9...` replay produced the current checkpoint above.
 
-## Retained predecessor checkpoint
+## Retained direct-admin predecessor checkpoint
 
 The retained predecessor campaign `4bbd26aa...` physically completed both bootstrap cases, all sixteen
 provenance cases, and all twelve archive cases. Independent inventory readback
@@ -84,7 +110,7 @@ as retained in place; the retention operation does not delete, overwrite, or
 reuse either protected state tree. The operator campaign directory moved
 atomically without overwrite to its UUID under the retained-campaign root and
 passed its separate read-only verifier. Its successor release installation and
-fresh replay produced the current `a4b764b6...` checkpoint above.
+fresh replay produced the retained normalized-readback checkpoint above.
 
 The exact `35dd424` protected ten-driver release is installed root-owned on the
 Neo. Its complete manifest passed independent readiness with ten available

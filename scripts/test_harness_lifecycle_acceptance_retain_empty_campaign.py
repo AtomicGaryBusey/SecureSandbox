@@ -782,6 +782,19 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 diagnostic, self.campaign, os.geteuid(),
             )
 
+    def test_qualification_rejection_accepts_exact_systemd_readback_path(self):
+        diagnostic = self.seed_qualification_rejection()
+        diagnostic["execution_path"] = (
+            "authenticated-control-systemd-readback-rejected"
+        )
+        diagnostic["diagnostic_sha256"] = acceptance.digest({
+            key: value for key, value in diagnostic.items()
+            if key != "diagnostic_sha256"
+        })
+        retention._validate_qualification_rejection_diagnostic(
+            diagnostic, self.campaign, os.geteuid(),
+        )
+
     def test_qualification_rejection_commands_are_explicit(self):
         retain_args = retention.parser().parse_args([
             "retain-qualification-control-rejection",

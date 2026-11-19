@@ -647,8 +647,18 @@ dynamic-user systemd unit with a private network, `AF_UNIX`-only address-family
 policy, deny-all IP policy, strict protected filesystem, private home and tmp,
 no-new-privileges, a two-task ceiling, and an explicit credential-environment
 deny list. It independently reads back the complete unit policy, successful
-main-process result, zero restarts, empty post-run cgroup, and Research boot
-identity before it can label its outer result physically eligible. The inner
+main-process result, zero restarts, post-run cgroup state, and Research boot
+identity before it can label its outer result physically eligible. Systemd
+versions may render `IPAddressDeny=any` either literally or as the exact pair
+`0.0.0.0/0 ::/0`; the wrapper accepts only those two semantically identical
+forms and records one canonical deny-all value. Some versions remove the
+completed transient unit's cgroup before `systemctl show` returns and therefore
+report an empty `ControlGroup`. The wrapper accepts that form only when the
+deterministic `/system.slice/<exact-unit>` path is absent, records
+`cgroup_present: false`, and still requires an empty process set. A reported
+path must equal that deterministic path and must independently report no
+processes plus `populated 0`. A substituted path, partial address denial, or an
+empty readback while the expected cgroup still exists fails closed. The inner
 result must still say that it is ineligible; a caller cannot upgrade it by
 editing a field. An exact-commit Research installer publishes the fixed seven
 file dependency closure beneath a root-owned immutable release and campaign

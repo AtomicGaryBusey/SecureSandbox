@@ -72,7 +72,7 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             "ExecMainCode": "1",
             "ExecMainStatus": "0",
             "NRestarts": "0",
-            "ControlGroup": "/system.slice/example.service",
+            "ControlGroup": f"/system.slice/{unit}",
             "TasksMax": "2",
             "PrivateNetwork": "yes",
             "ProtectSystem": "strict",
@@ -82,7 +82,7 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             "NoNewPrivileges": "yes",
             "DynamicUser": "yes",
             "RestrictAddressFamilies": "AF_UNIX",
-            "IPAddressDeny": "any",
+            "IPAddressDeny": "0.0.0.0/0 ::/0",
             "Environment": "LANG=C.UTF-8 PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1",
             "UnsetEnvironment": " ".join(qualification.FORBIDDEN_ENVIRONMENT),
         }
@@ -106,7 +106,12 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             "qualification_case_id": qualification.ACCEPTANCE_CASES[case_id],
             "core_result": core, "core_result_sha256": acceptance.digest(core),
             "systemd_isolation": isolation,
-            "cgroup_readback": {"cgroup_procs": [], "populated": False},
+            "cgroup_readback": {
+                "cgroup_path": f"/system.slice/{unit}",
+                "cgroup_present": True,
+                "cgroup_procs": [],
+                "populated": False,
+            },
             "research_boot_sha256": "3" * 64,
             "observer_scope": "protected-research-systemd",
             "network_connections": [], "child_processes_after_completion": [],
@@ -140,10 +145,25 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
         value = qualification.validate_unit_properties(properties, unit)
         self.assertTrue(value["private_network"])
         self.assertEqual(value["tasks_max"], 2)
+        self.assertEqual(
+            value["ip_address_deny"], ["0.0.0.0/0", "::/0"],
+        )
+        literal = dict(properties)
+        literal["IPAddressDeny"] = "any"
+        self.assertEqual(
+            qualification.validate_unit_properties(literal, unit), value,
+        )
+        removed = dict(properties)
+        removed["ControlGroup"] = ""
+        self.assertEqual(
+            qualification.validate_unit_properties(removed, unit)["control_group"],
+            "",
+        )
         for field, replacement in (
             ("PrivateNetwork", "no"),
             ("TasksMax", "3"),
-            ("IPAddressDeny", ""),
+            ("IPAddressDeny", "0.0.0.0/0"),
+            ("ControlGroup", "/system.slice/substituted.service"),
             ("ProtectSystem", "full"),
             ("DynamicUser", "no"),
             ("ExecMainStatus", "1"),
@@ -153,6 +173,37 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     qualification.QualificationDriverError, "isolation_unverified"):
                 qualification.validate_unit_properties(tampered, unit)
+
+    def test_cgroup_readback_accepts_only_empty_or_removed_exact_unit(self):
+        unit = "secure-sandbox-qualification-1234-case.service"
+        relative = Path("system.slice") / unit
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            removed = qualification.empty_control_group("", unit, root=root)
+            self.assertEqual(removed, {
+                "cgroup_path": f"/system.slice/{unit}",
+                "cgroup_present": False,
+                "cgroup_procs": [],
+                "populated": False,
+            })
+            group = root / relative
+            group.mkdir(parents=True)
+            (group / "cgroup.procs").write_text("", encoding="ascii")
+            (group / "cgroup.events").write_text(
+                "populated 0\nfrozen 0\n", encoding="ascii",
+            )
+            present = qualification.empty_control_group(
+                f"/system.slice/{unit}", unit, root=root,
+            )
+            self.assertEqual(present, {
+                "cgroup_path": f"/system.slice/{unit}",
+                "cgroup_present": True,
+                "cgroup_procs": [],
+                "populated": False,
+            })
+            with self.assertRaisesRegex(
+                    qualification.QualificationDriverError, "cgroup_unreadable"):
+                qualification.empty_control_group("", unit, root=root)
 
     def test_systemd_worker_has_fixed_network_process_filesystem_and_credential_bounds(self):
         campaign = self.campaign()

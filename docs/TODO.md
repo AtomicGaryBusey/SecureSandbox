@@ -581,14 +581,15 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The active Neo campaign is abbreviated `4bbd26aa...`, bound to exact public
-  source abbreviated `10fcd0e...`. It has completed 30 cases and
+  The active Neo campaign is abbreviated `a4b764b6...`, bound to exact public
+  source abbreviated `cf46041...`. It has completed 30 cases and
   retains 34 independently validated root-owned mode-0444 observations. Its
   exact next case is `qualification-no-preexecution`; that case has only an
-  empty raw reservation after the historical direct-admin execution path
-  correctly failed against the Research driver's root requirement. Preserve
+  empty raw reservation after authenticated privileged control successfully
+  ran the protected Research worker but the outer driver rejected systemd's
+  normalized deny-all and already-removed cgroup readback. Preserve
   it through the explicit progressed-campaign no-delete retention and
-  independent verification path after the authenticated-control repair is
+  independent verification path after the systemd-readback repair is
   published to both remotes. Then install the exact successor release,
   initialize a fresh campaign, and replay from bootstrap in fixed order. Do
   not retry, delete, copy forward, reconnect Shared, or relabel the failed

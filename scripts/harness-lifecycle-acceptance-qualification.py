@@ -205,12 +205,19 @@ def validate_unit_properties(values: dict[str, str], expected_unit: str) -> dict
     try:
         environment = shlex.split(values["Environment"])
         unset = shlex.split(values["UnsetEnvironment"])
+        address_deny = shlex.split(values["IPAddressDeny"])
         tasks_max = int(values["TasksMax"])
         restarts = int(values["NRestarts"])
         main_status = int(values["ExecMainStatus"])
     except (KeyError, ValueError) as error:
         raise QualificationDriverError("qualification_unit_readback_invalid") from error
     expected_environment = {"LANG=C.UTF-8", "PATH=/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1"}
+    expected_control_group = f"/system.slice/{expected_unit}"
+    deny_all = (
+        address_deny == ["any"]
+        or (len(address_deny) == 2
+            and set(address_deny) == {"0.0.0.0/0", "::/0"})
+    )
     if (values.get("Id") != expected_unit
             or values.get("LoadState") != "loaded"
             or values.get("ActiveState") != "active"
@@ -226,17 +233,17 @@ def validate_unit_properties(values: dict[str, str], expected_unit: str) -> dict
             or values.get("NoNewPrivileges") != "yes"
             or values.get("DynamicUser") != "yes"
             or set(values.get("RestrictAddressFamilies", "").split()) != {"AF_UNIX"}
-            or values.get("IPAddressDeny") != "any"
+            or not deny_all
             or set(environment) != expected_environment
             or set(unset) != set(FORBIDDEN_ENVIRONMENT)
-            or not values.get("ControlGroup", "").startswith("/")):
+            or values.get("ControlGroup") not in {"", expected_control_group}):
         raise QualificationDriverError("qualification_isolation_unverified")
     return {
         "control_group": values["ControlGroup"],
         "dynamic_user": True,
         "environment": sorted(environment),
         "exec_main_status": main_status,
-        "ip_address_deny": "any",
+        "ip_address_deny": ["0.0.0.0/0", "::/0"],
         "n_restarts": restarts,
         "no_new_privileges": True,
         "private_devices": True,
@@ -252,10 +259,21 @@ def validate_unit_properties(values: dict[str, str], expected_unit: str) -> dict
     }
 
 
-def empty_control_group(control_group: str) -> dict[str, Any]:
-    relative = control_group.removeprefix("/")
-    root = Path("/sys/fs/cgroup")
-    group = root / relative
+def empty_control_group(control_group: str, expected_unit: str, *,
+                        root: Path = Path("/sys/fs/cgroup")) -> dict[str, Any]:
+    expected = f"/system.slice/{expected_unit}"
+    if control_group not in {"", expected}:
+        raise QualificationDriverError("qualification_cgroup_unreadable")
+    group = root / expected.removeprefix("/")
+    if not control_group:
+        if os.path.lexists(group):
+            raise QualificationDriverError("qualification_cgroup_unreadable")
+        return {
+            "cgroup_path": expected,
+            "cgroup_present": False,
+            "cgroup_procs": [],
+            "populated": False,
+        }
     try:
         processes = (group / "cgroup.procs").read_text(encoding="ascii").split()
         events = dict(
@@ -266,7 +284,12 @@ def empty_control_group(control_group: str) -> dict[str, Any]:
         raise QualificationDriverError("qualification_cgroup_unreadable") from error
     if processes or events.get("populated") != "0":
         raise QualificationDriverError("qualification_cgroup_not_empty")
-    return {"cgroup_procs": [], "populated": False}
+    return {
+        "cgroup_path": expected,
+        "cgroup_present": True,
+        "cgroup_procs": [],
+        "populated": False,
+    }
 
 
 def boot_sha256() -> str:
@@ -367,7 +390,7 @@ def execute(campaign_path: Path, case_id: str, output_root: Path,
         properties = validate_unit_properties(
             parse_show(command(arguments).stdout), unit,
         )
-        cgroup = empty_control_group(properties["control_group"])
+        cgroup = empty_control_group(properties["control_group"], unit)
         core = trusted_json(stdout_path, expected_uid=0)
         if stderr_path.stat().st_size != 0:
             raise QualificationDriverError("qualification_worker_stderr_present")
@@ -466,10 +489,12 @@ def validate_result(value: dict[str, Any], campaign: dict[str, Any],
             or not isinstance(isolation, dict) or set(isolation) != isolation_fields
             or isolation.get("dynamic_user") is not True
             or not isinstance(isolation.get("control_group"), str)
-            or not isolation["control_group"].startswith("/")
+            or isolation["control_group"]
+               not in {"", f"/system.slice/{expected_unit}"}
             or isolation.get("environment") != expected_environment
             or isolation.get("exec_main_status") != 0
-            or isolation.get("ip_address_deny") != "any"
+            or isolation.get("ip_address_deny")
+               != ["0.0.0.0/0", "::/0"]
             or isolation.get("n_restarts") != 0
             or isolation.get("no_new_privileges") is not True
             or isolation.get("private_devices") is not True
@@ -484,7 +509,13 @@ def validate_result(value: dict[str, Any], campaign: dict[str, Any],
             or isolation.get("unit") != expected_unit
             or isolation.get("unit_result") != "success"
             or not isinstance(cgroup, dict)
-            or cgroup != {"cgroup_procs": [], "populated": False}
+            or set(cgroup) != {
+                "cgroup_path", "cgroup_present", "cgroup_procs", "populated",
+            }
+            or cgroup.get("cgroup_path") != f"/system.slice/{expected_unit}"
+            or not isinstance(cgroup.get("cgroup_present"), bool)
+            or cgroup.get("cgroup_procs") != []
+            or cgroup.get("populated") is not False
             or not isinstance(value.get("research_boot_sha256"), str)
             or SHA256.fullmatch(value["research_boot_sha256"]) is None
             or value.get("observer_scope") != "protected-research-systemd"

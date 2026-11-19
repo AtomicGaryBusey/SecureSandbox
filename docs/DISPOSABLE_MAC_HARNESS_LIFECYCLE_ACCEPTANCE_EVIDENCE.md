@@ -2,16 +2,49 @@
 
 Status: every superseded or failed exact-commit campaign on the disposable Neo
 is retained without deletion, including historical protected collections and
-their unchanged raw bytes. The active campaign is
-abbreviated `4bbd26aa...`, bound to source abbreviated `10fcd0e...`. It has
-completed 30 ordered
-cases and retains 34 root-owned, mode-0444 observations. Its exact next case is
-`qualification-no-preexecution`. No complete acceptance verdict has been
-issued.
+their unchanged raw bytes. The current live campaign is abbreviated
+`a4b764b6...`, bound to source abbreviated `cf46041...`. It has completed 30
+ordered cases and retains 34 root-owned, mode-0444 observations. Its exact next
+case is `qualification-no-preexecution`, with one empty Host raw reservation
+after the protected Research worker succeeded but its systemd readback was
+rejected. No complete acceptance verdict has been issued.
 
 ## Current physical checkpoint — 2026-11-18
 
-The active campaign physically completed both bootstrap cases, all sixteen
+The `cf46041...` successor release was published to both authorized remotes,
+installed root-owned on the Neo, and passed the complete ten-driver readiness
+readback. The prior `4bbd26aa...` campaign was retained by its no-delete
+ceremony and independently verified. A fresh campaign `a4b764b6...` then
+physically replayed both bootstrap cases, all sixteen provenance cases, and all
+twelve archive cases. Independent inventory readback found exactly 34
+observations, each root-owned, mode 0444, single-linked, and accepted by the
+production ordering validator.
+
+The repaired qualification supervisor did use authenticated privileged
+control. Research accepted the `securectl` identity, ran the root dispatcher,
+installed the exact `cf46041...` seven-file closure, and successfully completed
+the isolated `qualification-no-preexecution` worker with zero restarts and exit
+status zero. The Host correctly projected no observation because the outer
+Research driver rejected systemd's physical readback. On this VM, systemd
+normalizes `IPAddressDeny=any` to `0.0.0.0/0 ::/0` and reports
+`ControlGroup=` empty after removing the completed transient cgroup. The driver
+incorrectly required the literal `any` and a nonempty cgroup path. This is a
+systemd-readback compatibility defect, not a failed qualification outcome.
+The raw Host reservation remains empty; the exact campaign must not be retried.
+
+The source repair accepts only the two exact semantic deny-all renderings. It
+accepts an empty `ControlGroup` only when the deterministic exact-unit cgroup
+path is absent, and records whether the cgroup was present or already removed;
+a present cgroup still must have no processes and `populated 0`. The existing
+progressed-campaign retention diagnostic now distinguishes the historical
+direct-admin defect from this authenticated-control systemd-readback defect
+while preserving both old verifier forms. Focused qualification and retention
+tests pass. Publication, physical no-delete retention of `a4b764b6...`, exact
+successor installation, and fresh replay remain pending.
+
+## Retained predecessor checkpoint
+
+The retained predecessor campaign `4bbd26aa...` physically completed both bootstrap cases, all sixteen
 provenance cases, and all twelve archive cases. Independent inventory readback
 found exactly 34 observations, each root-owned, mode 0444, single-linked, and
 accepted by the production ordering validator. Gateway and Research remain
@@ -48,10 +81,10 @@ loads the exact protected predecessor, proves its historical direct-admin path
 and root-only driver requirement, and binds the reservation identity and source
 hashes. The plan records the Host and Research campaign-keyed protected state
 as retained in place; the retention operation does not delete, overwrite, or
-reuse either protected state tree. The operator campaign directory moves
+reuse either protected state tree. The operator campaign directory moved
 atomically without overwrite to its UUID under the retained-campaign root and
-has a separate read-only verifier. Publication, physical retention, successor
-release installation, and replay in a fresh campaign remain pending.
+passed its separate read-only verifier. Its successor release installation and
+fresh replay produced the current `a4b764b6...` checkpoint above.
 
 The exact `35dd424` protected ten-driver release is installed root-owned on the
 Neo. Its complete manifest passed independent readiness with ten available

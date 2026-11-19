@@ -201,18 +201,43 @@ driver_source = driver_path.read_bytes()
 supervisor_tree = ast.parse(supervisor_source, filename=str(supervisor_path))
 driver_tree = ast.parse(driver_source, filename=str(driver_path))
 
-def function(tree, name):
+def functions(tree, name):
     matches = [node for node in tree.body
                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                and node.name == name]
-    if len(matches) != 1:
+    if len(matches) > 1:
         raise RuntimeError("historical_function_invalid")
-    return matches[0]
+    return matches
 
-run_research = ast.dump(function(supervisor_tree, "run_research"))
-execute = ast.dump(function(driver_tree, "execute"))
-if ("RESEARCH_ADMIN" not in run_research or "COMMON" not in run_research
-        or "geteuid" not in execute or "qualification_root_required" not in execute):
+execute_matches = functions(driver_tree, "execute")
+if len(execute_matches) != 1:
+    raise RuntimeError("historical_function_invalid")
+execute = ast.dump(execute_matches[0])
+run_research_matches = functions(supervisor_tree, "run_research")
+deploy_matches = functions(supervisor_tree, "deploy_and_run")
+if (len(run_research_matches) == 1 and not deploy_matches):
+    run_research = ast.dump(run_research_matches[0])
+    if "RESEARCH_ADMIN" not in run_research or "COMMON" not in run_research:
+        raise RuntimeError("historical_control_path_not_reproduced")
+    execution_path = "direct-research-admin-nonroot"
+elif (len(deploy_matches) == 1 and not run_research_matches):
+    deploy = ast.dump(deploy_matches[0])
+    validation_matches = functions(driver_tree, "validate_unit_properties")
+    cgroup_matches = functions(driver_tree, "empty_control_group")
+    if len(validation_matches) != 1 or len(cgroup_matches) != 1:
+        raise RuntimeError("historical_function_invalid")
+    validation = ast.dump(validation_matches[0])
+    cgroup = ast.dump(cgroup_matches[0])
+    if ("CONTROL_CLIENT" not in deploy or "RESEARCH_CONTROL" not in deploy
+            or "RESEARCH_ADMIN" in deploy or "deploy" not in deploy
+            or "ControlGroup" not in validation or "startswith" not in validation
+            or "IPAddressDeny" not in validation or "any" not in validation
+            or "cgroup.procs" not in cgroup or "cgroup.events" not in cgroup):
+        raise RuntimeError("historical_systemd_readback_defect_not_reproduced")
+    execution_path = "authenticated-control-systemd-readback-rejected"
+else:
+    raise RuntimeError("historical_control_path_not_reproduced")
+if "geteuid" not in execute or "qualification_root_required" not in execute:
     raise RuntimeError("historical_control_path_not_reproduced")
 
 supervisor = load("retained_qualification_supervisor", supervisor_path)
@@ -241,7 +266,7 @@ value = {
     "error": expected_error,
     "source_commit": campaign["source_commit"],
     "observed_at": now,
-    "execution_path": "direct-research-admin-nonroot",
+    "execution_path": execution_path,
     "supervisor_sha256": hashlib.sha256(supervisor_source).hexdigest(),
     "driver_sha256": hashlib.sha256(driver_source).hexdigest(),
     "reservation_device": info.st_dev,
@@ -1188,8 +1213,10 @@ def _validate_qualification_rejection_diagnostic(
             or value.get("case_id") != QUALIFICATION_REJECTION_CASE_ID
             or value.get("error") != QUALIFICATION_REJECTION_EXPECTED_ERROR
             or value.get("source_commit") != campaign["source_commit"]
-            or value.get("execution_path")
-               != "direct-research-admin-nonroot"
+            or value.get("execution_path") not in {
+                "direct-research-admin-nonroot",
+                "authenticated-control-systemd-readback-rejected",
+            }
             or not isinstance(observed_at, int)
             or isinstance(observed_at, bool)
             or observed_at < campaign["created_at"]

@@ -5,8 +5,14 @@ abbreviated `ac5211ec...`, bound to exact source abbreviated `91169ee...`. It
 retains 30 completed cases,
 34 protected observations, the complete first-qualification raw set, and two
 operator-owned mode-0600 projections rejected by production custody checks.
-The protected projector and exact-state no-delete retention repair are under
-review. No operator prompt is currently runnable.
+The protected projector and first exact-state no-delete retention repair were
+published as `a224353...`, installed on the Neo, and independently reported all
+ten protected drivers ready. Its first retention invocation failed closed
+before plan publication or rename with
+`retention_qualification_owner_projection_diagnostic_failed`: the exact
+`91169ee...` predecessor applied its one-hour live-consumption window to the
+otherwise valid historical raw records. The historical-time compatibility
+repair is under review. No operator prompt is currently runnable.
 
 ## Current-Mac gate
 
@@ -28,9 +34,18 @@ closed. Preserve all of that state. Do not rerun qualification, chmod or
 replace either projection, delete raw evidence, reuse the campaign, stop the
 stack, or reconnect Shared while the repair is unpublished.
 
-After the projection descendant is reviewed, committed, published to both
+Do not replay the failed `a224353...` retention invocation. The live campaign
+pathname, all 36 observations, all four qualification raw records, and absent
+retained destination were independently read back unchanged. A read-only
+instrumented run of the repaired diagnostic derived the single common
+collection time from the three canonical auxiliary records, re-read that same
+time inside the isolated predecessor, and reproduced the required
+`input_file_untrusted` result while binding all four raw and both projection
+hashes.
+
+After that compatibility descendant is reviewed, committed, published to both
 authorized `public-release` tips, and installed as the exact protected
-ten-driver release, run only the explicit
+ten-driver release, run only one fresh explicit
 `retain-owner-projected-qualification` ceremony with the exact campaign UUID
 and source commit read from the retained live `ac5211ec...` campaign, and the
 literal acknowledgement

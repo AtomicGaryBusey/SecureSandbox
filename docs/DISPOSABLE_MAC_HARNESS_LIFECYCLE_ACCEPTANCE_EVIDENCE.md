@@ -38,8 +38,26 @@ Its isolated diagnostic loads the exact protected predecessor, revalidates the
 raw-to-observation bindings, and must independently reproduce
 `input_file_untrusted`. It records protected Host and Research state as
 retained in place and atomically renames the entire campaign without overwrite.
-Publication, installation, retention, independent verification, and a fresh
-replay remain pending.
+The projector/retention descendant `a224353...` passed the complete local
+publication gate twice, was published to both authorized remotes, and was
+installed on the Neo as a root-owned mode-0555 release with a root-owned
+single-link mode-0444 manifest. Independent readiness reported all ten drivers
+available. Its first real retention invocation failed closed before plan
+publication or rename because the isolated `91169ee...` predecessor applied a
+one-hour live-consumption window to raw records collected earlier in the same
+campaign. Readback proved the live pathname, 36 observations, four raw
+records, and absent destination unchanged.
+
+The compatibility repair independently derives one common `observed_at` from
+the three stable canonical auxiliary records, bounds it to the campaign and
+current time, passes it explicitly into the isolated child, and requires that
+child to re-read the same value before the predecessor validates every record
+and digest. Current time still stamps the retention diagnostic. A read-only
+physical probe of the complete repaired parent/child path against the actual
+Neo evidence reproduced canonical `input_file_untrusted` and bound all four
+raw and both projected-observation hashes. Publication, protected installation,
+one fresh retention attempt, independent verification, and a fresh replay
+remain pending.
 
 ## Prior systemd-wait checkpoint
 

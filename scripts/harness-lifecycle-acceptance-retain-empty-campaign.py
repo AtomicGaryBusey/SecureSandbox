@@ -517,6 +517,7 @@ try:
     expected_error = sys.argv[7]
     diagnostic_schema = sys.argv[8]
     operator_uid = int(sys.argv[9])
+    historical_observed_at = int(sys.argv[10])
 
     sys.path.insert(0, str(release / "shared"))
     entrypoint = release / "scripts/harness-lifecycle-acceptance-qualification-observe.py"
@@ -534,14 +535,33 @@ try:
         ), now, allow_expired=True,
     )
     case = module.ACCEPTANCE_CLI.case_record(module.CASE_BY_ID[expected_case])
+    # The exact predecessor's generic record validator includes a one-hour
+    # live-consumption window.  Retention intentionally runs after that window,
+    # so reproduce the historical projection at the one collection timestamp
+    # already bound into all three canonical auxiliary records.  The current
+    # `now` remains the diagnostic/retention timestamp; it is never replaced by
+    # caller-selected input.  The parent independently derives the timestamp
+    # from stable canonical files, and the child rereads all three before the
+    # predecessor validates every record, digest, and campaign binding.
+    if (historical_observed_at < campaign["created_at"]
+            or historical_observed_at >= campaign["expires_at"]
+            or historical_observed_at > now):
+        raise RuntimeError("raw_observed_at_invalid")
+    for raw_kind in ("quarantine", "authority", "production"):
+        raw_name = module.RAW_FILES[raw_kind]
+        raw_value = module.trusted_json(raw_directory / raw_name)
+        raw_observed_at = raw_value.get("observed_at")
+        if raw_observed_at != historical_observed_at:
+            raise RuntimeError("raw_observed_at_mismatch")
     raw_parameters = inspect.signature(module.raw_set).parameters
     if "expected_uid" in raw_parameters:
         paths, _values, raw_values = module.raw_set(
-            campaign, case, raw_directory, now, expected_uid=operator_uid,
+            campaign, case, raw_directory, historical_observed_at,
+            expected_uid=operator_uid,
         )
     else:
         paths, _values, raw_values = module.raw_set(
-            campaign, case, raw_directory, now,
+            campaign, case, raw_directory, historical_observed_at,
         )
     observations_sha256 = {}
     for kind in case["evidence_kinds"]:
@@ -1584,6 +1604,9 @@ def confirm_qualification_owner_projection_failure(
         observations.parent / "raw/qualification"
         / QUALIFICATION_REJECTION_CASE_ID
     )
+    historical_observed = qualification_historical_raw_observed_at(
+        raw_directory, os.geteuid(), campaign, now,
+    )
     try:
         completed = subprocess.run(
             [
@@ -1595,6 +1618,7 @@ def confirm_qualification_owner_projection_failure(
                 QUALIFICATION_OWNER_PROJECTION_EXPECTED_ERROR,
                 QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_SCHEMA,
                 str(os.geteuid()),
+                str(historical_observed),
             ],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd="/", timeout=45, check=False,
@@ -1793,6 +1817,34 @@ def historical_raw_observed_at(
         observed.append(timestamp)
     if len(set(observed)) != 1:
         raise RetentionError("retention_historical_raw_time_invalid")
+    return observed[0]
+
+
+def qualification_historical_raw_observed_at(
+        raw_directory: Path, uid: int, campaign: dict[str, Any], now: int,
+        ) -> int:
+    observed: list[int] = []
+    for filename in (
+        "quarantine-readback.json", "authority-readback.json",
+        "production-material-scan.json",
+    ):
+        value = _trusted_canonical_record(
+            raw_directory / filename, uid,
+            "retention_qualification_historical_raw",
+        )
+        timestamp = value.get("observed_at")
+        if (not isinstance(timestamp, int) or isinstance(timestamp, bool)
+                or timestamp < campaign["created_at"]
+                or timestamp >= campaign["expires_at"]
+                or timestamp > now):
+            raise RetentionError(
+                "retention_qualification_historical_raw_time_invalid"
+            )
+        observed.append(timestamp)
+    if len(set(observed)) != 1:
+        raise RetentionError(
+            "retention_qualification_historical_raw_time_invalid"
+        )
     return observed[0]
 
 

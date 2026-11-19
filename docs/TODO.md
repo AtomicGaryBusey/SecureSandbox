@@ -597,8 +597,12 @@ in ignored local records, not in this file.
   raw set, and exactly two operator-owned mode-0600 projections that production
   correctly rejected with `input_file_untrusted`. Preserve it through the
   explicit owner-projected-qualification no-delete retention and independent
-  verification path after the protected projector repair is published to both
-  remotes. Then install the exact successor release,
+  verification path. The first published/installed repair at `a224353...`
+  failed closed before plan publication because the exact predecessor applied
+  its one-hour live-record window to historical raw evidence; live evidence
+  remained unchanged. Publish and install the common-historical-time bridge,
+  then make one fresh retention attempt and independently verify it. Then
+  install the exact successor release,
   initialize a fresh campaign, and replay from bootstrap in fixed order. Do
   not retry, chmod, delete, copy forward, reconnect Shared, or relabel the
   owner-mode projections as qualification evidence. Historical narrative

@@ -281,6 +281,20 @@ Security review then closed the owner-to-root pathname race by anchoring raw
 reads and observation publication to open validated directory descriptors,
 with final named-path identity readback and a substitution regression.
 
+The later qualification owner-projection retention path exposed the same
+live-versus-historical time distinction in a different predecessor surface.
+Its first physical invocation at `a224353...` failed closed before plan
+publication because the exact predecessor's generic qualification-record
+validator rejected its own retained records after the one-hour live window.
+The bridge now derives a single common historical `observed_at` from stable,
+canonical quarantine, authority, and production records; bounds it to the
+campaign and current time; passes it explicitly to the isolated predecessor;
+and requires the child to re-read the same value before validation. The
+current wall clock still binds the new retention diagnostic. Mixed, future,
+out-of-campaign, noncanonical, substituted, or wrong-custody records remain
+closed. The repaired parent/child path physically reproduced
+`input_file_untrusted` against the unchanged Neo evidence.
+
 The first physical invocation of that protected projector exposed a separate
 source/runtime readiness mismatch before any evidence publication. The
 root-owned runtime release intentionally omits the Host installer from the

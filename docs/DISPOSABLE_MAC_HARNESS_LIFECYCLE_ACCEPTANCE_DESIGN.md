@@ -1338,6 +1338,17 @@ admission, or selector change is in scope. A source test pass proves the
 campaign machinery and deterministic recovery model, not the still-pending
 physical observations.
 
+Historical rejection reproduction must not confuse live-consumption freshness
+with evidence authenticity. When an exact predecessor validator includes a
+bounded live window, a retention bridge may supply only the single common
+timestamp already embedded in every required stable canonical record. The
+parent independently reads and bounds that value to the campaign and current
+time; the isolated predecessor must re-read and require the identical value
+before validating every historical record and digest. The new retention
+diagnostic remains stamped with current time. Divergent, future,
+out-of-campaign, noncanonical, or wrong-custody timestamps fail closed and no
+plan or destination may be published.
+
 ## Exit criteria
 
 This DDD is complete only when the dedicated Mac has:

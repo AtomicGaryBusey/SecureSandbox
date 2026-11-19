@@ -868,7 +868,12 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             stdout=acceptance.canonical(diagnostic), stderr=b"",
         )
         with mock.patch.object(
-                retention.subprocess, "run", return_value=completed) as runner:
+                retention,
+                "qualification_historical_raw_observed_at",
+                return_value=self.campaign["created_at"]), \
+                mock.patch.object(
+                    retention.subprocess, "run",
+                    return_value=completed) as runner:
             observed = retention.confirm_qualification_owner_projection_failure(
                 self.campaign, self.root / "observations", int(time.time()),
             )
@@ -886,7 +891,166 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
             command[7], str(self.root / "raw/qualification"
                             / retention.QUALIFICATION_REJECTION_CASE_ID),
         )
+        self.assertEqual(command[13], str(self.campaign["created_at"]))
         self.assertEqual(runner.call_args.kwargs["cwd"], "/")
+
+    def test_qualification_owner_diagnostic_uses_bound_historical_raw_time(self):
+        release = Path(self.temporary.name) / "predecessor"
+        scripts = release / "scripts"
+        (release / "shared").mkdir(parents=True)
+        scripts.mkdir()
+        raw_directory = self.root / "raw/qualification" / "case"
+        raw_directory.mkdir()
+        historical = self.campaign["created_at"] + 10
+        current = historical + 7200
+        self.campaign["expires_at"] = current + 3600
+        self.campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in self.campaign.items()
+            if key != "campaign_sha256"
+        })
+        (self.root / "campaign.json").write_bytes(
+            acceptance.canonical(self.campaign)
+        )
+        raw_names = {
+            "research": "research-result.json",
+            "quarantine": "quarantine-readback.json",
+            "authority": "authority-readback.json",
+            "production": "production-material-scan.json",
+        }
+        for kind, name in raw_names.items():
+            value = {"kind": kind}
+            if kind != "research":
+                value["observed_at"] = historical
+            (raw_directory / name).write_bytes(acceptance.canonical(value))
+        case_id = retention.QUALIFICATION_REJECTION_CASE_ID
+        observation_kinds = ("execution-observation", "resource-observation")
+        for kind in observation_kinds:
+            (self.root / "observations" / f"{case_id}.{kind}.json").write_bytes(
+                acceptance.canonical({"kind": kind})
+            )
+        predecessor = f'''\
+import hashlib
+import json
+
+EXPECTED_RAW_NOW = {historical}
+RAW_FILES = {raw_names!r}
+
+class AcceptanceError(RuntimeError):
+    pass
+
+def canonical(value):
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\\n").encode()
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+def trusted_json(path):
+    return json.loads(path.read_bytes())
+
+def validate_campaign(value, now, allow_expired=False):
+    return value
+
+class CLI:
+    @staticmethod
+    def trusted_json(path, expected_uid=None):
+        return trusted_json(path)
+
+    @staticmethod
+    def case_record(value):
+        return value
+
+    @staticmethod
+    def next_case(campaign, observations, observation_uid, directory_uid):
+        raise AcceptanceError("input_file_untrusted")
+
+ACCEPTANCE_CLI = CLI()
+CASE_BY_ID = {{
+    {case_id!r}: {{
+        "case_id": {case_id!r},
+        "evidence_kinds": {observation_kinds!r},
+    }},
+}}
+
+def raw_set(campaign, case, raw_directory, now):
+    if now != EXPECTED_RAW_NOW:
+        raise RuntimeError("historical_time_not_used")
+    values = {{kind: trusted_json(raw_directory / name)
+              for kind, name in RAW_FILES.items()}}
+    raw_values = {{kind: (raw_directory / name).read_bytes()
+                  for kind, name in RAW_FILES.items()}}
+    return {{}}, values, raw_values
+
+def existing_observation(path, campaign, case, kind, raw_values):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+'''
+        (scripts / "harness-lifecycle-acceptance-qualification-observe.py").write_text(
+            predecessor
+        )
+        completed = retention.subprocess.run(
+            [
+                "/usr/bin/python3", "-I", "-c",
+                retention.QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_PROGRAM,
+                str(release), str(self.root / "campaign.json"),
+                str(self.root / "observations"), str(raw_directory),
+                str(current), case_id,
+                retention.QUALIFICATION_OWNER_PROJECTION_EXPECTED_ERROR,
+                retention.QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_SCHEMA,
+                str(os.geteuid()),
+                str(historical),
+            ],
+            stdout=retention.subprocess.PIPE,
+            stderr=retention.subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        value = json.loads(completed.stdout)
+        self.assertEqual(value["observed_at"], current)
+        self.assertEqual(value["status"], "confirmed")
+
+    def test_qualification_owner_diagnostic_rejects_mixed_raw_times(self):
+        self.assertIn(
+            'if raw_observed_at != historical_observed_at:',
+            retention.QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_PROGRAM,
+        )
+        self.assertIn(
+            'raise RuntimeError("raw_observed_at_mismatch")',
+            retention.QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_PROGRAM,
+        )
+
+    def test_qualification_historical_raw_time_requires_one_bound_time(self):
+        raw_directory = self.root / "raw/qualification" / "historical"
+        raw_directory.mkdir()
+        observed_at = self.campaign["created_at"] + 1
+        names = (
+            "quarantine-readback.json", "authority-readback.json",
+            "production-material-scan.json",
+        )
+        for name in names:
+            path = raw_directory / name
+            path.write_bytes(acceptance.canonical({
+                "observed_at": observed_at,
+            }))
+            path.chmod(0o600)
+        with mock.patch.object(retention, "acl_absent", return_value=True):
+            self.assertEqual(
+                retention.qualification_historical_raw_observed_at(
+                    raw_directory, os.geteuid(), self.campaign,
+                    observed_at + 7200,
+                ),
+                observed_at,
+            )
+            divergent = raw_directory / names[-1]
+            divergent.write_bytes(acceptance.canonical({
+                "observed_at": observed_at + 1,
+            }))
+            divergent.chmod(0o600)
+            with self.assertRaisesRegex(
+                    retention.RetentionError,
+                    "retention_qualification_historical_raw_time_invalid"):
+                retention.qualification_historical_raw_observed_at(
+                    raw_directory, os.geteuid(), self.campaign,
+                    observed_at + 7200,
+                )
 
     def test_qualification_rejection_refuses_mutable_prior_observation(self):
         self.seed_qualification_rejection()

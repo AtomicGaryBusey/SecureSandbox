@@ -66,6 +66,12 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             ROOT / "scripts/harness-lifecycle-acceptance-scenario-supervisor.py"
         ).read_text()
         cls.qualification_projector = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-observe.py").read_text()
+        cls.cold_boot = (
+            ROOT / "scripts/harness-lifecycle-acceptance-cold-boot.py"
+        ).read_text()
+        cls.exporter = (
+            ROOT / "scripts/harness-lifecycle-acceptance-export.py"
+        ).read_text()
         cls.qualification_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-qualification.sh").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
@@ -316,6 +322,37 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.empty_campaign_retention)
         self.assertIn(
             "Retaining an empty rejected campaign for a driver repair",
+            self.operator_queue,
+        )
+
+    def test_multi_day_projection_requires_exact_continuation_not_fresh_authority(self):
+        for phrase in (
+            'CONTINUATION_SCHEMA = (',
+            'CONTINUATION_ARTIFACT_NAME = "continuation-readback"',
+            'def continuation_record(',
+            'def validate_continuation(',
+            '"next_case_revalidated": True',
+            '"candidate_statement_used": False',
+            'continued_at - historical <= MAX_OBSERVATION_SECONDS',
+            'evidence_continuation_inventory_invalid',
+        ):
+            self.assertIn(phrase, self.contract)
+        for source in (
+            self.bootstrap, self.provenance, self.archive,
+            self.qualification_projector, self.cold_boot, self.exporter,
+        ):
+            self.assertIn("continuation_record(", source)
+            self.assertIn("protected_manifest_sha256", source)
+            self.assertIn("raw_custody_sha256", source)
+        for phrase in (
+            "one-hour operator-attendance",
+            "A completed raw observation, however, remains historical evidence",
+            "elapsed wall-clock time alone does not erase",
+        ):
+            self.assertIn(phrase, self.design)
+        self.assertIn("Do not make operator", self.operator_queue)
+        self.assertIn(
+            "availability within one hour a campaign prerequisite",
             self.operator_queue,
         )
 

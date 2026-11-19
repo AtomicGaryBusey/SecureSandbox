@@ -290,6 +290,24 @@ manifests before descriptor-relative no-overwrite retention. This compatibility
 exists only for retention; live collection and projection freshness is not
 changed.
 
+The next source checkpoint replaces that operator-attendance assumption for
+ordinary delayed projection without extending any mutation authority. Shared
+contract code defines one canonical continuation artifact. A protected
+projector uses it only when raw evidence is more than one hour old, after
+revalidating the active campaign and exact next case, physical machine, exact
+protected driver manifest, raw byte hashes, and descriptor- or inode-bound raw
+custody. Operator-owned raw custody uses the same stable descriptor readback
+that supplied the validated bytes, eliminating a second path-resolution race.
+The receipt's fixed driver must match the case procedure and its JSON encoding
+must be canonical. The receipt retains the historical observation time and
+separately records the projection time; it never asserts that historical Host,
+Research, or VM state is current. Final observation validation requires exactly one
+continuation artifact for a delayed projection, rejects it on the ordinary
+fresh path, and verifies its raw inventory and self-digest. Bootstrap,
+crash-resumed provenance and archive, qualification, cold boot, and final
+export share the contract. Touch ID plans, privilege capabilities, mutable
+preflight, and the fixed campaign expiry remain unchanged.
+
 Security review then closed the owner-to-root pathname race by anchoring raw
 reads and observation publication to open validated directory descriptors,
 with final named-path identity readback and a substitution regression.

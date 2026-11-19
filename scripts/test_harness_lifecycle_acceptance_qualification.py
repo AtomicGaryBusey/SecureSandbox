@@ -389,12 +389,11 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             self.assertEqual(set(raw), set(projector.RAW_FILES))
             descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                self.assertEqual(
-                    projector.raw_set_at(
-                        campaign, case, descriptor, NOW, os.geteuid(),
-                    ),
-                    raw,
+                descriptor_raw, custody = projector.raw_set_at(
+                    campaign, case, descriptor, NOW, os.geteuid(),
                 )
+                self.assertEqual(descriptor_raw, raw)
+                self.assertRegex(custody, r"^[0-9a-f]{64}$")
             finally:
                 os.close(descriptor)
             arguments = projector.artifact_arguments("network-observation", paths)
@@ -412,6 +411,61 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             self.assertEqual(result["status"], "recorded")
             output = observations / "qualification-deny-network.network-observation.json"
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_stale_projection_embeds_continuation_for_every_kind(self):
+        campaign = self.campaign()
+        campaign["created_at"] = NOW - 7200
+        campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in campaign.items()
+            if key != "campaign_sha256"
+        })
+        case = acceptance.case_record(
+            acceptance.CASE_BY_ID["qualification-deny-network"],
+        )
+        raw = {
+            "research": acceptance.canonical({
+                "schema": qualification.RESULT_SCHEMA,
+                "status": "rejected",
+            }),
+            "quarantine": acceptance.canonical({
+                "schema": supervisor.QUARANTINE_SCHEMA,
+                "status": "passed", "observed_at": NOW - 4001,
+            }),
+            "authority": acceptance.canonical({
+                "schema": supervisor.AUTHORITY_SCHEMA,
+                "status": "passed", "observed_at": NOW - 4001,
+            }),
+            "production": acceptance.canonical({
+                "schema": supervisor.SCAN_SCHEMA,
+                "status": "passed", "observed_at": NOW - 4001,
+            }),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            observations = Path(directory) / "observations"
+            observations.mkdir(mode=0o700)
+            result = projector.project_bound(
+                campaign, case, observations, None, raw, NOW,
+                False, os.geteuid(),
+                continuation_context={
+                    "historical_observed_at": NOW - 4001,
+                    "protected_manifest_sha256": "6" * 64,
+                    "raw_custody_sha256": "7" * 64,
+                },
+            )
+            self.assertEqual(
+                result["recorded_observation_kinds"], case["evidence_kinds"],
+            )
+            for kind in case["evidence_kinds"]:
+                value = json.loads((
+                    observations / f"{case['case_id']}.{kind}.json"
+                ).read_bytes())
+                self.assertEqual(
+                    value["evidence"]["artifacts"][-1]["name"],
+                    acceptance.CONTINUATION_ARTIFACT_NAME,
+                )
+                acceptance.validate_observation(
+                    value, campaign, acceptance.CASE_BY_ID[case["case_id"]],
+                )
 
     def test_protected_projection_requires_root_and_publishes_read_only(self):
         with tempfile.TemporaryDirectory() as directory:

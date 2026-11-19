@@ -49,7 +49,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
+    continuation_record,
     digest,
     validate_campaign,
     validate_observation,
@@ -257,7 +260,9 @@ def reserve_case(raw_root: Path, case_id: str) -> Path:
 
 
 def project(campaign: dict[str, Any], case: dict[str, Any], raw_path: Path,
-            observations: Path, now: int, operator_uid: int) -> dict[str, Any]:
+            observations: Path, now: int, operator_uid: int, *,
+            continuation_context: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
     output = observations / f"{case['case_id']}.archive-rejection.json"
     if output.exists():
         existing = SUPERVISOR.trusted_json(output)
@@ -267,14 +272,47 @@ def project(campaign: dict[str, Any], case: dict[str, Any], raw_path: Path,
                    != hashlib.sha256(OBSERVER.trusted_read(raw_path)).hexdigest()):
             raise ArchiveDriverError("archive_existing_observation_invalid")
         return existing
-    return OBSERVER.observe(
-        campaign=campaign, case_id=case["case_id"], kind="archive-rejection",
-        artifact_arguments=[[
-            "archive-rejection", "protected-host", str(raw_path), MEDIA_TYPE,
-        ]],
-        output_directory=observations, now=now,
-        output_directory_uid=operator_uid, output_mode=0o444,
-    )
+    artifacts = [[
+        "archive-rejection", "protected-host", str(raw_path), MEDIA_TYPE,
+    ]]
+    if continuation_context is None:
+        return OBSERVER.observe(
+            campaign=campaign, case_id=case["case_id"],
+            kind="archive-rejection", artifact_arguments=artifacts,
+            output_directory=observations, now=now,
+            output_directory_uid=operator_uid, output_mode=0o444,
+        )
+    with tempfile.TemporaryDirectory(
+            prefix="secure-sandbox-archive-continuation.") as temporary:
+        continuation_path = Path(temporary) / "continuation.json"
+        continuation_path.write_bytes(canonical(continuation_record(
+            campaign, CASE_BY_ID[case["case_id"]],
+            historical_observed_at=continuation_context[
+                "historical_observed_at"
+            ],
+            continued_at=now,
+            protected_driver="host-archive-fixture",
+            protected_manifest_sha256=continuation_context[
+                "protected_manifest_sha256"
+            ],
+            raw_sha256={
+                "archive-rejection": hashlib.sha256(
+                    OBSERVER.trusted_read(raw_path),
+                ).hexdigest(),
+            },
+            raw_custody_sha256=continuation_context["raw_custody_sha256"],
+        )))
+        continuation_path.chmod(0o600)
+        artifacts.append([
+            CONTINUATION_ARTIFACT_NAME, "protected-host",
+            str(continuation_path), MEDIA_TYPE,
+        ])
+        return OBSERVER.observe(
+            campaign=campaign, case_id=case["case_id"],
+            kind="archive-rejection", artifact_arguments=artifacts,
+            output_directory=observations, now=now,
+            output_directory_uid=operator_uid, output_mode=0o444,
+        )
 
 
 def run(campaign_path: Path, observations: Path, raw_root: Path,
@@ -291,7 +329,12 @@ def run(campaign_path: Path, observations: Path, raw_root: Path,
         if set(item.name for item in destination.iterdir()) != {RAW_FILENAME}:
             raise ArchiveDriverError("archive_raw_inventory_invalid")
         record = SUPERVISOR.trusted_json(raw_path)
-        validate_record(campaign, case, record, now)
+        historical = record.get("observed_at")
+        stale = (
+            isinstance(historical, int) and not isinstance(historical, bool)
+            and now - historical > MAX_OBSERVATION_SECONDS
+        )
+        validate_record(campaign, case, record, historical if stale else now)
     else:
         if any(destination.iterdir()):
             raise ArchiveDriverError("archive_raw_inventory_invalid")
@@ -319,8 +362,26 @@ def run(campaign_path: Path, observations: Path, raw_root: Path,
         record["record_sha256"] = digest(record)
         validate_record(campaign, case, record, now)
         write_new(raw_path, record)
+    continuation_context = None
+    if now - record["observed_at"] > MAX_OBSERVATION_SECONDS:
+        manifest = ACCEPTANCE_CLI.verify_protected_driver(
+            installation_root, campaign["source_commit"],
+            "host-archive-fixture", expected_install_uid,
+        )
+        info = raw_path.lstat()
+        continuation_context = {
+            "historical_observed_at": record["observed_at"],
+            "protected_manifest_sha256": manifest["manifest_sha256"],
+            "raw_custody_sha256": digest({
+                "device": info.st_dev, "inode": info.st_ino,
+                "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+            }),
+        }
     observation = project(
         campaign, case, raw_path, observations, now, operator_uid,
+        continuation_context=continuation_context,
     )
     return {
         "schema": RESULT_SCHEMA, "status": "recorded", "case_id": case_id,

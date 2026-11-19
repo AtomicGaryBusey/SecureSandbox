@@ -605,14 +605,15 @@ in ignored local records, not in this file.
   collection/projection pair completes within one hour. Keep Touch ID plans,
   privileged capabilities, and mutable preflight admission short-lived, but
   make raw evidence resumable for the campaign lifetime through a fresh,
-  self-digested continuation receipt that revalidates every mutable Host,
-  Research, VM, release, and custody fact at projection time. Bind both the
-  historical observation and current continuity readback; any drift or
-  incomplete readback fails closed without deleting or reclassifying the
-  historical evidence. Apply the same rule to bootstrap, provenance, archive,
-  qualification, cold-boot, and export split phases so an overnight pause can
-  never require recollection or campaign restart merely because wall-clock
-  time elapsed. Historical narrative follows: before collecting, publish and
+  self-digested continuation receipt. Source now binds the current exact next
+  case, physical machine, protected manifest, raw byte inventory, raw-file
+  custody, historical time, and later projection time without restamping the
+  historical subject state as current. Missing, unexpected, tampered,
+  cross-raw, or cross-time continuation evidence fails closed. The focused
+  bootstrap, crash-resumed provenance/archive, qualification, cold-boot,
+  export, DDD, and shared-contract suites pass. Publish and install the exact
+  protected closure, then physically prove one over-one-hour projection before
+  advancing beyond fresh bootstrap. Historical narrative follows: before collecting, publish and
   physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also

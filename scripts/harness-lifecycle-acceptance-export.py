@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 sys.dont_write_bytecode = True
 import tempfile
@@ -48,8 +49,11 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASES,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
     case_record,
+    continuation_record,
     digest,
     assemble_export,
     validate_campaign,
@@ -97,6 +101,10 @@ OBSERVER = load_script(
     "harness_lifecycle_acceptance_export_observer",
     ROOT / "scripts/harness-lifecycle-acceptance-observe.py",
 )
+ENROLLER = load_script(
+    "harness_lifecycle_acceptance_export_enroller",
+    ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py",
+)
 
 
 def private_directory(path: Path, label: str, uid: int) -> os.stat_result:
@@ -127,11 +135,14 @@ def preflight(campaign_path: Path, observations: Path, operator_uid: int,
         manifest = CLI.verify_protected_driver(
             PROTECTED_ROOT, campaign["source_commit"], DRIVER, 0,
         )
+        machine_identity = ENROLLER.machine_identity(subprocess.run)
         pending = CLI.next_case(
             campaign, observations, observation_uid=0, directory_uid=operator_uid,
         )
     except (AcceptanceError, OSError) as error:
         raise ExportDriverError("export_preflight_failed") from error
+    if machine_identity != campaign["machine_identity_sha256"]:
+        raise ExportDriverError("export_machine_identity_mismatch")
     case = pending.get("case")
     if pending.get("status") == "complete" and case is None:
         case = case_record(CASE_BY_ID[CASE_ID])
@@ -370,8 +381,14 @@ def existing_final(path: Path, campaign: dict[str, Any], kind: str,
         raise ExportDriverError("export_existing_observation_invalid") from error
     artifacts = value.get("evidence", {}).get("artifacts")
     raw_sha256 = hashlib.sha256(canonical(raw_value)).hexdigest()
+    expected_names = [kind]
+    allowed_names = (
+        expected_names,
+        [*expected_names, CONTINUATION_ARTIFACT_NAME],
+    )
     if (value.get("kind") != kind or not isinstance(artifacts, list)
-            or len(artifacts) != 1 or artifacts[0].get("name") != kind
+            or [item.get("name") for item in artifacts] not in allowed_names
+            or artifacts[0].get("name") != kind
             or artifacts[0].get("authority") != "evidence-exporter"
             or artifacts[0].get("sha256") != raw_sha256):
         raise ExportDriverError("export_existing_observation_mismatch")
@@ -453,19 +470,74 @@ def run(campaign_path: Path, observations: Path, output_directory: Path,
     expected_values = make_raw(campaign, case, manifest, records, now)
     values = raw_values(raw, expected_values)
     validate_raw(campaign, case, values, now)
+    historical_times = {value.get("observed_at") for value in values.values()}
+    if (len(historical_times) != 1
+            or any(not isinstance(item, int) or isinstance(item, bool)
+                   for item in historical_times)):
+        raise ExportDriverError("export_raw_observed_at_invalid")
+    historical_observed_at = next(iter(historical_times))
+    continuation_context = None
+    if now - historical_observed_at > MAX_OBSERVATION_SECONDS:
+        custody = []
+        for kind in KINDS:
+            path = raw / f"{kind}.json"
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0 or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o400):
+                raise ExportDriverError("export_raw_custody_invalid")
+            custody.append({
+                "kind": kind, "device": info.st_dev, "inode": info.st_ino,
+                "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+            })
+        continuation_context = {
+            "historical_observed_at": historical_observed_at,
+            "protected_manifest_sha256": manifest["manifest_sha256"],
+            "raw_custody_sha256": digest(custody),
+        }
 
     with tempfile.TemporaryDirectory(prefix="secure-sandbox-export-projection.") as temporary:
         stage = Path(temporary); stage.chmod(0o700)
         for kind in KINDS:
             destination = observations / f"{CASE_ID}.{kind}.json"
             if os.path.lexists(destination):
-                existing_final(destination, campaign, kind, values[kind])
+                existing_final(
+                    destination, campaign, kind, values[kind],
+                )
                 continue
+            artifacts = [[
+                kind, "evidence-exporter", str(raw / f"{kind}.json"),
+                MEDIA_TYPE,
+            ]]
+            if continuation_context is not None:
+                continuation_path = stage / f"{kind}.continuation.json"
+                write_root_raw(continuation_path, continuation_record(
+                    campaign, CASE_BY_ID[CASE_ID],
+                    historical_observed_at=continuation_context[
+                        "historical_observed_at"
+                    ],
+                    continued_at=now,
+                    protected_driver=DRIVER,
+                    protected_manifest_sha256=continuation_context[
+                        "protected_manifest_sha256"
+                    ],
+                    raw_sha256={
+                        kind: hashlib.sha256(canonical(values[kind])).hexdigest(),
+                    },
+                    raw_custody_sha256=continuation_context[
+                        "raw_custody_sha256"
+                    ],
+                ))
+                artifacts.append([
+                    CONTINUATION_ARTIFACT_NAME, "protected-host",
+                    str(continuation_path), MEDIA_TYPE,
+                ])
             result = OBSERVER.observe(
                 campaign=campaign, case_id=CASE_ID, kind=kind,
-                artifact_arguments=[
-                    [kind, "evidence-exporter", str(raw / f"{kind}.json"), MEDIA_TYPE],
-                ], output_directory=stage, now=now, output_mode=0o444,
+                artifact_arguments=artifacts,
+                output_directory=stage, now=now, output_mode=0o444,
             )
             if result["kind"] != kind:
                 raise ExportDriverError("export_projection_invalid")

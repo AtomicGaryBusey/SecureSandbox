@@ -95,14 +95,14 @@ class ProvenanceDriverTests(unittest.TestCase):
             "missing_evidence": list(case.evidence_kinds),
         }
 
-    def run_case(self, case_id: str):
+    def run_case(self, case_id: str, now: int = NOW):
         with mock.patch.object(
             DRIVER.SUPERVISOR, "current_machine_identity", return_value="a" * 64,
         ), mock.patch.object(
             DRIVER.ACCEPTANCE_CLI, "next_case", return_value=self.next_value(case_id),
         ):
             return DRIVER.run(
-                self.campaign_path, self.observations, self.raw, case_id, NOW,
+                self.campaign_path, self.observations, self.raw, case_id, now,
                 operator_uid=os.geteuid(), installation_root=self.protected,
                 expected_install_uid=os.geteuid(),
             )
@@ -162,6 +162,42 @@ class ProvenanceDriverTests(unittest.TestCase):
         extra.write_text("{}\n", encoding="ascii"); extra.chmod(0o600)
         with self.assertRaisesRegex(DRIVER.ProvenanceDriverError, "inventory"):
             self.run_case(case_id)
+
+    def test_crash_resumes_stale_raw_with_protected_continuation(self) -> None:
+        case_id = "reject-bad-signature"
+        self.campaign["created_at"] = NOW - 7200
+        self.campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in self.campaign.items()
+            if key != "campaign_sha256"
+        })
+        self.campaign_path.write_bytes(acceptance.canonical(self.campaign))
+        with mock.patch.object(
+            DRIVER.SUPERVISOR, "current_machine_identity", return_value="a" * 64,
+        ), mock.patch.object(
+            DRIVER.ACCEPTANCE_CLI, "next_case",
+            return_value=self.next_value(case_id),
+        ), mock.patch.object(
+            DRIVER.OBSERVER, "observe", side_effect=OSError("projection lost"),
+        ), self.assertRaises(OSError):
+            DRIVER.run(
+                self.campaign_path, self.observations, self.raw, case_id,
+                NOW - 4001, operator_uid=os.geteuid(),
+                installation_root=self.protected,
+                expected_install_uid=os.geteuid(),
+            )
+        result = self.run_case(case_id)
+        self.assertEqual(result["status"], "recorded")
+        kind = acceptance.CASE_BY_ID[case_id].evidence_kinds[0]
+        observation = DRIVER.SUPERVISOR.trusted_json(
+            self.observations / f"{case_id}.{kind}.json",
+        )
+        self.assertEqual(
+            observation["evidence"]["artifacts"][-1]["name"],
+            acceptance.CONTINUATION_ARTIFACT_NAME,
+        )
+        acceptance.validate_observation(
+            observation, self.campaign, acceptance.CASE_BY_ID[case_id],
+        )
 
     def test_preflight_carries_operator_directory_and_root_observation_owners(self) -> None:
         case_id = "reject-bad-signature"

@@ -181,6 +181,85 @@ class HarnessLifecycleAcceptanceColdBootTests(unittest.TestCase):
             with self.assertRaisesRegex(cold_boot.ColdBootError, "raw_readback"):
                 cold_boot.raw_set(campaign, case, directory, NOW)
 
+    def test_stale_raw_projects_with_protected_continuation(self):
+        campaign = self.campaign(); case = self.case()
+        campaign["created_at"] = NOW - 7200
+        campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in campaign.items()
+            if key != "campaign_sha256"
+        })
+        historical = NOW - 4001
+        pre = self.boot(campaign, case["case_id"], "3" * 64)
+        post = self.boot(campaign, case["case_id"], "4" * 64)
+        inventory = {
+            "gateway": "running", "research": "running", "target": "stopped",
+        }
+        readback = {
+            "schema": cold_boot.COLD_BOOT_SCHEMA, "status": "verified",
+            "campaign_id": campaign["campaign_id"],
+            "campaign_sha256": campaign["campaign_sha256"],
+            "machine_identity_sha256": campaign["machine_identity_sha256"],
+            "source_commit": campaign["source_commit"],
+            "case_id": case["case_id"],
+            "procedure_sha256": case["procedure"]["procedure_sha256"],
+            "observed_at": historical, "pre_boot": pre, "post_boot": post,
+            "vm_before": inventory,
+            "vm_stopped": {**inventory, "research": "stopped"},
+            "vm_restarted": inventory, "vm_after": inventory,
+            "gateway_unchanged": True, "target_unchanged": True,
+            "candidate_authority": "none", "production_material_used": False,
+        }
+        readback["cold_boot_sha256"] = acceptance.digest(readback)
+        protected_manifest = {
+            "suite_sha256": "7" * 64, "source_commit": campaign["source_commit"],
+        }
+        protected_manifest["manifest_sha256"] = acceptance.digest(
+            protected_manifest,
+        )
+        receipt = cold_boot.receipt(
+            campaign, case, "host-release-readback", historical,
+            {"protected_manifest": protected_manifest,
+             "protected_manifest_sha256": protected_manifest["manifest_sha256"],
+             "protected_suite_sha256": "7" * 64},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            raw = root / "raw"; raw.mkdir(mode=0o700)
+            observations = root / "observations"; observations.mkdir(mode=0o700)
+            campaign_path = root / "campaign.json"
+            campaign_path.write_bytes(acceptance.canonical(campaign))
+            campaign_path.chmod(0o600)
+            cold_boot.SUPERVISOR.write_new(
+                raw / "cold-boot-readback.json", readback,
+            )
+            cold_boot.SUPERVISOR.write_new(
+                raw / "host-release-readback.json", receipt,
+            )
+            with mock.patch.object(
+                cold_boot, "preflight", return_value=(campaign, case, protected_manifest),
+            ), mock.patch.object(
+                cold_boot.ACCEPTANCE_CLI, "verify_protected_driver",
+                return_value={"manifest_sha256": "8" * 64},
+            ):
+                result = cold_boot.project(
+                    campaign_path, observations, case["case_id"], raw,
+                    NOW, os.geteuid(),
+                )
+            self.assertEqual(
+                result["recorded_observation_kinds"], case["evidence_kinds"],
+            )
+            for kind in case["evidence_kinds"]:
+                value = cold_boot.trusted_json(
+                    observations / f"{case['case_id']}.{kind}.json",
+                )
+                self.assertEqual(
+                    value["evidence"]["artifacts"][-1]["name"],
+                    acceptance.CONTINUATION_ARTIFACT_NAME,
+                )
+                acceptance.validate_observation(
+                    value, campaign, acceptance.CASE_BY_ID[case["case_id"]],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

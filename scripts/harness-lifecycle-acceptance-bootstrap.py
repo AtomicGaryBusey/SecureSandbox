@@ -25,7 +25,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
+    continuation_record,
     digest,
     validate_campaign,
     validate_enrollment,
@@ -770,39 +773,78 @@ def raw_set(campaign: dict[str, Any], case: dict[str, Any],
 
 
 def raw_set_at(campaign: dict[str, Any], case: dict[str, Any],
-               raw_directory: int, now: int, operator_uid: int
-               ) -> dict[str, bytes]:
+               raw_directory: int, now: int, operator_uid: int, *,
+               allow_historical: bool = False
+               ) -> tuple[dict[str, bytes], str]:
     expected = CASE_FILES[case["case_id"]]
     if set(os.listdir(raw_directory)) != set(expected.values()):
         raise BootstrapError("bootstrap_raw_inventory_invalid")
-    values = {
-        kind: trusted_json_at(
+    values: dict[str, dict[str, Any]] = {}
+    opened: dict[str, os.stat_result] = {}
+    for kind, name in expected.items():
+        value, _raw, info = trusted_json_at(
             raw_directory, name, expected_uid=operator_uid,
             expected_mode=0o600,
-        )[0]
-        for kind, name in expected.items()
+        )
+        values[kind] = value
+        opened[name] = info
+    observed_times = {
+        value.get("observed_at") for value in values.values()
+        if isinstance(value, dict) and "observed_at" in value
     }
+    if (len(observed_times) != 1
+            or any(not isinstance(item, int) or isinstance(item, bool)
+                   for item in observed_times)):
+        raise BootstrapError("bootstrap_raw_observed_at_invalid")
+    historical = next(iter(observed_times))
+    validation_time = (
+        historical
+        if allow_historical and now - historical > MAX_OBSERVATION_SECONDS
+        else now
+    )
     if case["case_id"] == "bootstrap-clean-install":
         validate_host_receipt(
-            campaign, case, values["host-install-readback"], now,
+            campaign, case, values["host-install-readback"], validation_time,
         )
         validate_research_receipt(
             campaign, case, values["research-install-readback"],
-            values["boundary-readback"], now,
+            values["boundary-readback"], validation_time,
         )
     else:
         validate_scan_receipts(
             campaign, case, values["production-material-scan"],
-            values["machine-enrollment"], now,
+            values["machine-enrollment"], validation_time,
         )
-    return {kind: canonical(value) for kind, value in values.items()}
+    return (
+        {kind: canonical(value) for kind, value in values.items()},
+        raw_custody_sha256(opened),
+    )
 
 
-def artifact_arguments(kind: str, paths: dict[str, Path]) -> list[list[str]]:
-    return [
+def raw_custody_sha256(opened: dict[str, os.stat_result]) -> str:
+    records = []
+    for name, info in sorted(opened.items()):
+        records.append({
+            "name": name, "device": info.st_dev, "inode": info.st_ino,
+            "uid": info.st_uid, "gid": info.st_gid,
+            "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+            "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+        })
+    return digest(records)
+
+
+def artifact_arguments(kind: str, paths: dict[str, Path], *,
+                       continuation: Path | None = None) -> list[list[str]]:
+    result = [
         [item, AUTHORITIES[item], str(paths[item]), MEDIA_TYPE]
         for item in (kind, *SUPPORT[kind])
     ]
+    if continuation is not None:
+        result.append([
+            CONTINUATION_ARTIFACT_NAME, "protected-host",
+            str(continuation), MEDIA_TYPE,
+        ])
+    return result
 
 
 def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, Any],
@@ -815,6 +857,10 @@ def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, A
     except (BootstrapError, OSError) as error:
         raise BootstrapError("bootstrap_existing_observation_invalid") from error
     expected_kinds = [kind, *SUPPORT[kind]]
+    allowed_artifacts = (
+        expected_kinds,
+        [*expected_kinds, CONTINUATION_ARTIFACT_NAME],
+    )
     evidence = value.get("evidence") if isinstance(value, dict) else None
     artifacts = evidence.get("artifacts") if isinstance(evidence, dict) else None
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
@@ -823,12 +869,14 @@ def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, A
             or not isinstance(value, dict) or canonical(value) != raw
             or value.get("kind") != kind or not isinstance(artifacts, list)
             or [item.get("name") for item in artifacts
-                if isinstance(item, dict)] != expected_kinds
+                if isinstance(item, dict)] not in allowed_artifacts
             or any(not isinstance(item, dict)
                    or item.get("authority") != AUTHORITIES[item_kind]
                    or item.get("sha256")
                       != hashlib.sha256(raw_values[item_kind]).hexdigest()
-                   for item, item_kind in zip(artifacts, expected_kinds))):
+                   for item, item_kind in zip(
+                       artifacts[:len(expected_kinds)], expected_kinds,
+                   ))):
         raise BootstrapError("bootstrap_existing_observation_mismatch")
     try:
         validate_observation(value, campaign, CASE_BY_ID[case["case_id"]])
@@ -844,17 +892,23 @@ def existing_observation_at(parent: int, name: str,
         parent, name, expected_uid=0, expected_mode=0o444,
     )
     expected_kinds = [kind, *SUPPORT[kind]]
+    allowed_artifacts = (
+        expected_kinds,
+        [*expected_kinds, CONTINUATION_ARTIFACT_NAME],
+    )
     evidence = value.get("evidence") if isinstance(value, dict) else None
     artifacts = evidence.get("artifacts") if isinstance(evidence, dict) else None
     if (not stat.S_ISREG(info.st_mode) or value.get("kind") != kind
             or not isinstance(artifacts, list)
             or [item.get("name") for item in artifacts
-                if isinstance(item, dict)] != expected_kinds
+                if isinstance(item, dict)] not in allowed_artifacts
             or any(not isinstance(item, dict)
                    or item.get("authority") != AUTHORITIES[item_kind]
                    or item.get("sha256")
                       != hashlib.sha256(raw_values[item_kind]).hexdigest()
-                   for item, item_kind in zip(artifacts, expected_kinds))
+                   for item, item_kind in zip(
+                       artifacts[:len(expected_kinds)], expected_kinds,
+                   ))
             or canonical(value) != raw):
         raise BootstrapError("bootstrap_existing_observation_mismatch")
     try:
@@ -941,20 +995,48 @@ def project(campaign_path: Path, observations: Path, case_id: str,
         if protected_projection:
             if raw_descriptor is None:
                 raise BootstrapError("bootstrap_raw_directory_untrusted")
-            raw_values = raw_set_at(
+            raw_values, raw_custody = raw_set_at(
                 campaign, case, raw_descriptor, now, owner,
+                allow_historical=True,
             )
         else:
             _, raw_values = raw_set(
                 campaign, case, raw_directory, now, raw_uid=owner,
             )
+            raw_custody = None
             private_directory(
                 observations, "bootstrap_observation_directory",
                 expected_uid=owner,
             )
+        observed_times = {
+            json.loads(raw).get("observed_at")
+            for raw in raw_values.values()
+            if isinstance(json.loads(raw), dict)
+            and "observed_at" in json.loads(raw)
+        }
+        if (len(observed_times) != 1
+                or any(not isinstance(item, int) or isinstance(item, bool)
+                       for item in observed_times)):
+            raise BootstrapError("bootstrap_raw_observed_at_invalid")
+        historical_observed_at = next(iter(observed_times))
+        continuation_context = None
+        if now - historical_observed_at > MAX_OBSERVATION_SECONDS:
+            if not protected_projection or raw_descriptor is None:
+                raise BootstrapError("bootstrap_stale_projection_requires_protection")
+            manifest = ACCEPTANCE_CLI.verify_protected_driver(
+                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
+                campaign["source_commit"], "clean-machine-bootstrap", 0,
+            )
+            continuation_context = {
+                "historical_observed_at": historical_observed_at,
+                "protected_driver": "clean-machine-bootstrap",
+                "protected_manifest_sha256": manifest["manifest_sha256"],
+                "raw_custody_sha256": raw_custody,
+            }
         result = project_bound(
             campaign, case, observations, observations_descriptor,
             raw_values, now, protected_projection, owner,
+            continuation_context=continuation_context,
         )
         if protected_projection:
             if observations_descriptor is None:
@@ -984,7 +1066,9 @@ def project(campaign_path: Path, observations: Path, case_id: str,
 def project_bound(campaign: dict[str, Any], case: dict[str, Any],
                   observations: Path, observations_descriptor: int | None,
                   raw_values: dict[str, bytes], now: int,
-                  protected_projection: bool, owner: int) -> dict[str, Any]:
+                  protected_projection: bool, owner: int, *,
+                  continuation_context: dict[str, Any] | None = None,
+                  ) -> dict[str, Any]:
     case_id = case["case_id"]
     observation_uid = 0 if protected_projection else owner
     observation_mode = 0o444 if protected_projection else 0o600
@@ -1026,9 +1110,36 @@ def project_bound(campaign: dict[str, Any], case: dict[str, Any],
             path = snapshots / CASE_FILES[case_id][kind]
             write_snapshot(path, raw); snapshot_paths[kind] = path
         for kind in missing:
+            continuation_path = None
+            if continuation_context is not None:
+                raw_names = [kind, *SUPPORT[kind]]
+                continuation = continuation_record(
+                    campaign, CASE_BY_ID[case_id],
+                    historical_observed_at=continuation_context[
+                        "historical_observed_at"
+                    ],
+                    continued_at=now,
+                    protected_driver=continuation_context["protected_driver"],
+                    protected_manifest_sha256=continuation_context[
+                        "protected_manifest_sha256"
+                    ],
+                    raw_sha256={
+                        item: hashlib.sha256(raw_values[item]).hexdigest()
+                        for item in raw_names
+                    },
+                    raw_custody_sha256=continuation_context[
+                        "raw_custody_sha256"
+                    ],
+                )
+                continuation_path = (
+                    snapshots / f"{kind}.continuation-readback.json"
+                )
+                write_snapshot(continuation_path, canonical(continuation))
             observation = OBSERVER.observe(
                 campaign=campaign, case_id=case_id, kind=kind,
-                artifact_arguments=artifact_arguments(kind, snapshot_paths),
+                artifact_arguments=artifact_arguments(
+                    kind, snapshot_paths, continuation=continuation_path,
+                ),
                 output_directory=staged, now=now,
                 output_mode=observation_mode,
             )

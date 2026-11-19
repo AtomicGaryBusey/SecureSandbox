@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import base64
 import hashlib
+import json
 import unittest
 import uuid
 
@@ -97,6 +98,191 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         value["export_sha256"] = acceptance.digest({
             key: item for key, item in value.items() if key != "export_sha256"
         })
+
+    def stale_evidence(self):
+        campaign = self.campaign()
+        campaign["created_at"] = NOW - 7200
+        campaign["campaign_sha256"] = acceptance.digest({
+            key: item for key, item in campaign.items()
+            if key != "campaign_sha256"
+        })
+        case = acceptance.CASE_BY_ID["bootstrap-clean-install"]
+        primary = acceptance.canonical({
+            "schema": "secure-sandbox-test-source-v1",
+            "status": "verified",
+            "observed_at": NOW - 4001,
+        })
+        primary_sha = hashlib.sha256(primary).hexdigest()
+        continuation = acceptance.continuation_record(
+            campaign, case,
+            historical_observed_at=NOW - 4001,
+            continued_at=NOW,
+            protected_driver="clean-machine-bootstrap",
+            protected_manifest_sha256="3" * 64,
+            raw_sha256={"host-install-readback": primary_sha},
+            raw_custody_sha256="4" * 64,
+        )
+        continuation_raw = acceptance.canonical(continuation)
+        continuation_sha = hashlib.sha256(continuation_raw).hexdigest()
+        evidence = {
+            "schema": acceptance.EVIDENCE_SCHEMA,
+            "evidence_id": str(uuid.uuid4()),
+            "campaign_id": campaign["campaign_id"],
+            "campaign_sha256": campaign["campaign_sha256"],
+            "case_id": case.case_id,
+            "kind": "host-install-readback",
+            "collector": acceptance.EVIDENCE_KIND_COLLECTOR[
+                "host-install-readback"
+            ],
+            "machine_identity_sha256": campaign["machine_identity_sha256"],
+            "source_commit": campaign["source_commit"],
+            "observed_at": NOW,
+            "outcome": case.expected,
+            "subject_sha256": primary_sha,
+            "source_schema": "secure-sandbox-test-source-v1",
+            "source_status": "verified",
+            "source_sha256": primary_sha,
+            "artifacts": [
+                {
+                    "name": "host-install-readback",
+                    "sha256": primary_sha,
+                    "size": len(primary),
+                    "media_type": "application/json",
+                    "authority": "protected-host",
+                    "content_base64": base64.b64encode(primary).decode("ascii"),
+                },
+                {
+                    "name": acceptance.CONTINUATION_ARTIFACT_NAME,
+                    "sha256": continuation_sha,
+                    "size": len(continuation_raw),
+                    "media_type": "application/json",
+                    "authority": "protected-host",
+                    "content_base64": base64.b64encode(
+                        continuation_raw,
+                    ).decode("ascii"),
+                },
+            ],
+            "candidate_statement_used": False,
+        }
+        evidence["evidence_sha256"] = acceptance.digest(evidence)
+        return campaign, case, evidence
+
+    def test_stale_projection_requires_exact_continuation(self):
+        campaign, case, evidence = self.stale_evidence()
+        self.assertEqual(
+            acceptance.validate_evidence(evidence, campaign, case), evidence,
+        )
+
+        missing = copy.deepcopy(evidence)
+        missing["artifacts"].pop()
+        missing["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in missing.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError,
+                "evidence_continuation_inventory_invalid"):
+            acceptance.validate_evidence(missing, campaign, case)
+
+        changed = copy.deepcopy(evidence)
+        raw = base64.b64decode(changed["artifacts"][1]["content_base64"])
+        continuation = json.loads(raw)
+        continuation["protected_manifest_sha256"] = "5" * 64
+        changed_raw = acceptance.canonical(continuation)
+        changed["artifacts"][1].update({
+            "sha256": hashlib.sha256(changed_raw).hexdigest(),
+            "size": len(changed_raw),
+            "content_base64": base64.b64encode(changed_raw).decode("ascii"),
+        })
+        changed["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in changed.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError, "continuation_invalid"):
+            acceptance.validate_evidence(changed, campaign, case)
+
+        wrong_driver = copy.deepcopy(evidence)
+        continuation = json.loads(base64.b64decode(
+            wrong_driver["artifacts"][1]["content_base64"],
+        ))
+        continuation["protected_driver"] = "host-provenance-fixture"
+        continuation["continuation_sha256"] = acceptance.digest({
+            key: item for key, item in continuation.items()
+            if key != "continuation_sha256"
+        })
+        wrong_driver_bytes = acceptance.canonical(continuation)
+        wrong_driver["artifacts"][1].update({
+            "sha256": hashlib.sha256(wrong_driver_bytes).hexdigest(),
+            "size": len(wrong_driver_bytes),
+            "content_base64": base64.b64encode(
+                wrong_driver_bytes,
+            ).decode("ascii"),
+        })
+        wrong_driver["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in wrong_driver.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError, "continuation_invalid"):
+            acceptance.validate_evidence(wrong_driver, campaign, case)
+
+        noncanonical = copy.deepcopy(evidence)
+        continuation = json.loads(base64.b64decode(
+            noncanonical["artifacts"][1]["content_base64"],
+        ))
+        noncanonical_bytes = json.dumps(
+            continuation, indent=2, sort_keys=True,
+        ).encode("ascii")
+        noncanonical["artifacts"][1].update({
+            "sha256": hashlib.sha256(noncanonical_bytes).hexdigest(),
+            "size": len(noncanonical_bytes),
+            "content_base64": base64.b64encode(
+                noncanonical_bytes,
+            ).decode("ascii"),
+        })
+        noncanonical["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in noncanonical.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError,
+                "evidence_continuation_invalid"):
+            acceptance.validate_evidence(noncanonical, campaign, case)
+
+        cross_raw = copy.deepcopy(evidence)
+        continuation = json.loads(base64.b64decode(
+            cross_raw["artifacts"][1]["content_base64"],
+        ))
+        continuation["raw_sha256"]["host-install-readback"] = "6" * 64
+        continuation["continuation_sha256"] = acceptance.digest({
+            key: item for key, item in continuation.items()
+            if key != "continuation_sha256"
+        })
+        cross_raw_bytes = acceptance.canonical(continuation)
+        cross_raw["artifacts"][1].update({
+            "sha256": hashlib.sha256(cross_raw_bytes).hexdigest(),
+            "size": len(cross_raw_bytes),
+            "content_base64": base64.b64encode(cross_raw_bytes).decode("ascii"),
+        })
+        cross_raw["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in cross_raw.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError, "continuation_invalid"):
+            acceptance.validate_evidence(cross_raw, campaign, case)
+
+        unexpected = copy.deepcopy(evidence)
+        unexpected["observed_at"] = NOW - 3901
+        unexpected["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in unexpected.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError,
+                "evidence_continuation_inventory_invalid"):
+            acceptance.validate_evidence(unexpected, campaign, case)
 
     def test_catalog_covers_complete_destructive_matrix(self):
         ids = set(acceptance.CASE_BY_ID)

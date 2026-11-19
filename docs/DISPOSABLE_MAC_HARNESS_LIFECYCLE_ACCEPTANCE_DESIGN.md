@@ -1016,17 +1016,33 @@ window is incompatible with the campaign's bounded fourteen-day lifetime and
 with ordinary overnight pauses. Short lifetimes remain mandatory for Touch ID
 plans, privilege capabilities, and admission preflights that authorize a
 mutation. A completed raw observation, however, remains historical evidence
-for the campaign lifetime. When projection occurs after its original live
-window, the protected driver must obtain a fresh canonical continuation
-readback, bind it to the raw record, campaign, exact installed release,
-machine, operator, case, and current next-case state, and revalidate every
-mutable fact relevant to that collector. The projection binds both timestamps
-and both digests. Drift, incomplete readback, changed custody, or a campaign
-that no longer names the case as next fails closed and retains the raw evidence
-unchanged; elapsed wall-clock time alone does not erase, recollect, or
-reclassify it. This continuation contract applies consistently to every
-split-phase bootstrap, provenance, archive, qualification, cold-boot, and
-export path before the physical campaign advances beyond fresh bootstrap.
+for the campaign lifetime. Projection does not restamp the historical subject
+state as a current claim. Instead, the protected driver obtains a fresh
+canonical continuation receipt over the authority needed to project it: the
+current campaign and exact next case, physical machine identity, exact
+installed protected manifest, complete raw byte inventory, and stable raw-file
+custody identities. The observation embeds both the historical timestamp and
+the later continuation receipt. Drift, incomplete readback, changed custody,
+or a campaign that no longer names the case as next fails closed and retains
+the raw evidence unchanged; elapsed wall-clock time alone does not erase,
+recollect, or reclassify it.
+
+The shared v1 continuation validator requires an over-one-hour historical
+timestamp inside the same campaign, an active continuation time, exact raw
+artifact hashes, manifest and custody digests, `next_case_revalidated: true`,
+protected-Host authority, no candidate statement, and its canonical digest.
+The protected driver must equal the case procedure's fixed driver, and the
+continuation artifact itself must use the one canonical JSON encoding. For
+operator-owned split-phase raw files, custody metadata comes from the same
+stable open descriptor that supplied the validated bytes; it is never obtained
+through a second pathname lookup.
+Final observation validation requires exactly one such artifact whenever the
+raw-to-projection interval exceeds one hour and rejects one on an ordinary
+fresh projection. Bootstrap, crash-resumed provenance and archive, Research
+qualification, cold boot, and final export all use that same contract. Export
+also repeats the physical Mac identity probe and includes that probe in its
+protected closure. Short-lived authorization and mutation admission are
+unchanged.
 
 The original completely-empty retention path later exposed a distinct
 commit-domain defect when invoked from a clean published descendant: its

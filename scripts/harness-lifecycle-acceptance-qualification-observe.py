@@ -23,7 +23,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
+    continuation_record,
     digest,
     validate_campaign,
     validate_observation,
@@ -276,21 +279,56 @@ def raw_set(campaign: dict[str, Any], case: dict[str, Any], raw_directory: Path,
 
 
 def raw_set_at(campaign: dict[str, Any], case: dict[str, Any],
-               raw_directory: int, now: int, operator_uid: int
-               ) -> dict[str, bytes]:
+               raw_directory: int, now: int, operator_uid: int, *,
+               allow_historical: bool = False
+               ) -> tuple[dict[str, bytes], str]:
     if set(os.listdir(raw_directory)) != set(RAW_FILES.values()):
         raise QualificationProjectionError("qualification_raw_inventory_invalid")
-    values = {
-        name: trusted_json_at(
+    values: dict[str, dict[str, Any]] = {}
+    opened: dict[str, os.stat_result] = {}
+    for name, filename in RAW_FILES.items():
+        value, _raw, info = trusted_json_at(
             raw_directory, filename, expected_uid=operator_uid,
             expected_mode=0o600,
-        )[0]
-        for name, filename in RAW_FILES.items()
+        )
+        values[name] = value
+        opened[filename] = info
+    observed_times = {
+        value.get("observed_at") for value in values.values()
+        if "observed_at" in value
     }
-    return validate_raw_values(campaign, case, values, now)
+    if (len(observed_times) != 1
+            or any(not isinstance(item, int) or isinstance(item, bool)
+                   for item in observed_times)):
+        raise QualificationProjectionError(
+            "qualification_raw_observed_at_invalid",
+        )
+    historical = next(iter(observed_times))
+    validation_time = (
+        historical
+        if allow_historical and now - historical > MAX_OBSERVATION_SECONDS
+        else now
+    )
+    return (
+        validate_raw_values(campaign, case, values, validation_time),
+        raw_custody_sha256(opened),
+    )
 
 
-def artifact_arguments(kind: str, paths: dict[str, Path]) -> list[list[str]]:
+def raw_custody_sha256(opened: dict[str, os.stat_result]) -> str:
+    records = []
+    for filename, info in sorted(opened.items()):
+        records.append({
+            "name": filename, "device": info.st_dev, "inode": info.st_ino,
+            "uid": info.st_uid, "gid": info.st_gid,
+            "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+            "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+        })
+    return digest(records)
+
+
+def artifact_arguments(kind: str, paths: dict[str, Path], *,
+                       continuation: Path | None = None) -> list[list[str]]:
     primary_name, primary_authority = PRIMARY[kind]
     arguments = [[kind, primary_authority, str(paths[primary_name]), MEDIA_TYPE]]
     for name in ("research", "quarantine", "authority", "production"):
@@ -298,6 +336,11 @@ def artifact_arguments(kind: str, paths: dict[str, Path]) -> list[list[str]]:
             arguments.append([
                 CONTEXT_NAMES[name], AUTHORITIES[name], str(paths[name]), MEDIA_TYPE,
             ])
+    if continuation is not None:
+        arguments.append([
+            CONTINUATION_ARTIFACT_NAME, "protected-host",
+            str(continuation), MEDIA_TYPE,
+        ])
     return arguments
 
 
@@ -319,6 +362,7 @@ def existing_observation(path: Path, campaign: dict[str, Any],
         "research", "quarantine", "authority", "production",
     ) if name != primary]
     names = [kind] + [CONTEXT_NAMES[name] for name in ordered[1:]]
+    allowed_names = (names, [*names, CONTINUATION_ARTIFACT_NAME])
     authorities = [authority] + [AUTHORITIES[name] for name in ordered[1:]]
     artifacts = value.get("evidence", {}).get("artifacts") \
         if isinstance(value, dict) else None
@@ -328,7 +372,7 @@ def existing_observation(path: Path, campaign: dict[str, Any],
             or not isinstance(value, dict) or canonical(value) != payload
             or value.get("kind") != kind or not isinstance(artifacts, list)
             or [item.get("name") for item in artifacts
-                if isinstance(item, dict)] != names
+                if isinstance(item, dict)] not in allowed_names
             or any(not isinstance(item, dict)
                    or item.get("authority") != expected_authority
                    or item.get("sha256") != hashlib.sha256(raw[name]).hexdigest()
@@ -357,13 +401,14 @@ def existing_observation_at(parent: int, name: str,
         "research", "quarantine", "authority", "production",
     ) if name != primary]
     names = [kind] + [CONTEXT_NAMES[item] for item in ordered[1:]]
+    allowed_names = (names, [*names, CONTINUATION_ARTIFACT_NAME])
     authorities = [authority] + [AUTHORITIES[item] for item in ordered[1:]]
     artifacts = value.get("evidence", {}).get("artifacts") \
         if isinstance(value, dict) else None
     if (not stat.S_ISREG(info.st_mode) or value.get("kind") != kind
             or not isinstance(artifacts, list)
             or [item.get("name") for item in artifacts
-                if isinstance(item, dict)] != names
+                if isinstance(item, dict)] not in allowed_names
             or any(not isinstance(item, dict)
                    or item.get("authority") != expected_authority
                    or item.get("sha256") != hashlib.sha256(raw[item_name]).hexdigest()
@@ -597,7 +642,10 @@ def project(campaign_path: Path, observations: Path, case_id: str,
                 raise QualificationProjectionError(
                     "qualification_raw_directory_untrusted",
                 )
-            raw = raw_set_at(campaign, case, raw_descriptor, now, owner)
+            raw, raw_custody = raw_set_at(
+                campaign, case, raw_descriptor, now, owner,
+                allow_historical=True,
+            )
         else:
             private_directory(
                 observations, "qualification_observations",
@@ -606,9 +654,40 @@ def project(campaign_path: Path, observations: Path, case_id: str,
             _, _, raw = raw_set(
                 campaign, case, raw_directory, now, expected_uid=owner,
             )
+            raw_custody = None
+        observed_times = {
+            value.get("observed_at")
+            for payload in raw.values()
+            for value in (json.loads(payload),)
+            if isinstance(value, dict) and "observed_at" in value
+        }
+        if (len(observed_times) != 1
+                or any(not isinstance(item, int) or isinstance(item, bool)
+                       for item in observed_times)):
+            raise QualificationProjectionError(
+                "qualification_raw_observed_at_invalid",
+            )
+        historical_observed_at = next(iter(observed_times))
+        continuation_context = None
+        if now - historical_observed_at > MAX_OBSERVATION_SECONDS:
+            if not protected_projection or raw_descriptor is None:
+                raise QualificationProjectionError(
+                    "qualification_stale_projection_requires_protection",
+                )
+            manifest = ACCEPTANCE_CLI.verify_protected_driver(
+                ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT,
+                campaign["source_commit"],
+                "research-qualification-fixture", 0,
+            )
+            continuation_context = {
+                "historical_observed_at": historical_observed_at,
+                "protected_manifest_sha256": manifest["manifest_sha256"],
+                "raw_custody_sha256": raw_custody,
+            }
         result = project_bound(
             campaign, case, observations, observations_descriptor,
             raw, now, protected_projection, owner,
+            continuation_context=continuation_context,
         )
         if protected_projection:
             if observations_descriptor is None or raw_descriptor is None:
@@ -633,7 +712,9 @@ def project(campaign_path: Path, observations: Path, case_id: str,
 def project_bound(campaign: dict[str, Any], case: dict[str, Any],
                   observations: Path, observations_descriptor: int | None,
                   raw: dict[str, bytes], now: int,
-                  protected_projection: bool, owner: int) -> dict[str, Any]:
+                  protected_projection: bool, owner: int, *,
+                  continuation_context: dict[str, Any] | None = None,
+                  ) -> dict[str, Any]:
     case_id = case["case_id"]
     observation_uid = 0 if protected_projection else owner
     observation_mode = 0o444 if protected_projection else 0o600
@@ -682,9 +763,43 @@ def project_bound(campaign: dict[str, Any], case: dict[str, Any],
         output_stage.mkdir(mode=0o700)
         staged_results: dict[str, dict[str, Any]] = {}
         for kind in missing:
+            continuation_path = None
+            if continuation_context is not None:
+                primary, _authority = PRIMARY[kind]
+                ordered = [primary] + [name for name in (
+                    "research", "quarantine", "authority", "production",
+                ) if name != primary]
+                artifact_names = [kind] + [
+                    CONTEXT_NAMES[name] for name in ordered[1:]
+                ]
+                continuation = continuation_record(
+                    campaign, CASE_BY_ID[case_id],
+                    historical_observed_at=continuation_context[
+                        "historical_observed_at"
+                    ],
+                    continued_at=now,
+                    protected_driver="research-qualification-fixture",
+                    protected_manifest_sha256=continuation_context[
+                        "protected_manifest_sha256"
+                    ],
+                    raw_sha256={
+                        artifact_name: hashlib.sha256(raw[raw_name]).hexdigest()
+                        for artifact_name, raw_name
+                        in zip(artifact_names, ordered)
+                    },
+                    raw_custody_sha256=continuation_context[
+                        "raw_custody_sha256"
+                    ],
+                )
+                continuation_path = (
+                    snapshots / f"{kind}.continuation-readback.json"
+                )
+                write_snapshot(continuation_path, canonical(continuation))
             result = OBSERVER.observe(
                 campaign=campaign, case_id=case_id, kind=kind,
-                artifact_arguments=artifact_arguments(kind, snapshot_paths),
+                artifact_arguments=artifact_arguments(
+                    kind, snapshot_paths, continuation=continuation_path,
+                ),
                 output_directory=output_stage, now=now,
                 output_mode=0o600,
             )

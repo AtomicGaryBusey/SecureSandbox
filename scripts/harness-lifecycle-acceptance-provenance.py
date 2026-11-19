@@ -50,7 +50,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
+    continuation_record,
     digest,
     validate_campaign,
     validate_observation,
@@ -275,7 +278,9 @@ def reserve_case(raw_root: Path, case_id: str) -> Path:
 
 
 def project(campaign: dict[str, Any], case: dict[str, Any], raw_path: Path,
-            observations: Path, now: int, operator_uid: int) -> list[dict[str, Any]]:
+            observations: Path, now: int, operator_uid: int, *,
+            continuation_context: dict[str, Any] | None = None,
+            ) -> list[dict[str, Any]]:
     created = []
     for kind in case["evidence_kinds"]:
         output = observations / f"{case['case_id']}.{kind}.json"
@@ -288,14 +293,48 @@ def project(campaign: dict[str, Any], case: dict[str, Any], raw_path: Path,
                 raise ProvenanceDriverError("provenance_existing_observation_invalid")
             created.append(existing)
             continue
-        created.append(OBSERVER.observe(
-            campaign=campaign, case_id=case["case_id"], kind=kind,
-            artifact_arguments=[[
-                kind, "protected-host", str(raw_path), MEDIA_TYPE,
-            ]],
-            output_directory=observations, now=now,
-            output_directory_uid=operator_uid, output_mode=0o444,
-        ))
+        artifacts = [[kind, "protected-host", str(raw_path), MEDIA_TYPE]]
+        if continuation_context is None:
+            created.append(OBSERVER.observe(
+                campaign=campaign, case_id=case["case_id"], kind=kind,
+                artifact_arguments=artifacts,
+                output_directory=observations, now=now,
+                output_directory_uid=operator_uid, output_mode=0o444,
+            ))
+            continue
+        with tempfile.TemporaryDirectory(
+                prefix="secure-sandbox-provenance-continuation.") as temporary:
+            continuation_path = Path(temporary) / "continuation.json"
+            continuation_path.write_bytes(canonical(continuation_record(
+                campaign, CASE_BY_ID[case["case_id"]],
+                historical_observed_at=continuation_context[
+                    "historical_observed_at"
+                ],
+                continued_at=now,
+                protected_driver="host-provenance-fixture",
+                protected_manifest_sha256=continuation_context[
+                    "protected_manifest_sha256"
+                ],
+                raw_sha256={
+                    kind: hashlib.sha256(
+                        OBSERVER.trusted_read(raw_path),
+                    ).hexdigest(),
+                },
+                raw_custody_sha256=continuation_context[
+                    "raw_custody_sha256"
+                ],
+            )))
+            continuation_path.chmod(0o600)
+            artifacts.append([
+                CONTINUATION_ARTIFACT_NAME, "protected-host",
+                str(continuation_path), MEDIA_TYPE,
+            ])
+            created.append(OBSERVER.observe(
+                campaign=campaign, case_id=case["case_id"], kind=kind,
+                artifact_arguments=artifacts,
+                output_directory=observations, now=now,
+                output_directory_uid=operator_uid, output_mode=0o444,
+            ))
     return created
 
 
@@ -313,7 +352,12 @@ def run(campaign_path: Path, observations: Path, raw_root: Path,
         if set(item.name for item in destination.iterdir()) != {RAW_FILENAME}:
             raise ProvenanceDriverError("provenance_raw_inventory_invalid")
         record = SUPERVISOR.trusted_json(raw_path)
-        validate_record(campaign, case, record, now)
+        historical = record.get("observed_at")
+        stale = (
+            isinstance(historical, int) and not isinstance(historical, bool)
+            and now - historical > MAX_OBSERVATION_SECONDS
+        )
+        validate_record(campaign, case, record, historical if stale else now)
     else:
         if any(destination.iterdir()):
             raise ProvenanceDriverError("provenance_raw_inventory_invalid")
@@ -340,8 +384,26 @@ def run(campaign_path: Path, observations: Path, raw_root: Path,
         record["record_sha256"] = digest(record)
         validate_record(campaign, case, record, now)
         write_new(raw_path, record)
+    continuation_context = None
+    if now - record["observed_at"] > MAX_OBSERVATION_SECONDS:
+        manifest = ACCEPTANCE_CLI.verify_protected_driver(
+            installation_root, campaign["source_commit"],
+            "host-provenance-fixture", expected_install_uid,
+        )
+        info = raw_path.lstat()
+        continuation_context = {
+            "historical_observed_at": record["observed_at"],
+            "protected_manifest_sha256": manifest["manifest_sha256"],
+            "raw_custody_sha256": digest({
+                "device": info.st_dev, "inode": info.st_ino,
+                "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+            }),
+        }
     observations_created = project(
         campaign, case, raw_path, observations, now, operator_uid,
+        continuation_context=continuation_context,
     )
     return {
         "schema": "secure-sandbox-harness-lifecycle-acceptance-provenance-result-v1",

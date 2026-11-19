@@ -34,6 +34,10 @@ GENERATION_STATUS_SCHEMA = "secure-sandbox-harness-generation-status-v1"
 OPERATOR_AUTHORIZATION_RECEIPT_SCHEMA = (
     "secure-sandbox-operator-authorization-receipt-v1"
 )
+CONTINUATION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-acceptance-continuation-v1"
+)
+CONTINUATION_ARTIFACT_NAME = "continuation-readback"
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
 MAX_DETAIL_BYTES = 64 * 1024
@@ -213,6 +217,7 @@ PROTECTED_DRIVER_PAYLOADS["independent-export-fixture"] = (
     "scripts/harness-lifecycle-acceptance-export.py",
     "scripts/harness-lifecycle-acceptance-observe.py",
     "scripts/harness-lifecycle-acceptance.py",
+    "scripts/enroll-disposable-mac-harness-lifecycle.py",
     "shared/harness_lifecycle_acceptance.py",
 )
 PHYSICAL_DRIVER_BLOCKERS: dict[str, str] = {}
@@ -614,6 +619,62 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
                 or base64.b64encode(content).decode("ascii") != artifact["content_base64"]):
             raise AcceptanceError("evidence_artifact_content_mismatch")
         names.add(name)
+    historical_times: set[int] = set()
+    for artifact in artifacts:
+        if artifact["name"] == CONTINUATION_ARTIFACT_NAME:
+            continue
+        try:
+            artifact_value = json.loads(base64.b64decode(
+                artifact["content_base64"], validate=True,
+            ))
+        except (ValueError, binascii.Error, UnicodeDecodeError,
+                json.JSONDecodeError):
+            continue
+        if isinstance(artifact_value, dict):
+            observed = artifact_value.get("observed_at")
+            if isinstance(observed, int) and not isinstance(observed, bool):
+                historical_times.add(observed)
+    if len(historical_times) > 1:
+        raise AcceptanceError("evidence_continuation_time_invalid")
+    historical_observed_at = (
+        next(iter(historical_times)) if historical_times else None
+    )
+    if (historical_observed_at is not None
+            and historical_observed_at > value["observed_at"]):
+        raise AcceptanceError("evidence_continuation_time_invalid")
+    continuation = [
+        artifact for artifact in artifacts
+        if artifact["name"] == CONTINUATION_ARTIFACT_NAME
+    ]
+    stale_projection = (
+        historical_observed_at is not None
+        and value["observed_at"] - historical_observed_at
+            > MAX_OBSERVATION_SECONDS
+    )
+    if stale_projection != (len(continuation) == 1):
+        raise AcceptanceError("evidence_continuation_inventory_invalid")
+    if continuation:
+        try:
+            continuation_raw = base64.b64decode(
+                continuation[0]["content_base64"], validate=True,
+            )
+            continuation_value = json.loads(continuation_raw)
+        except (ValueError, binascii.Error, UnicodeDecodeError,
+                json.JSONDecodeError) as error:
+            raise AcceptanceError("evidence_continuation_invalid") from error
+        if canonical(continuation_value) != continuation_raw:
+            raise AcceptanceError("evidence_continuation_invalid")
+        raw_sha256 = {
+            artifact["name"]: artifact["sha256"]
+            for artifact in artifacts
+            if artifact["name"] != CONTINUATION_ARTIFACT_NAME
+        }
+        validate_continuation(
+            continuation_value, campaign, case,
+            raw_sha256=raw_sha256,
+            continued_at=value["observed_at"],
+            historical_observed_at=historical_observed_at,
+        )
     if (artifacts[0]["authority"] != COLLECTOR_PRIMARY_AUTHORITY[value["collector"]]
             or value["source_sha256"] != artifacts[0]["sha256"]
             or value["subject_sha256"] != artifacts[0]["sha256"]):
@@ -622,6 +683,96 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
     unsigned = {key: item for key, item in value.items() if key != "evidence_sha256"}
     if _sha(supplied, "evidence_sha256") != digest(unsigned):
         raise AcceptanceError("evidence_digest_invalid")
+    return value
+
+
+def continuation_record(
+    campaign: dict[str, Any], case: Case, *, historical_observed_at: int,
+    continued_at: int, protected_driver: str, protected_manifest_sha256: str,
+    raw_sha256: dict[str, str], raw_custody_sha256: str,
+) -> dict[str, Any]:
+    """Bind delayed projection to fresh protected custody, never fresh authority."""
+    value = {
+        "schema": CONTINUATION_SCHEMA,
+        "status": "verified",
+        "campaign_id": campaign["campaign_id"],
+        "campaign_sha256": campaign["campaign_sha256"],
+        "machine_identity_sha256": campaign["machine_identity_sha256"],
+        "source_commit": campaign["source_commit"],
+        "case_id": case.case_id,
+        "procedure_sha256": procedure_record(case)["procedure_sha256"],
+        "historical_observed_at": historical_observed_at,
+        "continued_at": continued_at,
+        "protected_driver": protected_driver,
+        "protected_manifest_sha256": protected_manifest_sha256,
+        "raw_sha256": dict(sorted(raw_sha256.items())),
+        "raw_custody_sha256": raw_custody_sha256,
+        "next_case_revalidated": True,
+        "candidate_statement_used": False,
+        "authority": "protected-host",
+    }
+    value["continuation_sha256"] = digest(value)
+    return validate_continuation(
+        value, campaign, case, raw_sha256=raw_sha256,
+        continued_at=continued_at,
+        historical_observed_at=historical_observed_at,
+    )
+
+
+def validate_continuation(
+    value: object, campaign: dict[str, Any], case: Case, *,
+    raw_sha256: dict[str, str], continued_at: int,
+    historical_observed_at: int | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("continuation_invalid")
+    _exact(value, {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "machine_identity_sha256", "source_commit", "case_id",
+        "procedure_sha256", "historical_observed_at", "continued_at",
+        "protected_driver", "protected_manifest_sha256", "raw_sha256",
+        "raw_custody_sha256", "next_case_revalidated",
+        "candidate_statement_used", "authority", "continuation_sha256",
+    }, "continuation")
+    historical = value.get("historical_observed_at")
+    supplied_raw = value.get("raw_sha256")
+    unsigned = {
+        key: item for key, item in value.items()
+        if key != "continuation_sha256"
+    }
+    if (value.get("schema") != CONTINUATION_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("machine_identity_sha256")
+               != campaign["machine_identity_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != case.case_id
+            or value.get("procedure_sha256")
+               != procedure_record(case)["procedure_sha256"]
+            or not isinstance(historical, int) or isinstance(historical, bool)
+            or (historical_observed_at is not None
+                and historical != historical_observed_at)
+            or not campaign["created_at"] <= historical < campaign["expires_at"]
+            or value.get("continued_at") != continued_at
+            or not historical < continued_at <= campaign["expires_at"]
+            or continued_at - historical <= MAX_OBSERVATION_SECONDS
+            or not isinstance(value.get("protected_driver"), str)
+            or value["protected_driver"] != procedure_record(case)["driver"]
+            or not isinstance(value.get("protected_manifest_sha256"), str)
+            or SHA256.fullmatch(value["protected_manifest_sha256"]) is None
+            or not isinstance(supplied_raw, dict) or not supplied_raw
+            or supplied_raw != dict(sorted(raw_sha256.items()))
+            or any(not isinstance(name, str) or ARTIFACT_NAME.fullmatch(name) is None
+                   or not isinstance(item, str) or SHA256.fullmatch(item) is None
+                   for name, item in supplied_raw.items())
+            or not isinstance(value.get("raw_custody_sha256"), str)
+            or SHA256.fullmatch(value["raw_custody_sha256"]) is None
+            or value.get("next_case_revalidated") is not True
+            or value.get("candidate_statement_used") is not False
+            or value.get("authority") != "protected-host"
+            or value.get("continuation_sha256") != digest(unsigned)):
+        raise AcceptanceError("continuation_invalid")
     return value
 
 

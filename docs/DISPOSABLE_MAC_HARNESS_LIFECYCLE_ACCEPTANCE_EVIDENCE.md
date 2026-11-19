@@ -1129,11 +1129,18 @@ replayed.
 The same physical result also proves that the one-hour gate cannot remain the
 campaign's final split-phase resumability policy. The campaign is intentionally
 valid for as long as fourteen days, and ordinary operator absence or an
-overnight pause must not force recollection, deletion, or restart. The required
-successor behavior is therefore unverified: short-lived Touch ID, privilege,
-and mutable-admission authority remains unchanged, while projection of older
-raw evidence additionally requires a fresh canonical continuation readback
-that revalidates and binds every mutable fact. This must be implemented and
-source-tested across bootstrap, provenance, archive, qualification, cold-boot,
-and export, then physically exercised after an over-one-hour pause before the
-campaign advances beyond fresh bootstrap.
+overnight pause must not force recollection, deletion, or restart. Source now
+implements one shared canonical continuation artifact across bootstrap,
+crash-resumed provenance and archive, qualification, cold boot, and export.
+It binds the historical time, current campaign/next-case admission, machine,
+exact protected manifest, raw hashes and custody, and later projection time;
+the final observation validator requires it only when the interval exceeds one
+hour. It grants no mutation or authorization authority and never restamps the
+historical subject state as current. Hostile tests reject missing, unexpected,
+tampered, wrong-driver, cross-raw, cross-time, and noncanonical continuation
+evidence. Operator-owned raw custody is derived from the exact stable file
+descriptors that supplied the validated bytes rather than a second pathname
+resolution. The complete focused acceptance family passes 221 script tests,
+27 DDD contract tests, and 25 shared-contract tests. Publication, protected
+installation, and one physical delayed projection remain pending before fresh
+bootstrap.

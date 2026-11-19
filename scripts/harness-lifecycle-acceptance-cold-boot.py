@@ -48,7 +48,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     CASE_BY_ID,
+    CONTINUATION_ARTIFACT_NAME,
+    MAX_OBSERVATION_SECONDS,
     canonical,
+    continuation_record,
     digest,
     validate_campaign,
     validate_observation,
@@ -577,7 +580,8 @@ def collect(campaign_path: Path, observations: Path, case_id: str, raw_root: Pat
 
 
 def raw_set(campaign: dict[str, Any], case: dict[str, Any], raw_directory: Path,
-            now: int) -> tuple[dict[str, Path], dict[str, bytes]]:
+            now: int, *, allow_historical: bool = False,
+            ) -> tuple[dict[str, Path], dict[str, bytes]]:
     private_directory(raw_directory, "cold_boot_raw_directory")
     kinds = CASE_FILES[case["case_id"]]
     expected = {f"{kind}.json" for kind in kinds}
@@ -586,9 +590,22 @@ def raw_set(campaign: dict[str, Any], case: dict[str, Any], raw_directory: Path,
         raise ColdBootError("cold_boot_raw_inventory_invalid")
     paths = {kind: entries[f"{kind}.json"] for kind in kinds}
     values = {kind: trusted_json(path) for kind, path in paths.items()}
-    validate_cold_readback(campaign, case, values["cold-boot-readback"], now)
+    observed_times = {value.get("observed_at") for value in values.values()}
+    if (len(observed_times) != 1
+            or any(not isinstance(item, int) or isinstance(item, bool)
+                   for item in observed_times)):
+        raise ColdBootError("cold_boot_raw_observed_at_invalid")
+    historical = next(iter(observed_times))
+    validation_time = (
+        historical
+        if allow_historical and now - historical > MAX_OBSERVATION_SECONDS
+        else now
+    )
+    validate_cold_readback(
+        campaign, case, values["cold-boot-readback"], validation_time,
+    )
     for kind in kinds[1:]:
-        validate_receipt(campaign, case, kind, values[kind], now)
+        validate_receipt(campaign, case, kind, values[kind], validation_time)
     if "runtime-readback" in values and "policy-readback" in values:
         binding = values["runtime-readback"]["runtime_binding"]
         policy = values["policy-readback"]
@@ -606,11 +623,13 @@ def existing_observation(path: Path, campaign: dict[str, Any], case: dict[str, A
     except (AcceptanceError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ColdBootError("cold_boot_existing_observation_invalid") from error
     expected = [kind, *SUPPORT[kind]]
+    allowed_names = (expected, [*expected, CONTINUATION_ARTIFACT_NAME])
     evidence = value.get("evidence") if isinstance(value, dict) else None
     artifacts = evidence.get("artifacts") if isinstance(evidence, dict) else None
     if (not isinstance(value, dict) or canonical(value) != raw
             or value.get("kind") != kind or not isinstance(artifacts, list)
-            or [item.get("name") for item in artifacts if isinstance(item, dict)] != expected
+            or [item.get("name") for item in artifacts
+                if isinstance(item, dict)] not in allowed_names
             or any(not isinstance(item, dict)
                    or item.get("authority") != AUTHORITIES[item_kind]
                    or item.get("sha256")
@@ -643,7 +662,41 @@ def project(campaign_path: Path, observations: Path, case_id: str,
     campaign, case, _ = preflight(
         campaign_path, observations, case_id, now, operator_uid,
     )
-    _, raw_values = raw_set(campaign, case, raw_directory, now)
+    paths, raw_values = raw_set(
+        campaign, case, raw_directory, now, allow_historical=True,
+    )
+    historical_times = {
+        json.loads(payload).get("observed_at")
+        for payload in raw_values.values()
+    }
+    if (len(historical_times) != 1
+            or any(not isinstance(item, int) or isinstance(item, bool)
+                   for item in historical_times)):
+        raise ColdBootError("cold_boot_raw_observed_at_invalid")
+    historical_observed_at = next(iter(historical_times))
+    continuation_context = None
+    if now - historical_observed_at > MAX_OBSERVATION_SECONDS:
+        manifest = ACCEPTANCE_CLI.verify_protected_driver(
+            PROTECTED_ROOT, campaign["source_commit"], DRIVER, 0,
+        )
+        custody = []
+        for kind, path in sorted(paths.items()):
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ColdBootError("cold_boot_raw_custody_invalid")
+            custody.append({
+                "kind": kind, "device": info.st_dev, "inode": info.st_ino,
+                "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "links": info.st_nlink,
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+            })
+        continuation_context = {
+            "historical_observed_at": historical_observed_at,
+            "protected_manifest_sha256": manifest["manifest_sha256"],
+            "raw_custody_sha256": digest(custody),
+        }
     private_directory(observations, "cold_boot_observation_directory", operator_uid)
     existing: dict[str, str] = {}; missing: list[str] = []
     for kind in CASE_FILES[case_id]:
@@ -668,6 +721,33 @@ def project(campaign_path: Path, observations: Path, case_id: str,
                 [item, AUTHORITIES[item], str(snapshot_paths[item]), MEDIA_TYPE]
                 for item in (kind, *SUPPORT[kind])
             ]
+            if continuation_context is not None:
+                raw_names = [kind, *SUPPORT[kind]]
+                continuation_path = (
+                    snapshots / f"{kind}.continuation-readback.json"
+                )
+                write_snapshot(continuation_path, canonical(continuation_record(
+                    campaign, CASE_BY_ID[case_id],
+                    historical_observed_at=continuation_context[
+                        "historical_observed_at"
+                    ],
+                    continued_at=now,
+                    protected_driver=DRIVER,
+                    protected_manifest_sha256=continuation_context[
+                        "protected_manifest_sha256"
+                    ],
+                    raw_sha256={
+                        item: hashlib.sha256(raw_values[item]).hexdigest()
+                        for item in raw_names
+                    },
+                    raw_custody_sha256=continuation_context[
+                        "raw_custody_sha256"
+                    ],
+                )))
+                artifacts.append([
+                    CONTINUATION_ARTIFACT_NAME, "protected-host",
+                    str(continuation_path), MEDIA_TYPE,
+                ])
             result = OBSERVER.observe(
                 campaign=campaign, case_id=case_id, kind=kind,
                 artifact_arguments=artifacts, output_directory=outputs, now=now,

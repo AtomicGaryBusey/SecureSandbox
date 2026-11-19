@@ -230,7 +230,7 @@ class BootstrapAcceptanceTests(unittest.TestCase):
     def test_protected_projector_requests_root_read_only_publication(self):
         case = self.case("bootstrap-clean-install")
         raw_values = {
-            kind: acceptance.canonical({"kind": kind})
+            kind: acceptance.canonical({"kind": kind, "observed_at": NOW})
             for kind in case["evidence_kinds"]
         }
         observations = [
@@ -242,7 +242,7 @@ class BootstrapAcceptanceTests(unittest.TestCase):
         with mock.patch.object(bootstrap.os, "geteuid", return_value=0), \
                 self.preflight_patch(case) as preflight, \
                 mock.patch.object(bootstrap, "raw_set_at",
-                                  return_value=raw_values) as raw_set, \
+                                  return_value=(raw_values, "7" * 64)) as raw_set, \
                 mock.patch.object(bootstrap, "write_snapshot"), \
                 mock.patch.object(bootstrap.OBSERVER, "observe",
                                   side_effect=observations) as observe, \
@@ -260,6 +260,7 @@ class BootstrapAcceptanceTests(unittest.TestCase):
         )
         raw_set.assert_called_once_with(
             self.campaign, case, mock.ANY, NOW, 501,
+            allow_historical=True,
         )
         self.assertTrue(observe.call_args_list)
         self.assertTrue(all(
@@ -271,6 +272,47 @@ class BootstrapAcceptanceTests(unittest.TestCase):
             call.kwargs["mode"] == 0o444
             for call in publish.call_args_list
         ))
+
+    def test_stale_projection_embeds_campaign_bound_continuation(self):
+        case = self.case("bootstrap-clean-install")
+        self.campaign["created_at"] = NOW - 7200
+        self.campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in self.campaign.items()
+            if key != "campaign_sha256"
+        })
+        raw_values = {
+            kind: acceptance.canonical({
+                "schema": f"secure-sandbox-{kind}-v1",
+                "status": "verified",
+                "observed_at": NOW - 4001,
+            })
+            for kind in case["evidence_kinds"]
+        }
+        result = bootstrap.project_bound(
+            self.campaign, case, self.observations, None, raw_values, NOW,
+            False, self.observations.stat().st_uid,
+            continuation_context={
+                "historical_observed_at": NOW - 4001,
+                "protected_driver": "clean-machine-bootstrap",
+                "protected_manifest_sha256": "3" * 64,
+                "raw_custody_sha256": "4" * 64,
+            },
+        )
+        self.assertEqual(
+            result["recorded_observation_kinds"], case["evidence_kinds"],
+        )
+        for kind in case["evidence_kinds"]:
+            observation = json.loads((
+                self.observations / f"{case['case_id']}.{kind}.json"
+            ).read_bytes())
+            self.assertEqual(
+                observation["evidence"]["artifacts"][-1]["name"],
+                acceptance.CONTINUATION_ARTIFACT_NAME,
+            )
+            acceptance.validate_observation(
+                observation, self.campaign,
+                acceptance.CASE_BY_ID[case["case_id"]],
+            )
 
     def test_protected_preflight_validates_installed_closures_not_source_tree(self):
         case = self.case("bootstrap-clean-install")

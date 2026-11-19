@@ -38,6 +38,9 @@ SCHEMA = "secure-sandbox-harness-lifecycle-qualification-supervisor-v1"
 QUARANTINE_SCHEMA = "secure-sandbox-harness-lifecycle-qualification-quarantine-v1"
 AUTHORITY_SCHEMA = "secure-sandbox-harness-lifecycle-qualification-authority-v1"
 SCAN_SCHEMA = "secure-sandbox-harness-lifecycle-qualification-production-scan-v1"
+CONTROL_REJECTION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-control-rejection-v1"
+)
 ERROR_SCHEMA = "secure-sandbox-harness-lifecycle-qualification-supervisor-error-v1"
 MEDIA_TYPE = "application/json"
 REMOTE_RELEASE_ROOT = Path(
@@ -294,6 +297,23 @@ def validate_record(value: dict[str, Any], campaign: dict[str, Any],
         raise QualificationSupervisorError("qualification_record_invalid")
 
 
+def control_rejection_record(campaign: dict[str, Any], case: dict[str, Any],
+                             now: int) -> dict[str, Any]:
+    value = record(
+        CONTROL_REJECTION_SCHEMA, campaign, case, now, "rejected", {
+            "error": "supervisor_command_rejected",
+            "control_boundary": "authenticated-privileged-control",
+            "research_case_state": "unresolved-before-result",
+            "retry_permitted": False,
+        }, "rejection_sha256",
+    )
+    validate_record(
+        value, campaign, case, CONTROL_REJECTION_SCHEMA,
+        "rejection_sha256", now, "rejected",
+    )
+    return value
+
+
 def collect(campaign_path: Path, observations: Path, raw_root: Path,
             case_id: str, now: int, *, release: Path | None = None,
             home: Path | None = None, environment: dict[str, str] | None = None,
@@ -312,9 +332,16 @@ def collect(campaign_path: Path, observations: Path, raw_root: Path,
         home or Path.home(), environment if environment is not None else dict(os.environ),
         runner,
     )
-    research = deploy_and_run(
-        protected_release, campaign, destination, case_id,
-    )
+    try:
+        research = deploy_and_run(
+            protected_release, campaign, destination, case_id,
+        )
+    except COMMON.SupervisorError as error:
+        rejection = control_rejection_record(campaign, case, now)
+        COMMON.write_new(destination / "control-rejection.json", rejection)
+        raise QualificationSupervisorError(
+            "qualification_research_command_rejected",
+        ) from error
     try:
         QUALIFICATION.validate_result(research, campaign, case)
     except QUALIFICATION.QualificationDriverError as error:
@@ -388,7 +415,8 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (AcceptanceError, QualificationSupervisorError, OSError) as error:
+    except (AcceptanceError, QualificationSupervisorError,
+            COMMON.SupervisorError, OSError) as error:
         reason = str(error) if isinstance(error, QualificationSupervisorError) \
             else "qualification_supervisor_failed"
         print(json.dumps({

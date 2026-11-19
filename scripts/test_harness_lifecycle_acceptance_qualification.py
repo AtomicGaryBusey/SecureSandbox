@@ -327,6 +327,67 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
         self.assertNotIn(supervisor.COMMON.RESEARCH_ADMIN, argv)
         self.assertEqual(observed["timeout"], 240)
 
+    def test_supervisor_persists_canonical_fail_closed_control_rejection(self):
+        campaign = self.campaign()
+        case = acceptance.case_record(
+            acceptance.CASE_BY_ID["qualification-zero-production-authority"],
+        )
+        fixture = {
+            "path": "fixtures/harness-qualification/malicious_harness.py",
+            "sha256": "4" * 64, "size": 100, "mode": 0o444,
+            "owner_uid": 0, "link_count": 1, "executable": False,
+            "manifest_sha256": "5" * 64,
+            "state": "inert-protected-payload",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            raw_root = Path(directory) / "raw"
+            raw_root.mkdir(mode=0o700)
+            observations = Path(directory) / "observations"
+            observations.mkdir(mode=0o700)
+            with mock.patch.object(
+                    supervisor, "preflight", return_value=(campaign, case)), \
+                    mock.patch.object(
+                        supervisor.ACCEPTANCE_CLI, "verify_protected_driver",
+                        return_value={"manifest_sha256": "5" * 64}), \
+                    mock.patch.object(
+                        supervisor, "protected_fixture_state",
+                        return_value=fixture), \
+                    mock.patch.object(
+                        supervisor, "production_scan", return_value={}), \
+                    mock.patch.object(
+                        supervisor, "deploy_and_run",
+                        side_effect=supervisor.COMMON.SupervisorError(
+                            "supervisor_command_rejected")), \
+                    self.assertRaisesRegex(
+                        supervisor.QualificationSupervisorError,
+                        "qualification_research_command_rejected"):
+                supervisor.collect(
+                    Path("/campaign"), observations, raw_root,
+                    case["case_id"], NOW,
+                    release=Path("/protected/release"),
+                )
+            reservation = raw_root / case["case_id"]
+            self.assertEqual(
+                {item.name for item in reservation.iterdir()},
+                {"control-rejection.json"},
+            )
+            value = json.loads(
+                (reservation / "control-rejection.json").read_bytes(),
+            )
+            self.assertEqual(value["schema"], supervisor.CONTROL_REJECTION_SCHEMA)
+            self.assertEqual(value["status"], "rejected")
+            self.assertEqual(value["error"], "supervisor_command_rejected")
+            self.assertEqual(value["case_id"], case["case_id"])
+            self.assertIs(value["retry_permitted"], False)
+            self.assertEqual(value["candidate_authority"], "none")
+            self.assertEqual(
+                value["rejection_sha256"],
+                acceptance.digest({
+                    key: item for key, item in value.items()
+                    if key != "rejection_sha256"
+                }),
+            )
+
     def test_research_installer_executes_only_fixed_qualification_case(self):
         source = (ROOT / "scripts/install-harness-lifecycle-acceptance-qualification.sh").read_text()
         self.assertIn('case "$case_id" in', source)

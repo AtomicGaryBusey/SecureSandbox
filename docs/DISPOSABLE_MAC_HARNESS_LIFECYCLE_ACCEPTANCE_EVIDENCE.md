@@ -1,16 +1,52 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: every superseded exact-commit campaign on the disposable Neo is
-retained without deletion. The current live campaign is
-abbreviated `ac5211ec...`, bound to public source abbreviated `91169ee...`.
-It completed the same 30-case,
-34-observation prefix and then physically completed the first qualification
-control path. Projection failed closed because the source projector published
-two operator-owned mode-0600 observations instead of protected root-owned
-mode-0444 observations. The four raw records and two rejected projections are
-retained unchanged. No complete acceptance verdict has been issued.
+Status: every superseded exact-commit campaign on the disposable Neo remains
+retained without deletion. The current live campaign is abbreviated
+`40f0aebf...`, bound to public source abbreviated `0abefb4...`. It has 31
+completed cases and
+36 root-owned, mode-0444 observations. The second qualification control request
+failed closed before Research created its case directory. No complete
+acceptance verdict has been issued.
 
-## Current physical checkpoint — 2026-11-18
+## Current physical checkpoint — 2026-11-19
+
+The exact `0abefb4...` protected release completed both bootstrap cases, all
+sixteen provenance cases, all twelve archive rejection cases, and
+`qualification-no-preexecution`. Independent production validation reports
+31/91 cases complete and the exact next case
+`qualification-zero-production-authority`. The first qualification raw set
+contains the canonical Research, quarantine, authority, and production scan
+records; its two projected observations are root-owned mode 0444 and validate
+against the production ordering path.
+
+The next authenticated Research deployment returned status 1 two seconds after
+the prior request was accepted. The Host supervisor had already reserved the
+operator-owned case directory, but Research created no corresponding case
+directory or worker output. A bounded authenticated diagnostic proved that
+the four active-run markers and Claude process were absent, the staged and
+installed seven-file release closures matched byte-for-byte, the Research
+campaign matched, and the only installed qualification fixture remained the
+completed first case. The content-free Research control audit binds the prior
+accepted request and the later `command_failed/status_1` request. Production
+ordering remains on the second case. The campaign must not be retried or have
+its reservation removed.
+
+The repair makes future supervisor rejection canonical: it records one
+source/campaign/case-bound `control-rejection.json` with authority `none`, no
+production-material use, unresolved Research state, and `retry_permitted:
+false`, then returns a stable content-free error instead of an escaping Python
+traceback. A distinct append-only retention command handles this newly observed
+31-case/36-observation layout. Before its first mutation it verifies the clean
+published descendant on both authorized remotes, machine identity, immutable
+predecessor, and diagnostic source against the descendant's exact Git blob. It
+then validates the bounded supervisor output and control-audit capture, writes
+exactly one derived rejection record into the otherwise empty reservation,
+validates every prior protected observation and retained raw file, and
+atomically moves the entire campaign without overwrite. Its
+publication, protected successor installation, live retention, and fresh
+campaign replay remain pending.
+
+## Prior physical checkpoint — 2026-11-18
 
 The exact `91169ee...` ten-driver release is installed and ready. A clean
 campaign replay completed bootstrap, provenance, and archive with exactly 34

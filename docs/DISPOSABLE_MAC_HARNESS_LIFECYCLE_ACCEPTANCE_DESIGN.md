@@ -707,6 +707,24 @@ predecessor, and preserves the whole campaign without deletion. Source
 completion still grants no physical availability:
 the exact commit must be installed and run on the disposable Mac.
 
+A later-case control rejection has a separate fail-closed contract. Once any
+qualification case has been projected and accepted, the Host still reserves
+the next raw directory before dispatch. If authenticated control then rejects,
+the supervisor writes one canonical source/campaign/case-bound rejection
+record into that reservation before returning a stable content-free error. The
+record declares Research state unresolved, candidate authority `none`, no
+production-material use, and `retry_permitted: false`; it can never serve as
+passing evidence or authorize reuse of the reservation. The observed legacy
+path, which predated that record, is retained only after a bounded diagnostic
+binds the exact Host failure output, Research content-free control-audit event,
+absent Research case state, matching installed closure and campaign, clear run
+markers, and absent Claude process. Retention appends one derived canonical
+record only after verifying the immutable predecessor, clean published
+descendant on both authorized remotes, machine identity, and diagnostic source
+against the descendant's exact Git blob. It then validates the entire protected
+prefix and raw custody and atomically moves the campaign without overwrite. It
+never deletes, relabels, or retries the failed case.
+
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
 root. It reports enrollment availability, immutable suite identity, completion

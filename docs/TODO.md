@@ -1187,8 +1187,19 @@ in ignored local records, not in this file.
   Only after authenticated success, poweroff, Shared disconnection, and
   independent all-stopped readback may the successor Host activate and the
   private-plane proof begin. Never reuse `89311c21...`.
-  Physical execution remains pending the dedicated disposable Mac: exercise
-  fresh bootstrap, Touch ID
+  The current exact `0abefb4...` campaign physically completed bootstrap,
+  provenance, archive rejection, and the first Research qualification case:
+  31/91 cases and 36 protected observations validate. The second qualification
+  request failed closed as `command_failed/status_1` before Research created
+  its case directory, leaving the Host's next-case reservation empty. Preserve
+  that reservation and all prior evidence. Publish the canonical supervisor
+  rejection record and the dedicated progressed-qualification no-delete
+  retention path, save and validate the bounded Research control-audit
+  diagnostic, retain the exact campaign atomically, install the protected
+  successor, and initialize a fresh exact-source campaign before replay. Never
+  retry or remove the failed reservation.
+  Remaining physical execution on the dedicated disposable Mac must exercise
+  the other nine qualification cases, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,
   rollback/freeze/equivocation, archive attacks, process and Research-VM power
   loss at every transition, cold-boot readback, legacy-session handling,

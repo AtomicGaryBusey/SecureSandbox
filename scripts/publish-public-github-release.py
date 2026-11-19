@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SEAL_PATH = Path(__file__).with_name("seal-public-github-release.py")
+REPOSITORY_ADMIN_ROLE_ID = 5
 SPEC = importlib.util.spec_from_file_location("secure_sandbox_github_seal", SEAL_PATH)
 SEAL = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -105,9 +106,16 @@ def publish(repository: str) -> dict[str, str]:
     )
 
     active = SEAL.ruleset_payload(SEAL.BRANCH_RULESET, "branch")
-    disabled = {**active, "enforcement": "disabled"}
-    SEAL.put_ruleset(repository, disabled)
-    verify_ruleset_enforcement(repository, disabled, "disabled")
+    temporary_bypass = {
+        **active,
+        "bypass_actors": [{
+            "actor_id": REPOSITORY_ADMIN_ROLE_ID,
+            "actor_type": "RepositoryRole",
+            "bypass_mode": "always",
+        }],
+    }
+    SEAL.put_ruleset(repository, temporary_bypass)
+    verify_ruleset_enforcement(repository, temporary_bypass, "active")
     push_error: BaseException | None = None
     try:
         if git("rev-parse", branch_ref) != head:

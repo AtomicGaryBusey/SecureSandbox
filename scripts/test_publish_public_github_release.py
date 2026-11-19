@@ -31,12 +31,12 @@ class PublicGitHubPublicationTests(unittest.TestCase):
             return ""
         raise AssertionError(arguments)
 
-    def test_publish_unseals_pushes_reseals_and_verifies(self):
+    def test_publish_adds_narrow_admin_bypass_pushes_reseals_and_verifies(self):
         with mock.patch.object(publish, "git", side_effect=self.git_result), \
              mock.patch.object(publish, "verify_prepublication") as preflight, \
              mock.patch.object(publish.subprocess, "run", return_value=mock.Mock(returncode=0)) as checks, \
              mock.patch.object(publish.SEAL, "put_ruleset") as put, \
-             mock.patch.object(publish, "verify_ruleset_enforcement") as disabled, \
+             mock.patch.object(publish, "verify_ruleset_enforcement") as bypassed, \
              mock.patch.object(publish, "remote_tip", return_value=self.head), \
              mock.patch.object(publish.SEAL, "verify_ruleset") as resealed, \
              mock.patch.object(publish.SEAL, "verify_repository") as verified:
@@ -46,9 +46,17 @@ class PublicGitHubPublicationTests(unittest.TestCase):
         preflight.assert_called_once_with("owner/repo", self.head, self.parent)
         checks.assert_called_once()
         self.assertEqual(put.call_count, 2)
-        self.assertEqual(put.call_args_list[0].args[1]["enforcement"], "disabled")
+        self.assertEqual(put.call_args_list[0].args[1]["enforcement"], "active")
+        self.assertEqual(put.call_args_list[0].args[1]["bypass_actors"], [{
+            "actor_id": publish.REPOSITORY_ADMIN_ROLE_ID,
+            "actor_type": "RepositoryRole",
+            "bypass_mode": "always",
+        }])
         self.assertEqual(put.call_args_list[1].args[1]["enforcement"], "active")
-        disabled.assert_called_once()
+        self.assertEqual(put.call_args_list[1].args[1]["bypass_actors"], [])
+        bypassed.assert_called_once_with(
+            "owner/repo", put.call_args_list[0].args[1], "active",
+        )
         resealed.assert_called_once()
         verified.assert_called_once_with("owner/repo")
 

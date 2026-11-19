@@ -1,22 +1,18 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
-Status: active only on the dedicated disposable Mac. The prior campaign
-`ac5211ec...` was retained and independently verified at exact successor
-`01f0a14...`. The live campaign is now `496eca88...`, bound to exact source
-`01f0a14...`. Its acceptance stack is Gateway and Research running, Target
-stopped, Shared disconnected, and Parallels GUI closed. It contains exactly
-the three canonical operator-owned mode-0600 `bootstrap-clean-install` raw
-records and zero observations.
-
-The exact protected root projector was launched only once. It rejected before
-publication with `bootstrap_host_receipt_invalid`; independent readback proves
-zero observations and unchanged raw evidence. The Host receipt was collected
-at epoch `1795086630`, more than four hours before privileged projection. Its
-schema, source, campaign, release, Developer ID team, stack, and digest
-bindings are intact; the source validator accepted it at collection time, but
-the unchanged live one-hour consumption gate correctly rejected it later.
-Do not rerun collection or projection. A dedicated stale-projection retention
-descendant is under review. No operator prompt is currently runnable.
+Status: active only on the dedicated disposable Mac. Campaign `496eca88...`,
+bound to exact source `01f0a14...`, has been retained without deletion and
+independently verified at exact replacement `7bbdd61...`. The verifier bound
+historical epoch `1795086630`, reproduced
+`bootstrap_host_receipt_invalid`, proved age `20135` seconds, verified both
+protected ten-driver releases, and retained exactly three canonical
+operator-owned mode-0600 raw records with zero observations. Result digest
+`08abf158...` and plan digest `27b82095...` agree on independent readback; the
+former live campaign path is absent. Gateway and Research remain running,
+Target stopped, Shared disconnected, and Parallels GUI closed. Do not rerun
+collection, projection, or retention. No fresh campaign may begin until the
+multi-day continuation contract below is implemented, published, installed,
+and independently verified.
 
 ## Current-Mac gate
 
@@ -30,23 +26,12 @@ development Mac.
 
 ## Current Neo resumption
 
-Preserve the live `496eca88...` campaign, its exact three raw files, and zero
-observations. Do not recollect, reproject, chmod, replace, delete, manually
-move, stop the stack, or reconnect Shared while the retention descendant is
-unpublished.
-
-After the descendant is reviewed, committed, published to both authorized
-`public-release` tips, and installed as an exact protected ten-driver release,
-run only one `retain-stale-protected-projection-rejection` ceremony with the
-exact campaign UUID and `01f0a14...` source plus the literal acknowledgement
-`RETAIN STALE PROTECTED BOOTSTRAP PROJECTION WITHOUT DELETION`. Its isolated
-diagnostic must revalidate all three raw records at their one common
-campaign-bound historical timestamp, independently reproduce the current
-`bootstrap_host_receipt_invalid` result only after proving an age greater than
-3600 seconds, bind every predecessor and replacement protected driver, and
-atomically move the complete campaign without overwrite. Then run
-`verify-stale-protected-projection-rejection` independently. Any ambiguity
-stops the sequence; never rerun retention speculatively.
+Preserve retained campaign `496eca88...`, its exact three raw files, zero
+observations, plan `27b82095...`, diagnostic `83f903a5...`, and result
+`08abf158...`. Do not recollect, reproject, supersede, chmod, replace, delete,
+or manually move it. Protected release `7bbdd61...` is installed and the clean
+Neo checkout is fast-forwarded to that exact commit; independent readiness
+reports all ten drivers available.
 
 Only after verification proves the live campaign pathname absent may the
 multi-day continuation correction be installed and a fresh post-install

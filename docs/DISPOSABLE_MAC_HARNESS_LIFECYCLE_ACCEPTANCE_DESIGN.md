@@ -1002,6 +1002,14 @@ descriptor-relative no-overwrite retention move. The self-digested plan and
 result expose the historical time and stale age. Ordinary collection and
 projection continue to enforce the same one-hour gate.
 
+The exact `7bbdd61...` replacement was installed on the Neo and independently
+reported all ten drivers ready. Its single retention execution and separate
+verification agreed on campaign `496eca88...`, predecessor `01f0a14...`, the
+historical timestamp, stale age, exact rejection, three-raw/zero-observation
+inventory, both protected manifests, and every plan, diagnostic, and result
+digest. The former live path is absent and no collection or projection was
+replayed.
+
 That live gate is not the final resumability contract. Physical execution
 proved that coupling raw-evidence custody to a one-hour operator-attendance
 window is incompatible with the campaign's bounded fourteen-day lifetime and

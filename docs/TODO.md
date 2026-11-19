@@ -592,16 +592,15 @@ in ignored local records, not in this file.
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The prior `ac5211ec...` campaign was retained and independently verified at
-  exact successor `01f0a14...`. The active Neo campaign is now `496eca88...`,
-  bound to `01f0a14...`, with exactly three canonical clean-install raw records
-  and zero observations. Its exact protected projector correctly rejected
-  `bootstrap_host_receipt_invalid` because authorization occurred more than
-  four hours after collection and the live gate is one hour. Preserve it
-  through the literal stale-protected-projection no-delete retention and
-  independent verification path; do not retry, recollect, chmod, delete,
-  manually move, stop the stack, or reconnect Shared. Publish and install the
-  retention descendant, retain and verify the failed campaign, then create a
-  fresh post-install preflight and campaign. Before advancing beyond that
+  exact successor `01f0a14...`. Neo campaign `496eca88...`, bound to
+  `01f0a14...`, was retained without deletion and independently verified at
+  exact replacement `7bbdd61...` after its protected projector correctly
+  rejected `bootstrap_host_receipt_invalid`. The retained plan, diagnostic,
+  result, historical timestamp, stale age, three canonical raw records, zero
+  observations, and both protected ten-driver releases agree; the former live
+  path is absent. Preserve that retained evidence and do not retry, recollect,
+  supersede, chmod, delete, or manually move it. Before creating a fresh
+  post-install preflight and campaign or advancing beyond fresh bootstrap,
   fresh bootstrap, remove the operator-burden assumption that every split
   collection/projection pair completes within one hour. Keep Touch ID plans,
   privileged capabilities, and mutable preflight admission short-lived, but

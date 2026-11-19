@@ -1115,6 +1115,17 @@ historical time, reproduce the current stale rejection, prove age greater than
 replacement protected drivers before a no-overwrite move. Collection and
 projection retain their live one-hour gate.
 
+Physical execution at exact published replacement `7bbdd61...` passed that
+contract. Independent readiness first reported all ten protected drivers
+available. The one permitted retention bound campaign `496eca88...`, source
+`01f0a14...`, historical epoch `1795086630`, stale age `20135` seconds,
+diagnostic `83f903a5...`, plan `27b82095...`, and result `08abf158...`. It
+reproduced `bootstrap_host_receipt_invalid`, retained the exact three raw
+records with zero observations, and moved the campaign without overwrite.
+Independent verification returned the same complete canonical result and
+proved the former live campaign path absent. No collection or projection was
+replayed.
+
 The same physical result also proves that the one-hour gate cannot remain the
 campaign's final split-phase resumability policy. The campaign is intentionally
 valid for as long as fourteen days, and ordinary operator absence or an

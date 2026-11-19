@@ -387,11 +387,66 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
             paths, values, raw = projector.raw_set(campaign, case, root, NOW)
             self.assertEqual(values["research"]["status"], "rejected")
             self.assertEqual(set(raw), set(projector.RAW_FILES))
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.assertEqual(
+                    projector.raw_set_at(
+                        campaign, case, descriptor, NOW, os.geteuid(),
+                    ),
+                    raw,
+                )
+            finally:
+                os.close(descriptor)
             arguments = projector.artifact_arguments("network-observation", paths)
             self.assertEqual(arguments[0][1], "protected-research")
             self.assertEqual({item[1] for item in arguments[1:]}, {
                 "protected-host", "disposable-supervisor",
             })
+
+            observations = root / "observations"
+            observations.mkdir(mode=0o700)
+            result = projector.project_bound(
+                campaign, case, observations, None, raw, NOW,
+                False, os.geteuid(),
+            )
+            self.assertEqual(result["status"], "recorded")
+            output = observations / "qualification-deny-network.network-observation.json"
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_protected_projection_requires_root_and_publishes_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); root.chmod(0o700)
+            staged = root / "staged.json"
+            staged.write_bytes(acceptance.canonical({"value": "fixed"}))
+            staged.chmod(0o600)
+            destination = root / "destination"
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                projector.publish_staged_at(staged, descriptor, destination.name)
+            finally:
+                os.close(descriptor)
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o444)
+            self.assertEqual(destination.read_bytes(), staged.read_bytes())
+            with self.assertRaisesRegex(
+                    projector.QualificationProjectionError,
+                    "observation_publication_failed"):
+                descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    projector.publish_staged_at(
+                        staged, descriptor, destination.name,
+                    )
+                finally:
+                    os.close(descriptor)
+
+        with mock.patch.object(projector.os, "geteuid", return_value=501):
+            with self.assertRaisesRegex(
+                    projector.QualificationProjectionError,
+                    "protected_projection_context_required"):
+                projector.project(
+                    Path("/campaign"), Path("/observations"),
+                    "qualification-no-preexecution", Path("/raw"), NOW,
+                    operator_uid=501,
+                )
 
     def test_readiness_reports_complete_source_but_no_protected_installation(self):
         readiness = importlib.util.spec_from_file_location(

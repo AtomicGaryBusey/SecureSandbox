@@ -1,15 +1,47 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
-Status: every superseded or failed exact-commit campaign on the disposable Neo
-is retained without deletion, including historical protected collections and
-their unchanged raw bytes. The current live campaign is abbreviated
-`8fb982a9...`, bound to source abbreviated `469c3e4...`. It has completed 30
-ordered cases and retains 34 root-owned, mode-0444 observations. Its exact next
-case is `qualification-no-preexecution`, with one empty Host raw reservation
-after authenticated Research control hit a contradictory retained-unit wait
-path. No complete acceptance verdict has been issued.
+Status: every superseded exact-commit campaign on the disposable Neo is
+retained without deletion. The current live campaign is
+abbreviated `ac5211ec...`, bound to public source abbreviated `91169ee...`.
+It completed the same 30-case,
+34-observation prefix and then physically completed the first qualification
+control path. Projection failed closed because the source projector published
+two operator-owned mode-0600 observations instead of protected root-owned
+mode-0444 observations. The four raw records and two rejected projections are
+retained unchanged. No complete acceptance verdict has been issued.
 
 ## Current physical checkpoint — 2026-11-18
+
+The exact `91169ee...` ten-driver release is installed and ready. A clean
+campaign replay completed bootstrap, provenance, and archive with exactly 34
+root-owned, mode-0444, single-link observations. The repaired Research
+qualification path then completed `qualification-no-preexecution` through
+authenticated privileged control and produced the complete canonical
+Research, quarantine, authority, and production-material raw set. This proves
+the former `systemd-run --wait`/`RemainAfterExit` deadlock is fixed.
+
+The outer wrapper mistakenly invoked the source qualification projector as the
+operator. It published exactly two canonical mode-0600 files owned by UID 501.
+Production ordering correctly rejected them with `input_file_untrusted` and
+the wrapper stopped before the next case. Nothing was chmodded, rewritten,
+deleted, or relabeled. The repair preserves source projection as test-only and
+adds an exact-installed-release root projection mode: it pins the operator's
+campaign, raw, and observation directories by descriptor; revalidates all
+prior root observations and the complete four-record raw set; stages canonical
+snapshots; and publishes only root-owned mode-0444 records with exclusive
+creation and resumable validation.
+
+A distinct no-delete retention mode accepts only this precise mixed-custody
+state: the exact 30/34 protected prefix, the four operator-owned qualification
+raw records, and exactly the two suite-assigned operator-owned projections.
+Its isolated diagnostic loads the exact protected predecessor, revalidates the
+raw-to-observation bindings, and must independently reproduce
+`input_file_untrusted`. It records protected Host and Research state as
+retained in place and atomically renames the entire campaign without overwrite.
+Publication, installation, retention, independent verification, and a fresh
+replay remain pending.
+
+## Prior systemd-wait checkpoint
 
 The fresh `469c3e4...` campaign physically replayed both bootstrap cases, all
 sixteen provenance cases, and all twelve archive cases. Independent inventory

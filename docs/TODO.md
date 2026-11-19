@@ -8,9 +8,9 @@ in ignored local records, not in this file.
 
 - Keep the clean-history `public-release` branch as the only published branch.
 - Run `scripts/run-public-release-checks.sh` against the exact candidate commit.
-- Explicitly dispatch and confirm a remote CI run and signed build-provenance
-  attestation for the exact published candidate; do not infer either result
-  from local checks or the passage of a prior capacity-reset date.
+- Do not use GitHub Actions or other GitHub CI for this project. Run the complete
+  publication suite locally against the exact candidate and retain its signed
+  local release evidence; GitHub credits are reserved for model usage.
 - Keep GitHub public with `public-release` as its only and default branch. Keep
   `public-release` as the private Hobby Forgejo remote's default branch and
   verify that both live remote tips equal the reviewed commit before and after
@@ -45,6 +45,16 @@ in ignored local records, not in this file.
   reproducibly meets the 15-minute bound without undocumented intervention.
   This is a future goal and does not replace or relax the in-progress
   Disposable-Mac Harness Lifecycle Acceptance DDD.
+- Complete a Streamlined Privileged Acceptance Ceremony DDD. Replace repeated
+  per-step administrator-password prompts with one short-lived, one-time
+  operator-authorized capability bound to an exact campaign, source commit,
+  immutable ordered operation list, and expiry. It must authorize no arbitrary
+  command or caller-selected path, retain no password, avoid an extended sudo
+  timestamp, reject replay and plan drift, journal each bounded step, and
+  terminalize or expire fail-closed. Touch ID remains required wherever the
+  underlying acceptance case requires biometric human authorization. Measure
+  the reduction in prompts without weakening exact-release custody or evidence
+  ownership. This future goal does not replace the active disposable-Mac DDD.
 - Complete an Anthropic CVP Defense Individual Conformance DDD using
   Anthropic's “Cyber Verification Program Security Requirements” as the
   authoritative baseline:
@@ -581,19 +591,17 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The active Neo campaign is abbreviated `8fb982a9...`, bound to exact public
-  source abbreviated `469c3e4...`. It has completed 30 cases and
-  retains 34 independently validated root-owned mode-0444 observations. Its
-  exact next case is `qualification-no-preexecution`; that case has only an
-  empty raw reservation after authenticated privileged control hit the
-  contradictory `systemd-run --wait` plus `RemainAfterExit=yes` path and
-  returned status 120 at the exact 120-second bound. Preserve it through the
-  explicit progressed-campaign no-delete retention and independent
-  verification path after the systemd-wait repair is
-  published to both remotes. Then install the exact successor release,
+  The active Neo campaign is abbreviated `ac5211ec...`, bound to public source
+  abbreviated `91169ee...`. It has 30
+  completed cases, 34 protected observations, a complete first-qualification
+  raw set, and exactly two operator-owned mode-0600 projections that production
+  correctly rejected with `input_file_untrusted`. Preserve it through the
+  explicit owner-projected-qualification no-delete retention and independent
+  verification path after the protected projector repair is published to both
+  remotes. Then install the exact successor release,
   initialize a fresh campaign, and replay from bootstrap in fixed order. Do
-  not retry, delete, copy forward, reconnect Shared, or relabel the failed
-  control path as qualification evidence. Historical campaign narrative
+  not retry, chmod, delete, copy forward, reconnect Shared, or relabel the
+  owner-mode projections as qualification evidence. Historical narrative
   follows: before collecting, publish and
   physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.

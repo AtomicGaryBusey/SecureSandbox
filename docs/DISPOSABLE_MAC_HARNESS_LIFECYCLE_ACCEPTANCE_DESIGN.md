@@ -690,7 +690,21 @@ migration facts. The projector requires the complete four-record raw set,
 revalidates every digest and cross-record binding, and assigns the suite's
 fixed protected-Research, protected-Host, and disposable-supervisor authorities
 without caller-selected evidence fields. It supports only non-overwriting,
-validated resume. Source completion still grants no physical availability:
+validated resume. Physical replay proved that running this projector from the
+operator-writable checkout leaves otherwise canonical observations owned by
+the operator at mode 0600; production ordering correctly rejects that custody.
+Physical projection is therefore a distinct exact-installed-release root mode,
+parallel to bootstrap projection. It pins the operator-owned mode-0700 campaign
+directories by descriptor, requires every prior observation to remain
+root-owned mode 0444, consumes only operator-owned mode-0600 canonical raw
+records, publishes descriptor-relative root-owned mode-0444 observations with
+exclusive creation and fsync, and revalidates an existing partial publication
+before resuming. Source mode remains mode 0600 and test-only. A dedicated
+retention ceremony admits only the exact observed 30-case/34-observation
+prefix plus the first qualification's four raw records and two owner-mode
+projections, reproduces `input_file_untrusted` through the immutable
+predecessor, and preserves the whole campaign without deletion. Source
+completion still grants no physical availability:
 the exact commit must be installed and run on the disposable Mac.
 
 Control Center exposes only a verified read-only projection from the fixed

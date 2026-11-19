@@ -1,12 +1,12 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
 Status: active only on the dedicated disposable Mac. The live campaign is
-abbreviated `8fb982a9...`, bound to exact source `469c3e4...`, and has completed
-30 cases with 34 protected observations. Its first qualification attempt
-reached authenticated privileged control but deadlocked on the contradictory
-`systemd-run --wait` plus `RemainAfterExit=yes` lifecycle until the fixed
-120-second bound. Source repair and a no-delete progressed-campaign retention
-ceremony are under review. No operator prompt is currently runnable.
+abbreviated `ac5211ec...`, bound to exact source abbreviated `91169ee...`. It
+retains 30 completed cases,
+34 protected observations, the complete first-qualification raw set, and two
+operator-owned mode-0600 projections rejected by production custody checks.
+The protected projector and exact-state no-delete retention repair are under
+review. No operator prompt is currently runnable.
 
 ## Current-Mac gate
 
@@ -20,27 +20,26 @@ development Mac.
 
 ## Current Neo resumption
 
-The current campaign is abbreviated `8fb982a9...`, bound to exact source
-abbreviated `469c3e4...`. It retains 30 completed cases,
-34 root-owned mode-0444 observations, and an empty private reservation for the
-exact next case `qualification-no-preexecution`. Gateway and Research are
-running, Target is stopped, and Shared is disconnected. Preserve all of that
-state. Do not rerun qualification, delete the reservation, reuse the campaign,
-stop the stack, or reconnect Shared while the repair is unpublished.
+The live `ac5211ec...` campaign retains 34 root-owned mode-0444 observations,
+four canonical raw records for `qualification-no-preexecution`, and exactly
+two canonical operator-owned mode-0600 projections. Gateway and Research are
+running, Target is stopped, Shared is disconnected, and Parallels GUI is
+closed. Preserve all of that state. Do not rerun qualification, chmod or
+replace either projection, delete raw evidence, reuse the campaign, stop the
+stack, or reconnect Shared while the repair is unpublished.
 
-After the systemd-wait descendant is reviewed, committed, published to both
+After the projection descendant is reviewed, committed, published to both
 authorized `public-release` tips, and installed as the exact protected
 ten-driver release, run only the explicit
-`retain-qualification-control-rejection` ceremony with the old campaign UUID,
-old source commit, and its literal acknowledgement. Then run
-`verify-qualification-control-rejection` independently. The ceremony must
-validate the exact 30-case/34-observation prefix, immutable observation modes,
-historical raw bundles, empty qualification reservation, and predecessor
-diagnostic before its exclusive atomic rename. The diagnostic must identify
-`authenticated-control-systemd-wait-deadlock`; the earlier
-`authenticated-control-systemd-readback-rejected` and
-`direct-research-admin-nonroot` forms remain valid only for their
-already-retained historical campaigns. It leaves the
+`retain-owner-projected-qualification` ceremony with the exact campaign UUID
+and source commit read from the retained live `ac5211ec...` campaign, and the
+literal acknowledgement
+`RETAIN OWNER-PROJECTED QUALIFICATION WITHOUT DELETION`. Then run
+`verify-owner-projected-qualification` independently. The ceremony must
+validate the exact 30-case/34-observation prefix, four-file raw set, and two
+owner-owned mode-0600 projections, then reproduce `input_file_untrusted`
+through the exact protected predecessor before its exclusive atomic rename. It
+leaves the
 campaign-keyed Host and Research protected state in place. Any ambiguity stops
 the sequence; never rerun retention speculatively.
 
@@ -48,8 +47,10 @@ Only after verification proves the live campaign pathname absent may a fresh
 campaign be initialized at the published repair commit. Replay must begin at
 bootstrap and proceed in fixed order; the prior 34 observations cannot be
 copied forward. Qualification execution must then traverse authenticated
-privileged control and return a root-produced Research result before Host
-projection.
+privileged control and return a root-produced Research result. Projection must
+run from the exact protected release as root with the campaign operator UID;
+each output must independently read back as UID 0, mode 0444, link count one
+before production status advances.
 
 ### Historical isolated-control checkpoint
 

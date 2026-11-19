@@ -619,6 +619,63 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         diagnostic["diagnostic_sha256"] = acceptance.digest(diagnostic)
         return diagnostic
 
+    def seed_qualification_owner_projection(self) -> dict:
+        self.seed_qualification_rejection()
+        raw = (
+            self.root / "raw/qualification"
+            / retention.QUALIFICATION_REJECTION_CASE_ID
+        )
+        raw_digests = {}
+        for key, name in {
+            "research": "research-result.json",
+            "quarantine": "quarantine-readback.json",
+            "authority": "authority-readback.json",
+            "production": "production-material-scan.json",
+        }.items():
+            payload = acceptance.canonical({"kind": key})
+            path = raw / name
+            path.write_bytes(payload); path.chmod(0o600)
+            raw_digests[key] = hashlib.sha256(payload).hexdigest()
+        case = acceptance.CASE_BY_ID[
+            retention.QUALIFICATION_REJECTION_CASE_ID
+        ]
+        observation_digests = {}
+        for kind in case.evidence_kinds:
+            payload = acceptance.canonical({
+                "case_id": case.case_id, "kind": kind,
+            })
+            path = self.root / "observations" / f"{case.case_id}.{kind}.json"
+            path.write_bytes(payload); path.chmod(0o600)
+            observation_digests[kind] = hashlib.sha256(payload).hexdigest()
+        diagnostic = {
+            "schema":
+                retention.QUALIFICATION_OWNER_PROJECTION_DIAGNOSTIC_SCHEMA,
+            "status": "confirmed",
+            "case_id": retention.QUALIFICATION_REJECTION_CASE_ID,
+            "error": retention.QUALIFICATION_OWNER_PROJECTION_EXPECTED_ERROR,
+            "source_commit": self.campaign["source_commit"],
+            "observed_at": int(time.time()),
+            "raw_sha256": raw_digests,
+            "observation_sha256": observation_digests,
+        }
+        diagnostic["diagnostic_sha256"] = acceptance.digest(diagnostic)
+        return diagnostic
+
+    def execute_qualification_owner_projection(self, diagnostic, **overrides):
+        arguments = {
+            "acknowledgement":
+                retention.QUALIFICATION_OWNER_PROJECTION_ACKNOWLEDGEMENT,
+            "qualification_owner_projection": True,
+            "protected_observation_uid": os.geteuid(),
+            "qualification_owner_projection_probe":
+                lambda campaign, observations, now: diagnostic,
+        }
+        arguments.update(overrides)
+        with mock.patch.object(
+                retention.ACCEPTANCE_CLI, "next_case",
+                side_effect=acceptance.AcceptanceError("input_file_untrusted")):
+            return self.execute(**arguments)
+
     @staticmethod
     def qualification_next() -> dict:
         case = acceptance.CASE_BY_ID[
@@ -750,6 +807,86 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                 self.root, os.geteuid(), qualification_rejection=True,
                 protected_observation_uid=os.geteuid(),
             )
+
+    def test_owner_projected_qualification_is_retained_without_rewrite(self):
+        diagnostic = self.seed_qualification_owner_projection()
+        before = {
+            str(path.relative_to(self.root)): path.read_bytes()
+            for path in self.root.rglob("*.json")
+        }
+        result = self.execute_qualification_owner_projection(diagnostic)
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        self.assertEqual(
+            result["schema"],
+            retention.QUALIFICATION_OWNER_PROJECTION_RESULT_SCHEMA,
+        )
+        self.assertEqual(result["expected_error"], "input_file_untrusted")
+        self.assertEqual(result["completed_case_count"], 30)
+        self.assertEqual(result["completed_observation_count"], 34)
+        for relative, payload in before.items():
+            self.assertEqual((destination / relative).read_bytes(), payload)
+
+    def test_owner_projected_qualification_rejects_wrong_custody(self):
+        diagnostic = self.seed_qualification_owner_projection()
+        path = (
+            self.root / "observations"
+            / f"{retention.QUALIFICATION_REJECTION_CASE_ID}.execution-observation.json"
+        )
+        path.chmod(0o444)
+        with self.assertRaisesRegex(
+                retention.RetentionError, "retention_evidence_file_untrusted"):
+            self.execute_qualification_owner_projection(diagnostic)
+
+    def test_owner_projected_qualification_commands_are_explicit(self):
+        retain_args = retention.parser().parse_args([
+            "retain-owner-projected-qualification",
+            "--expected-campaign-id", self.campaign["campaign_id"],
+            "--expected-source-commit", self.campaign["source_commit"],
+            "--acknowledge",
+            retention.QUALIFICATION_OWNER_PROJECTION_ACKNOWLEDGEMENT,
+        ])
+        verify_args = retention.parser().parse_args([
+            "verify-owner-projected-qualification",
+            "--expected-campaign-id", self.campaign["campaign_id"],
+            "--expected-source-commit", self.campaign["source_commit"],
+            "--expected-replacement-commit", "b" * 40,
+        ])
+        self.assertEqual(
+            retain_args.command, "retain-owner-projected-qualification",
+        )
+        self.assertEqual(
+            verify_args.command, "verify-owner-projected-qualification",
+        )
+
+    def test_owner_projected_qualification_diagnostic_is_predecessor_bound(self):
+        diagnostic = self.seed_qualification_owner_projection()
+        completed = retention.subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=acceptance.canonical(diagnostic), stderr=b"",
+        )
+        with mock.patch.object(
+                retention.subprocess, "run", return_value=completed) as runner:
+            observed = retention.confirm_qualification_owner_projection_failure(
+                self.campaign, self.root / "observations", int(time.time()),
+            )
+        self.assertEqual(observed, diagnostic)
+        command = runner.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/python3", "-I", "-c"])
+        self.assertEqual(
+            command[4],
+            str(retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / self.campaign["source_commit"]),
+        )
+        self.assertEqual(command[5], str(self.root / "campaign.json"))
+        self.assertEqual(command[6], str(self.root / "observations"))
+        self.assertEqual(
+            command[7], str(self.root / "raw/qualification"
+                            / retention.QUALIFICATION_REJECTION_CASE_ID),
+        )
+        self.assertEqual(runner.call_args.kwargs["cwd"], "/")
 
     def test_qualification_rejection_refuses_mutable_prior_observation(self):
         self.seed_qualification_rejection()

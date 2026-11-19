@@ -1114,3 +1114,15 @@ historical time, reproduce the current stale rejection, prove age greater than
 3600 seconds, require zero observations, and verify all predecessor and
 replacement protected drivers before a no-overwrite move. Collection and
 projection retain their live one-hour gate.
+
+The same physical result also proves that the one-hour gate cannot remain the
+campaign's final split-phase resumability policy. The campaign is intentionally
+valid for as long as fourteen days, and ordinary operator absence or an
+overnight pause must not force recollection, deletion, or restart. The required
+successor behavior is therefore unverified: short-lived Touch ID, privilege,
+and mutable-admission authority remains unchanged, while projection of older
+raw evidence additionally requires a fresh canonical continuation readback
+that revalidates and binds every mutable fact. This must be implemented and
+source-tested across bootstrap, provenance, archive, qualification, cold-boot,
+and export, then physically exercised after an over-one-hour pause before the
+campaign advances beyond fresh bootstrap.

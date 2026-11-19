@@ -601,9 +601,19 @@ in ignored local records, not in this file.
   independent verification path; do not retry, recollect, chmod, delete,
   manually move, stop the stack, or reconnect Shared. Publish and install the
   retention descendant, retain and verify the failed campaign, then create a
-  fresh post-install preflight and campaign. Keep an operator present and
-  launch the exact protected projector immediately after its one-shot
-  collection. Historical narrative follows: before collecting, publish and
+  fresh post-install preflight and campaign. Before advancing beyond that
+  fresh bootstrap, remove the operator-burden assumption that every split
+  collection/projection pair completes within one hour. Keep Touch ID plans,
+  privileged capabilities, and mutable preflight admission short-lived, but
+  make raw evidence resumable for the campaign lifetime through a fresh,
+  self-digested continuation receipt that revalidates every mutable Host,
+  Research, VM, release, and custody fact at projection time. Bind both the
+  historical observation and current continuity readback; any drift or
+  incomplete readback fails closed without deleting or reclassifying the
+  historical evidence. Apply the same rule to bootstrap, provenance, archive,
+  qualification, cold-boot, and export split phases so an overnight pause can
+  never require recollection or campaign restart merely because wall-clock
+  time elapsed. Historical narrative follows: before collecting, publish and
   physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also

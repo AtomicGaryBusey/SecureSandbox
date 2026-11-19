@@ -48,11 +48,17 @@ atomically move the complete campaign without overwrite. Then run
 `verify-stale-protected-projection-rejection` independently. Any ambiguity
 stops the sequence; never rerun retention speculatively.
 
-Only after verification proves the live campaign pathname absent may a fresh
-post-install preflight and exact-source campaign be initialized. Before its
-one-shot collection, obtain the administrator authorization while the operator
-is present; launch the protected projector immediately after collection. Raw
-collection and protected projection retain the live one-hour gate.
+Only after verification proves the live campaign pathname absent may the
+multi-day continuation correction be installed and a fresh post-install
+preflight and exact-source campaign be initialized. Do not make operator
+availability within one hour a campaign prerequisite. The corrected protected
+drivers must keep Touch ID plans, privilege capabilities, and mutable admission
+preflights short-lived, while allowing an older campaign-bound raw observation
+to be projected only alongside a fresh self-digested continuation readback of
+every mutable fact relevant to that case. The projection must bind both
+timestamps and digests; drift or incomplete readback retains the historical
+evidence and fails closed. Do not advance beyond fresh bootstrap until this
+contract covers every split-phase collector used later in the campaign.
 
 ### Historical isolated-control checkpoint
 

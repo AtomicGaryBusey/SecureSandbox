@@ -1002,6 +1002,24 @@ descriptor-relative no-overwrite retention move. The self-digested plan and
 result expose the historical time and stale age. Ordinary collection and
 projection continue to enforce the same one-hour gate.
 
+That live gate is not the final resumability contract. Physical execution
+proved that coupling raw-evidence custody to a one-hour operator-attendance
+window is incompatible with the campaign's bounded fourteen-day lifetime and
+with ordinary overnight pauses. Short lifetimes remain mandatory for Touch ID
+plans, privilege capabilities, and admission preflights that authorize a
+mutation. A completed raw observation, however, remains historical evidence
+for the campaign lifetime. When projection occurs after its original live
+window, the protected driver must obtain a fresh canonical continuation
+readback, bind it to the raw record, campaign, exact installed release,
+machine, operator, case, and current next-case state, and revalidate every
+mutable fact relevant to that collector. The projection binds both timestamps
+and both digests. Drift, incomplete readback, changed custody, or a campaign
+that no longer names the case as next fails closed and retains the raw evidence
+unchanged; elapsed wall-clock time alone does not erase, recollect, or
+reclassify it. This continuation contract applies consistently to every
+split-phase bootstrap, provenance, archive, qualification, cold-boot, and
+export path before the physical campaign advances beyond fresh bootstrap.
+
 The original completely-empty retention path later exposed a distinct
 commit-domain defect when invoked from a clean published descendant: its
 source readiness check tried to classify the descendant's current source bytes

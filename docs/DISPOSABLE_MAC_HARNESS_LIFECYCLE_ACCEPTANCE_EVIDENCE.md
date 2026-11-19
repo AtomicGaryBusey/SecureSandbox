@@ -1078,3 +1078,39 @@ into morning preflight before campaign initialization, and extends the same
 fixed Gateway probe to 240 attempts. Until that descendant is published,
 installed, and the retained campaign independently verifies, no new campaign
 or accepted verdict is claimed.
+
+## Historical-time retention and stale projection checkpoint
+
+The later qualification-owner-projection campaign `ac5211ec...` was retained
+without deletion after exact successor `01f0a14...` independently validated
+its historical raw time, reproduced `input_file_untrusted`, and preserved all
+30 completed cases, 36 observations, and four raw records. The retained path,
+plan, inventory, and absent live path independently verified. Exact protected
+release `01f0a14...` then passed all ten driver readbacks and fresh post-install
+preflight initialized campaign `496eca88...` with zero observations.
+
+Its first bootstrap transition timed out just before Gateway control became
+readable. The fixed safe-intermediate re-entry then emitted a verified record:
+Gateway and Research running and reachable, Target stopped and unreachable,
+Shared disconnected, and Parallels GUI closed. One clean-install collection
+succeeded and wrote exactly three canonical operator-owned mode-0600 raw
+records. The exact protected root projector was launched once but returned
+`bootstrap_host_receipt_invalid` before publishing an observation. Independent
+readback confirms the observation directory remains empty and all raw bytes
+remain in place.
+
+The Host receipt's `observed_at` is epoch `1795086630`; privileged projection
+occurred more than four hours later. Its schema, status, campaign, source,
+case, release schema, authorized Developer ID Team `389K3H8Y32`, and stack
+schema all match the fixed contract. The collector itself invoked the same
+validator before publication, proving the bundle passed at collection time.
+The unchanged projection validator therefore correctly rejected the stale
+receipt through its one-hour live-consumption bound. This is retained failure
+evidence, not an acceptance observation and not grounds to weaken freshness.
+
+The successor adds only a literal stale-projection retention mode. Its isolated
+exact-predecessor diagnostic must revalidate the fixed raw set at the common
+historical time, reproduce the current stale rejection, prove age greater than
+3600 seconds, require zero observations, and verify all predecessor and
+replacement protected drivers before a no-overwrite move. Collection and
+projection retain their live one-hour gate.

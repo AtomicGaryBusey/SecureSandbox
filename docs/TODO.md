@@ -591,22 +591,19 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The active Neo campaign is abbreviated `ac5211ec...`, bound to public source
-  abbreviated `91169ee...`. It has 30
-  completed cases, 34 protected observations, a complete first-qualification
-  raw set, and exactly two operator-owned mode-0600 projections that production
-  correctly rejected with `input_file_untrusted`. Preserve it through the
-  explicit owner-projected-qualification no-delete retention and independent
-  verification path. The first published/installed repair at `a224353...`
-  failed closed before plan publication because the exact predecessor applied
-  its one-hour live-record window to historical raw evidence; live evidence
-  remained unchanged. Publish and install the common-historical-time bridge,
-  then make one fresh retention attempt and independently verify it. Then
-  install the exact successor release,
-  initialize a fresh campaign, and replay from bootstrap in fixed order. Do
-  not retry, chmod, delete, copy forward, reconnect Shared, or relabel the
-  owner-mode projections as qualification evidence. Historical narrative
-  follows: before collecting, publish and
+  The prior `ac5211ec...` campaign was retained and independently verified at
+  exact successor `01f0a14...`. The active Neo campaign is now `496eca88...`,
+  bound to `01f0a14...`, with exactly three canonical clean-install raw records
+  and zero observations. Its exact protected projector correctly rejected
+  `bootstrap_host_receipt_invalid` because authorization occurred more than
+  four hours after collection and the live gate is one hour. Preserve it
+  through the literal stale-protected-projection no-delete retention and
+  independent verification path; do not retry, recollect, chmod, delete,
+  manually move, stop the stack, or reconnect Shared. Publish and install the
+  retention descendant, retain and verify the failed campaign, then create a
+  fresh post-install preflight and campaign. Keep an operator present and
+  launch the exact protected projector immediately after its one-shot
+  collection. Historical narrative follows: before collecting, publish and
   physically exercise the corrected explicit Parallels
   27.1 stopped-service bootstrap and the distinct acceptance stack transition.
   Its first physical run proved the Gateway-only service strategy but also

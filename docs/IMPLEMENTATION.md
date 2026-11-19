@@ -277,6 +277,19 @@ the operator-owned inputs and publishes immutable observations. A third
 retention ceremony preserves the exact failed raw and projected bytes, proves
 the predecessor rejection in isolation, and moves the campaign without
 permission repair, overwrite, or deletion.
+
+A later physically correct protected projection was authorized more than four
+hours after its one-shot collection. The unchanged one-hour live gate rejected
+the Host receipt before any root observation was published. The retention tool
+now has a distinct literal stale-projection mode for exactly three canonical
+clean-install raw records and zero observations. Its isolated predecessor first
+validates the bundle at the common historical collection time, then reproduces
+the exact current `bootstrap_host_receipt_invalid` result with age greater than
+3600 seconds. It also binds all predecessor and replacement protected driver
+manifests before descriptor-relative no-overwrite retention. This compatibility
+exists only for retention; live collection and projection freshness is not
+changed.
+
 Security review then closed the owner-to-root pathname race by anchoring raw
 reads and observation publication to open validated directory descriptors,
 with final named-path identity readback and a substitution regression.

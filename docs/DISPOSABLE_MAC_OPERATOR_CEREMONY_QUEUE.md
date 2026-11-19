@@ -1,18 +1,22 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
-Status: active only on the dedicated disposable Mac. The live campaign is
-abbreviated `ac5211ec...`, bound to exact source abbreviated `91169ee...`. It
-retains 30 completed cases,
-34 protected observations, the complete first-qualification raw set, and two
-operator-owned mode-0600 projections rejected by production custody checks.
-The protected projector and first exact-state no-delete retention repair were
-published as `a224353...`, installed on the Neo, and independently reported all
-ten protected drivers ready. Its first retention invocation failed closed
-before plan publication or rename with
-`retention_qualification_owner_projection_diagnostic_failed`: the exact
-`91169ee...` predecessor applied its one-hour live-consumption window to the
-otherwise valid historical raw records. The historical-time compatibility
-repair is under review. No operator prompt is currently runnable.
+Status: active only on the dedicated disposable Mac. The prior campaign
+`ac5211ec...` was retained and independently verified at exact successor
+`01f0a14...`. The live campaign is now `496eca88...`, bound to exact source
+`01f0a14...`. Its acceptance stack is Gateway and Research running, Target
+stopped, Shared disconnected, and Parallels GUI closed. It contains exactly
+the three canonical operator-owned mode-0600 `bootstrap-clean-install` raw
+records and zero observations.
+
+The exact protected root projector was launched only once. It rejected before
+publication with `bootstrap_host_receipt_invalid`; independent readback proves
+zero observations and unchanged raw evidence. The Host receipt was collected
+at epoch `1795086630`, more than four hours before privileged projection. Its
+schema, source, campaign, release, Developer ID team, stack, and digest
+bindings are intact; the source validator accepted it at collection time, but
+the unchanged live one-hour consumption gate correctly rejected it later.
+Do not rerun collection or projection. A dedicated stale-projection retention
+descendant is under review. No operator prompt is currently runnable.
 
 ## Current-Mac gate
 
@@ -26,46 +30,29 @@ development Mac.
 
 ## Current Neo resumption
 
-The live `ac5211ec...` campaign retains 34 root-owned mode-0444 observations,
-four canonical raw records for `qualification-no-preexecution`, and exactly
-two canonical operator-owned mode-0600 projections. Gateway and Research are
-running, Target is stopped, Shared is disconnected, and Parallels GUI is
-closed. Preserve all of that state. Do not rerun qualification, chmod or
-replace either projection, delete raw evidence, reuse the campaign, stop the
-stack, or reconnect Shared while the repair is unpublished.
+Preserve the live `496eca88...` campaign, its exact three raw files, and zero
+observations. Do not recollect, reproject, chmod, replace, delete, manually
+move, stop the stack, or reconnect Shared while the retention descendant is
+unpublished.
 
-Do not replay the failed `a224353...` retention invocation. The live campaign
-pathname, all 36 observations, all four qualification raw records, and absent
-retained destination were independently read back unchanged. A read-only
-instrumented run of the repaired diagnostic derived the single common
-collection time from the three canonical auxiliary records, re-read that same
-time inside the isolated predecessor, and reproduced the required
-`input_file_untrusted` result while binding all four raw and both projection
-hashes.
-
-After that compatibility descendant is reviewed, committed, published to both
-authorized `public-release` tips, and installed as the exact protected
-ten-driver release, run only one fresh explicit
-`retain-owner-projected-qualification` ceremony with the exact campaign UUID
-and source commit read from the retained live `ac5211ec...` campaign, and the
-literal acknowledgement
-`RETAIN OWNER-PROJECTED QUALIFICATION WITHOUT DELETION`. Then run
-`verify-owner-projected-qualification` independently. The ceremony must
-validate the exact 30-case/34-observation prefix, four-file raw set, and two
-owner-owned mode-0600 projections, then reproduce `input_file_untrusted`
-through the exact protected predecessor before its exclusive atomic rename. It
-leaves the
-campaign-keyed Host and Research protected state in place. Any ambiguity stops
-the sequence; never rerun retention speculatively.
+After the descendant is reviewed, committed, published to both authorized
+`public-release` tips, and installed as an exact protected ten-driver release,
+run only one `retain-stale-protected-projection-rejection` ceremony with the
+exact campaign UUID and `01f0a14...` source plus the literal acknowledgement
+`RETAIN STALE PROTECTED BOOTSTRAP PROJECTION WITHOUT DELETION`. Its isolated
+diagnostic must revalidate all three raw records at their one common
+campaign-bound historical timestamp, independently reproduce the current
+`bootstrap_host_receipt_invalid` result only after proving an age greater than
+3600 seconds, bind every predecessor and replacement protected driver, and
+atomically move the complete campaign without overwrite. Then run
+`verify-stale-protected-projection-rejection` independently. Any ambiguity
+stops the sequence; never rerun retention speculatively.
 
 Only after verification proves the live campaign pathname absent may a fresh
-campaign be initialized at the published repair commit. Replay must begin at
-bootstrap and proceed in fixed order; the prior 34 observations cannot be
-copied forward. Qualification execution must then traverse authenticated
-privileged control and return a root-produced Research result. Projection must
-run from the exact protected release as root with the campaign operator UID;
-each output must independently read back as UID 0, mode 0444, link count one
-before production status advances.
+post-install preflight and exact-source campaign be initialized. Before its
+one-shot collection, obtain the administrator authorization while the operator
+is present; launch the protected projector immediately after collection. Raw
+collection and protected projection retain the live one-hour gate.
 
 ### Historical isolated-control checkpoint
 

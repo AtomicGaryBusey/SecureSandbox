@@ -941,7 +941,7 @@ independently proved all three VMs stopped and the Parallels GUI closed.
 
 An initialized campaign blocks the clean-machine preflight, including after a
 collector reserves its raw case directory and then rejects. The retention-only
-tool therefore has three disjoint ceremonies. Its original command accepts only
+tool therefore has fixed disjoint ceremonies. Its original command accepts only
 a completely empty campaign. A separate literal
 `retain-reserved-bootstrap` command accepts only one empty private
 `raw/bootstrap/bootstrap-clean-install` reservation, zero observations, no
@@ -985,6 +985,22 @@ only the predecessor readiness function's UID observation to root to reproduce
 the original root-projector branch. It grants no filesystem authority; the
 current verifier separately requires the actual releases, payloads, and
 manifests to remain root-owned and immutable.
+
+The fifth literal `retain-stale-protected-projection-rejection` command covers
+the distinct physical state where collection completed, the exact protected
+root projector was not authorized until more than one hour later, and the
+projector correctly returned `bootstrap_host_receipt_invalid` with zero
+observations. It does not extend or bypass the live window. The parent derives
+one common historical `observed_at` from the fixed Host and Research records,
+requires its age to exceed 3600 seconds, and passes it to a fresh isolated
+exact-predecessor interpreter. That child first revalidates all three raw
+records at their historical campaign-bound time, then invokes the unchanged
+validator at current time and requires the exact stale rejection. It also
+requires an empty observation directory and independently verifies every
+protected driver in both predecessor and replacement releases before the
+descriptor-relative no-overwrite retention move. The self-digested plan and
+result expose the historical time and stale age. Ordinary collection and
+projection continue to enforce the same one-hour gate.
 
 The original completely-empty retention path later exposed a distinct
 commit-domain defect when invoked from a clean published descendant: its

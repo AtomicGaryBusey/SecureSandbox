@@ -436,6 +436,60 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         arguments.update(overrides)
         return self.execute(**arguments)
 
+    def stale_protected_projection_diagnostic(
+            self, campaign, observations, now, replacement):
+        self.assertEqual(campaign, self.campaign)
+        self.assertEqual(observations, self.root / "observations")
+        historical = self.campaign["created_at"]
+        value = {
+            "schema": (
+                retention.STALE_PROTECTED_PROJECTION_DIAGNOSTIC_SCHEMA
+            ),
+            "status": "confirmed",
+            "case_id": retention.RESERVED_CASE_ID,
+            "error": retention.STALE_PROTECTED_PROJECTION_EXPECTED_ERROR,
+            "source_commit": campaign["source_commit"],
+            "replacement_source_commit": replacement,
+            "observed_at": now,
+            "historical_observed_at": historical,
+            "stale_age_seconds": now - historical,
+            "raw_sha256": {
+                kind: str(index) * 64
+                for index, kind in enumerate(
+                    retention.OWNER_PROJECTION_KINDS, start=1,
+                )
+            },
+            "predecessor_manifest_sha256": "5" * 64,
+            "replacement_manifest_sha256": "6" * 64,
+            "verified_driver_count": len(acceptance.DRIVER_ENTRYPOINTS),
+        }
+        value["diagnostic_sha256"] = acceptance.digest(value)
+        return value
+
+    def execute_stale_protected_projection(self, **overrides):
+        now = int(time.time())
+        self.campaign["created_at"] = now - 7200
+        self.campaign["expires_at"] = now + 3600
+        self.campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in self.campaign.items()
+            if key != "campaign_sha256"
+        })
+        campaign_path = self.root / "campaign.json"
+        campaign_path.write_bytes(acceptance.canonical(self.campaign))
+        campaign_path.chmod(0o600)
+        arguments = {
+            "acknowledgement": (
+                retention.STALE_PROTECTED_PROJECTION_ACKNOWLEDGEMENT
+            ),
+            "now": now,
+            "stale_protected_projection": True,
+            "stale_protected_projection_probe": (
+                self.stale_protected_projection_diagnostic
+            ),
+        }
+        arguments.update(overrides)
+        return self.execute(**arguments)
+
     def seed_home_rejection(self) -> None:
         self.seed_protected_projection()
         first = acceptance.CASES[0]
@@ -1476,6 +1530,138 @@ def existing_observation(path, campaign, case, kind, raw_values):
                 predecessor_probe=lambda commit: "c" * 64,
             )
         self.assertEqual(verified, result)
+
+    def test_stale_protected_projection_retains_raw_without_weakening_gate(self):
+        self.seed_protected_projection()
+        before = {
+            str(path.relative_to(self.root)): path.read_bytes()
+            for path in self.root.rglob("*.json")
+        }
+        result = self.execute_stale_protected_projection()
+        destination = (
+            self.home / retention.RETAINED_RELATIVE
+            / self.campaign["campaign_id"]
+        )
+        self.assertEqual(
+            result["schema"],
+            retention.STALE_PROTECTED_PROJECTION_RESULT_SCHEMA,
+        )
+        self.assertEqual(
+            result["expected_error"],
+            retention.STALE_PROTECTED_PROJECTION_EXPECTED_ERROR,
+        )
+        self.assertEqual(
+            result["evidence_state"],
+            "stale-raw-collected-no-observations",
+        )
+        self.assertGreater(result["stale_age_seconds"], 3600)
+        self.assertEqual(list((destination / "observations").iterdir()), [])
+        for relative, raw in before.items():
+            if relative == "campaign.json":
+                continue
+            self.assertEqual((destination / relative).read_bytes(), raw)
+        plan = json.loads((destination / retention.PLAN_NAME).read_bytes())
+        self.assertEqual(
+            plan["schema"], retention.STALE_PROTECTED_PROJECTION_SCHEMA,
+        )
+
+        with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
+                mock.patch.object(retention, "acl_absent", return_value=True), \
+                mock.patch.object(retention.PREFLIGHT, "git_command", return_value=b""):
+            verified = retention.verify_retained(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                expected_replacement_commit="b" * 40,
+                stale_protected_projection=True,
+                home=self.home,
+                source_probe=lambda: ("b" * 40, {"origin": "b" * 40}),
+                identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda commit: "c" * 64,
+            )
+        self.assertEqual(verified, result)
+
+    def test_stale_protected_projection_requires_distinct_acknowledgement(self):
+        self.seed_protected_projection()
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_acknowledgement_required",
+                ):
+            self.execute_stale_protected_projection(
+                acknowledgement=retention.PROTECTED_PROJECTION_ACKNOWLEDGEMENT,
+            )
+        self.assertTrue(self.root.exists())
+
+    def test_stale_projection_diagnostic_runs_exact_predecessor_isolated(self):
+        now = int(time.time())
+        self.campaign["created_at"] = now - 7200
+        self.campaign["expires_at"] = now + 3600
+        self.campaign["campaign_sha256"] = acceptance.digest({
+            key: value for key, value in self.campaign.items()
+            if key != "campaign_sha256"
+        })
+        campaign_path = self.root / "campaign.json"
+        campaign_path.write_bytes(acceptance.canonical(self.campaign))
+        campaign_path.chmod(0o600)
+        self.seed_protected_projection()
+        value = self.stale_protected_projection_diagnostic(
+            self.campaign, self.root / "observations", now, "b" * 40,
+        )
+        completed = retention.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=acceptance.canonical(value), stderr=b"",
+        )
+        with mock.patch.object(
+                retention.subprocess, "run", return_value=completed) as runner:
+            observed = retention.confirm_stale_protected_projection_failure(
+                self.campaign, self.root / "observations", now, "b" * 40,
+            )
+        self.assertEqual(observed, value)
+        command = runner.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/python3", "-I", "-c"])
+        self.assertEqual(
+            command[4],
+            str(retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / self.campaign["source_commit"]),
+        )
+        self.assertEqual(
+            command[5],
+            str(retention.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT / "releases"
+                / ("b" * 40)),
+        )
+        self.assertEqual(
+            command[8],
+            str(self.root / "raw/bootstrap" / retention.RESERVED_CASE_ID),
+        )
+        self.assertEqual(int(command[10]), self.campaign["created_at"])
+        self.assertEqual(runner.call_args.kwargs["cwd"], "/")
+
+    def test_stale_projection_retention_rejects_fresh_raw_bundle(self):
+        now = int(time.time())
+        self.seed_protected_projection()
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_stale_protected_projection_not_stale",
+                ):
+            retention.confirm_stale_protected_projection_failure(
+                self.campaign, self.root / "observations", now, "b" * 40,
+            )
+        self.assertFalse((self.root / retention.PLAN_NAME).exists())
+
+    def test_stale_projection_diagnostic_rejects_replacement_mismatch(self):
+        self.seed_protected_projection()
+
+        def mismatched(campaign, observations, now, _replacement):
+            return self.stale_protected_projection_diagnostic(
+                campaign, observations, now, "c" * 40,
+            )
+
+        with self.assertRaisesRegex(
+                retention.RetentionError,
+                "retention_stale_protected_projection_diagnostic_invalid",
+                ):
+            self.execute_stale_protected_projection(
+                stale_protected_projection_probe=mismatched,
+            )
+        self.assertFalse((self.root / retention.PLAN_NAME).exists())
 
     def test_bootstrap_home_rejection_retains_all_evidence_without_rewrite(self):
         self.seed_home_rejection()

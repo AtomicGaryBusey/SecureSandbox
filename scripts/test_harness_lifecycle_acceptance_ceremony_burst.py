@@ -73,8 +73,12 @@ class CeremonyBurstTests(unittest.TestCase):
             ("reject-stale-metadata", "harness-lifecycle-acceptance-provenance.py"),
         )
         self.assertIsNone(BURST.eligible_case(self.next_value(
-            driver="research-qualification-fixture", category="qualification",
+            driver="unrecognized-driver", category="qualification",
         )))
+        self.assertEqual(BURST.eligible_case(self.next_value(
+            case_id="qualification-no-preexecution",
+            driver="research-qualification-fixture", category="qualification",
+        )), ("qualification-no-preexecution", BURST.QUALIFICATION_ACTION))
         for field in ("destructive", "requires_touch_id", "requires_reboot"):
             value = self.next_value(**{field: True})
             with self.assertRaisesRegex(
@@ -141,6 +145,56 @@ class CeremonyBurstTests(unittest.TestCase):
             self.assertEqual(log.read_bytes(), raw)
             popen.assert_called_once()
 
+    def test_qualification_case_separates_collection_from_sudo_projection(self):
+        case_id = "qualification-no-preexecution"
+        campaign_id = "12345678-1234-4123-8123-123456789abc"
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                BURST.sys, "stdout", mock.Mock(buffer=io.BytesIO())):
+            root = Path(temporary)
+            raw_root = root / "raw"
+            handoff = root / "handoff"
+            raw_root.mkdir(mode=0o700)
+            handoff.mkdir(mode=0o700)
+            collect = {
+                "schema": BURST.QUALIFICATION_COLLECT_SCHEMA,
+                "status": "recorded", "case_id": case_id,
+                "raw_directory": str(raw_root / case_id),
+                "raw_files": BURST.QUALIFICATION_RAW_FILES,
+                "candidate_authority": "none",
+                "production_material_used": False,
+            }
+            collect["supervisor_sha256"] = BURST.digest(collect)
+            project = {
+                "schema": BURST.QUALIFICATION_PROJECT_SCHEMA,
+                "status": "recorded", "case_id": case_id,
+                "candidate_authority": "none",
+                "production_material_used": False,
+            }
+            project["projection_sha256"] = BURST.digest(project)
+            calls = []
+
+            def popen(command, **kwargs):
+                calls.append((command, kwargs))
+                if len(calls) == 1:
+                    (raw_root / case_id).mkdir(mode=0o700)
+                    return FakeProcess(BURST.canonical(collect))
+                return FakeProcess(BURST.canonical(project))
+
+            observed = BURST.run_qualification_case(
+                Path("/protected/release"), Path("/campaign"),
+                Path("/observations"), raw_root, handoff,
+                campaign_id, case_id, os.getuid(), popen=popen,
+            )
+        self.assertEqual(observed, project)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0][0:2], ["/usr/bin/python3", "-I"])
+        self.assertIsNone(calls[0][1]["env"])
+        self.assertEqual(calls[1][0][0:3], [
+            "/usr/bin/sudo", "--", "/usr/bin/env",
+        ])
+        self.assertNotIn("-v", calls[1][0])
+        self.assertNotIn("-s", calls[1][0])
+
     def test_execute_revalidates_next_between_distinct_sudo_processes(self):
         first = self.next_value()
         second = self.next_value(
@@ -148,8 +202,8 @@ class CeremonyBurstTests(unittest.TestCase):
             driver="host-archive-fixture", category="archive",
         )
         boundary = self.next_value(
-            case_id="qualify-runtime-isolation",
-            driver="research-qualification-fixture", category="qualification",
+            case_id="touchid-approve-exact-plan",
+            driver="host-authorization-fixture", category="authorization",
         )
         sequence = iter([first, second, second, boundary, boundary])
         run_driver = mock.Mock(side_effect=[
@@ -159,11 +213,15 @@ class CeremonyBurstTests(unittest.TestCase):
             home = Path(temporary)
             campaign_root = home / "Library/Application Support/SecureSandbox/harness-acceptance"
             observations = campaign_root / "observations"
+            qualification_raw = campaign_root / "raw/qualification"
             handoff = home / "SecureSandbox-Acceptance-Handoff"
             observations.mkdir(parents=True, mode=0o700)
+            qualification_raw.mkdir(parents=True, mode=0o700)
             handoff.mkdir(mode=0o700)
             campaign_root.chmod(0o700)
+            qualification_raw.parent.chmod(0o700)
             observations.chmod(0o700)
+            qualification_raw.chmod(0o700)
             handoff.chmod(0o700)
             campaign = campaign_root / "campaign.json"
             campaign.write_text(json.dumps({
@@ -187,7 +245,7 @@ class CeremonyBurstTests(unittest.TestCase):
         self.assertEqual(result["completed_cases"], [
             "reject-stale-metadata", "reject-release-rollback",
         ])
-        self.assertEqual(result["next_case"], "qualify-runtime-isolation")
+        self.assertEqual(result["next_case"], "touchid-approve-exact-plan")
         self.assertEqual(query.call_count, 5)
         self.assertEqual(run_driver.call_count, 2)
         first_command = run_driver.call_args_list[0].args[0]
@@ -204,11 +262,15 @@ class CeremonyBurstTests(unittest.TestCase):
             home = Path(temporary)
             campaign_root = home / "Library/Application Support/SecureSandbox/harness-acceptance"
             observations = campaign_root / "observations"
+            qualification_raw = campaign_root / "raw/qualification"
             handoff = home / "SecureSandbox-Acceptance-Handoff"
             observations.mkdir(parents=True, mode=0o700)
+            qualification_raw.mkdir(parents=True, mode=0o700)
             handoff.mkdir(mode=0o700)
             campaign_root.chmod(0o700)
+            qualification_raw.parent.chmod(0o700)
             observations.chmod(0o700)
+            qualification_raw.chmod(0o700)
             handoff.chmod(0o700)
             campaign = campaign_root / "campaign.json"
             campaign.write_text(json.dumps({
@@ -234,7 +296,7 @@ class CeremonyBurstTests(unittest.TestCase):
     def test_main_emits_one_terminal_record_without_status_collision(self):
         result = {
             "status": "stopped", "completed_cases": ["one"],
-            "next_case": "qualify-runtime-isolation",
+            "next_case": "touchid-approve-exact-plan",
             "reason": "next_driver_not_burst_eligible",
         }
         with mock.patch.object(BURST, "execute", return_value=result), \
@@ -242,7 +304,7 @@ class CeremonyBurstTests(unittest.TestCase):
             self.assertEqual(BURST.main([]), 0)
         emit.assert_called_once_with(
             "stopped", "result", completed_cases=["one"],
-            next_case="qualify-runtime-isolation",
+            next_case="touchid-approve-exact-plan",
             reason="next_driver_not_burst_eligible",
         )
 

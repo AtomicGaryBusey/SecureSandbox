@@ -592,10 +592,12 @@ in ignored local records, not in this file.
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case
-  password loop for consecutive provenance/archive fixtures without a root
-  shell, sudo-cache manipulation, driver authority, or retry behavior. Publish
-  and transfer the reviewed helper, then use it only after the currently
-  waiting exact ceremony reaches a terminal result.
+  password loop for consecutive provenance/archive/qualification fixtures
+  without a root shell, sudo-cache manipulation, driver authority, or retry
+  behavior. The first published burst physically completed the Neo's remaining
+  provenance/archive prefix and advanced the campaign from 12 to 30 cases.
+  Publish and transfer the reviewed qualification extension, then run its ten
+  cases only from the exact protected next-case boundary.
   The prior `ac5211ec...` campaign was retained and independently verified at
   exact successor `01f0a14...`. Neo campaign `496eca88...`, bound to
   `01f0a14...`, was retained without deletion and independently verified at

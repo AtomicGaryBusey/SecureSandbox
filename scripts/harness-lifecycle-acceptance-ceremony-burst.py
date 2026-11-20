@@ -43,6 +43,20 @@ ALLOWED_DRIVERS = {
         "archive", "harness-lifecycle-acceptance-archive.py",
     ),
 }
+QUALIFICATION_DRIVER = "research-qualification-fixture"
+QUALIFICATION_ACTION = "qualification-two-phase"
+QUALIFICATION_SUPERVISOR = "harness-lifecycle-acceptance-qualification-supervisor.py"
+QUALIFICATION_PROJECTOR = "harness-lifecycle-acceptance-qualification-observe.py"
+QUALIFICATION_COLLECT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-supervisor-v1"
+)
+QUALIFICATION_PROJECT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-projection-v1"
+)
+QUALIFICATION_RAW_FILES = [
+    "research-result.json", "quarantine-readback.json",
+    "authority-readback.json", "production-material-scan.json",
+]
 
 
 class CeremonyBurstError(RuntimeError):
@@ -53,6 +67,11 @@ def canonical(value: dict[str, Any]) -> bytes:
     return (json.dumps(
         value, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
     ) + "\n").encode("ascii")
+
+
+def digest(value: dict[str, Any]) -> str:
+    import hashlib
+    return hashlib.sha256(canonical(value)).hexdigest()
 
 
 def emit(status: str, phase: str, **values: Any) -> None:
@@ -114,6 +133,8 @@ def protected_release(commit: str) -> Path:
         require_root_owned_path(path, directory=True)
     for path in (
         release / "scripts/harness-lifecycle-acceptance.py",
+        release / "scripts" / QUALIFICATION_SUPERVISOR,
+        release / "scripts" / QUALIFICATION_PROJECTOR,
         *(
             release / "scripts" / script
             for _, script in ALLOWED_DRIVERS.values()
@@ -170,6 +191,14 @@ def eligible_case(value: dict[str, Any]) -> tuple[str, str] | None:
         raise CeremonyBurstError("next_case_invalid")
     driver = procedure.get("driver")
     allowed = ALLOWED_DRIVERS.get(str(driver))
+    if driver == QUALIFICATION_DRIVER:
+        if (case.get("category") != "qualification"
+                or case.get("destructive") is not False
+                or case.get("requires_touch_id") is not False
+                or case.get("requires_reboot") is not False
+                or procedure.get("interaction") != "none"):
+            raise CeremonyBurstError("next_case_not_burst_eligible")
+        return case_id, QUALIFICATION_ACTION
     if allowed is None:
         return None
     category, script = allowed
@@ -199,9 +228,10 @@ def parse_driver_result(raw: bytes, case_id: str) -> dict[str, Any]:
     return value
 
 
-def run_driver(command: list[str], log_path: Path, case_id: str,
-               *, popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
-               ) -> dict[str, Any]:
+def run_logged(command: list[str], log_path: Path, *,
+               environment: dict[str, str] | None = None,
+               popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+               ) -> bytes:
     descriptor = os.open(
         log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
     )
@@ -212,7 +242,7 @@ def run_driver(command: list[str], log_path: Path, case_id: str,
                 process = popen(
                     command, cwd=Path("/"), stdin=None,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    env=clean_environment(), bufsize=0,
+                    env=environment, bufsize=0,
                 )
             except OSError as error:
                 raise CeremonyBurstError("driver_launch_failed") from error
@@ -242,7 +272,100 @@ def run_driver(command: list[str], log_path: Path, case_id: str,
             os.close(parent)
     if returncode != 0:
         raise CeremonyBurstError("driver_rejected")
-    return parse_driver_result(bytes(raw), case_id)
+    return bytes(raw)
+
+
+def run_driver(command: list[str], log_path: Path, case_id: str,
+               *, popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+               ) -> dict[str, Any]:
+    raw = run_logged(
+        command, log_path, environment=clean_environment(), popen=popen,
+    )
+    return parse_driver_result(raw, case_id)
+
+
+def parsed_single_record(raw: bytes, error: str) -> dict[str, Any]:
+    if not raw or len(raw) > MAX_DRIVER_OUTPUT:
+        raise CeremonyBurstError(error)
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise CeremonyBurstError(error)
+    try:
+        value = json.loads(lines[0])
+    except (UnicodeError, json.JSONDecodeError) as exception:
+        raise CeremonyBurstError(error) from exception
+    if not isinstance(value, dict):
+        raise CeremonyBurstError(error)
+    return value
+
+
+def validate_qualification_record(value: dict[str, Any], case_id: str, *,
+                                  projection: bool) -> None:
+    schema = QUALIFICATION_PROJECT_SCHEMA if projection \
+        else QUALIFICATION_COLLECT_SCHEMA
+    digest_field = "projection_sha256" if projection else "supervisor_sha256"
+    unsigned = {key: item for key, item in value.items() if key != digest_field}
+    if (value.get("schema") != schema or value.get("status") != "recorded"
+            or value.get("case_id") != case_id
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get(digest_field) != digest(unsigned)):
+        raise CeremonyBurstError("qualification_result_invalid")
+
+
+def run_qualification_case(release: Path, campaign_path: Path,
+                           observations: Path, raw_root: Path,
+                           handoff: Path, campaign_id: str, case_id: str,
+                           uid: int, *,
+                           popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+                           ) -> dict[str, Any]:
+    raw_directory = raw_root / case_id
+    if os.path.lexists(raw_directory):
+        raise CeremonyBurstError("qualification_raw_case_exists")
+    collect_log = handoff / (
+        f"ceremony-burst-{campaign_id}-{case_id}-collect.log"
+    )
+    project_log = handoff / (
+        f"ceremony-burst-{campaign_id}-{case_id}-project.log"
+    )
+    if os.path.lexists(collect_log) or os.path.lexists(project_log):
+        raise CeremonyBurstError("qualification_log_exists")
+    collect_command = [
+        str(PYTHON), "-I", str(release / "scripts" / QUALIFICATION_SUPERVISOR),
+        "--campaign", str(campaign_path),
+        "--observations", str(observations),
+        "--raw-root", str(raw_root), "--case", case_id,
+    ]
+    collect_raw = run_logged(
+        collect_command, collect_log, environment=None, popen=popen,
+    )
+    collected = parsed_single_record(
+        collect_raw, "qualification_collection_invalid",
+    )
+    validate_qualification_record(collected, case_id, projection=False)
+    if (collected.get("raw_directory") != str(raw_directory)
+            or collected.get("raw_files") != QUALIFICATION_RAW_FILES):
+        raise CeremonyBurstError("qualification_collection_invalid")
+    trusted_directory(raw_directory, uid, "qualification_raw_case")
+
+    project_command = [
+        str(SUDO), "--", str(ENV), "-i",
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C",
+        "HOME=/var/empty", "PYTHONDONTWRITEBYTECODE=1",
+        str(PYTHON), "-I", str(release / "scripts" / QUALIFICATION_PROJECTOR),
+        "--campaign", str(campaign_path),
+        "--observations", str(observations), "--case", case_id,
+        "--raw-directory", str(raw_directory), "--operator-uid", str(uid),
+    ]
+    project_raw = run_logged(
+        project_command, project_log,
+        environment=clean_environment(), popen=popen,
+    )
+    projected = parsed_single_record(
+        project_raw, "qualification_projection_invalid",
+    )
+    validate_qualification_record(projected, case_id, projection=True)
+    return projected
 
 
 def execute(*, runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
@@ -263,9 +386,12 @@ def execute(*, runner: Callable[..., subprocess.CompletedProcess[bytes]] = subpr
     campaign_root = home / "Library/Application Support/SecureSandbox/harness-acceptance"
     campaign_path = campaign_root / "campaign.json"
     observations = campaign_root / "observations"
+    qualification_raw = campaign_root / "raw/qualification"
     handoff = home / "SecureSandbox-Acceptance-Handoff"
     trusted_directory(campaign_root, uid, "campaign_root")
     trusted_directory(observations, uid, "observations")
+    trusted_directory(campaign_root / "raw", uid, "raw_root")
+    trusted_directory(qualification_raw, uid, "qualification_raw_root")
     trusted_directory(handoff, uid, "handoff")
     campaign = load_campaign(campaign_path, uid)
     release = protected_release(campaign["source_commit"])
@@ -309,7 +435,17 @@ def execute(*, runner: Callable[..., subprocess.CompletedProcess[bytes]] = subpr
             "--observations", str(observations),
             "--case", case_id, "--operator-uid", str(uid),
         ]
-        result = run_driver(command, log_path, case_id, popen=popen)
+        if script == QUALIFICATION_ACTION:
+            result = run_qualification_case(
+                release, campaign_path, observations, qualification_raw,
+                handoff, campaign["campaign_id"], case_id, uid, popen=popen,
+            )
+            result_log = handoff / (
+                f"ceremony-burst-{campaign['campaign_id']}-{case_id}-project.log"
+            )
+        else:
+            result = run_driver(command, log_path, case_id, popen=popen)
+            result_log = log_path
         after = query_next(
             release, campaign_path, observations, runner=runner,
         )
@@ -320,8 +456,9 @@ def execute(*, runner: Callable[..., subprocess.CompletedProcess[bytes]] = subpr
         completed.append(case_id)
         emit(
             "verified", "case", campaign_id=campaign["campaign_id"],
-            case_id=case_id, log=str(log_path),
-            record_sha256=result.get("record_sha256"),
+            case_id=case_id, log=str(result_log),
+            record_sha256=(result.get("record_sha256")
+                           or result.get("projection_sha256")),
             completed_count=len(completed),
         )
     raise CeremonyBurstError("burst_case_limit_reached")
@@ -330,8 +467,8 @@ def execute(*, runner: Callable[..., subprocess.CompletedProcess[bytes]] = subpr
 def parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         description=(
-            "Run only consecutive noninteractive, non-destructive provenance "
-            "and archive acceptance cases in one visible operator TTY"
+            "Run only consecutive noninteractive, non-destructive provenance, "
+            "archive, and qualification cases in one visible operator TTY"
         ),
     )
 

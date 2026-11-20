@@ -1191,13 +1191,16 @@ not strengthen the immutable protected-driver, fixed-next-case, evidence-
 custody, or fail-closed boundaries.
 
 The new bounded ceremony helper keeps one visible operator TTY while retaining
-one `sudo -- env -i` child per exact case. Focused tests prove that it admits
-only the two fixed noninteractive and non-destructive driver families, queries
+separate privilege boundaries per exact case. Focused tests prove that it admits
+only the three fixed noninteractive and non-destructive driver families, queries
 the protected next-case implementation before and after every child, emits no
-root shell or `sudo -v` invocation, creates private logs exclusively, stops at
-the qualification boundary, never retries rejection, and rejects a next case
-that does not advance. The helper itself has no evidence authority. Physical
-Neo use and the resulting observations remain pending; this source result is
-not a physical acceptance verdict. The complete acceptance-script discovery
-passes 234 tests, the DDD contract passes 28 tests, and the shared acceptance
+root shell or `sudo -v` invocation, creates private logs exclusively, keeps
+qualification collection unprivileged and projects it through a separate
+fixed sudo child, stops at the Touch ID boundary, never retries rejection, and
+rejects a next case that does not advance. The helper itself has no evidence
+authority. The Neo physically completed all remaining provenance and archive
+cases through the first published burst and advanced from 12 to 30 accepted
+cases. Qualification use of the extended helper remains pending and is not yet
+a physical verdict. The complete acceptance-script discovery passes 235
+tests, the DDD contract passes 28 tests, and the shared acceptance
 contract passes 14 tests at this checkpoint.

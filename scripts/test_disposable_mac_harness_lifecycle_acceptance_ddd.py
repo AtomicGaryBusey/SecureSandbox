@@ -722,6 +722,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'PROTECTED_ROOT = Path("/usr/local/libexec/secure-sandbox-harness-acceptance")',
             '"host-provenance-fixture"',
             '"host-archive-fixture"',
+            'QUALIFICATION_DRIVER = "research-qualification-fixture"',
+            'QUALIFICATION_SUPERVISOR = "harness-lifecycle-acceptance-qualification-supervisor.py"',
+            'QUALIFICATION_PROJECTOR = "harness-lifecycle-acceptance-qualification-observe.py"',
             'str(SUDO), "--", str(ENV), "-i"',
             'before = query_next(',
             'after = query_next(',
@@ -736,6 +739,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.ceremony_burst)
         self.assertIn("one visible operator TTY", self.design)
+        self.assertIn("Qualification collection\nremains unprivileged", self.design)
         self.assertIn("never invokes `sudo -v`", self.operator_queue)
 
 

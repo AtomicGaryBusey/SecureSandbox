@@ -56,6 +56,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
         cls.archive = (ROOT / "scripts/harness-lifecycle-acceptance-archive.py").read_text()
+        cls.ceremony_burst = (
+            ROOT / "scripts/harness-lifecycle-acceptance-ceremony-burst.py"
+        ).read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
         cls.authorization = (ROOT / "scripts/harness-lifecycle-acceptance-authorization.py").read_text()
@@ -713,6 +716,27 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
                           'add_argument("--kind"', 'add_argument("--outcome"'):
             self.assertNotIn(forbidden, self.recovery_projector)
         self.assertIn('"worker_checkpoint": checkpoint', self.recovery_supervisor)
+
+    def test_bounded_ceremony_runner_has_no_authority_or_cache_management(self):
+        for phrase in (
+            'PROTECTED_ROOT = Path("/usr/local/libexec/secure-sandbox-harness-acceptance")',
+            '"host-provenance-fixture"',
+            '"host-archive-fixture"',
+            'str(SUDO), "--", str(ENV), "-i"',
+            'before = query_next(',
+            'after = query_next(',
+            '"authority": "none"',
+            'persistent_root_shell=False',
+            'sudo_cache_management=False',
+        ):
+            self.assertIn(phrase, self.ceremony_burst)
+        for forbidden in (
+            'add_argument("--case"', 'add_argument("--release"',
+            'add_argument("--driver"', 'sudo -v', 'sudo -s',
+        ):
+            self.assertNotIn(forbidden, self.ceremony_burst)
+        self.assertIn("one visible operator TTY", self.design)
+        self.assertIn("never invokes `sudo -v`", self.operator_queue)
 
 
 if __name__ == "__main__":

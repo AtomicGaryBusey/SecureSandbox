@@ -1425,6 +1425,30 @@ diagnostic remains stamped with current time. Divergent, future,
 out-of-campaign, noncanonical, or wrong-custody timestamps fail closed and no
 plan or destination may be published.
 
+### Bounded operator ceremony bursts
+
+Root authorization is not acceptance authority, and requiring a new Terminal
+TTY for every consecutive noninteractive fixture adds operator burden without
+adding an independent security boundary. The source-side
+`harness-lifecycle-acceptance-ceremony-burst.py` helper therefore runs only the
+fixed provenance and archive portions of an already initialized campaign from
+one visible operator TTY. It accepts no caller-selected case or path. Before
+and after every case it invokes the campaign-bound immutable protected `next`
+implementation and admits only a non-destructive, noninteractive case whose
+fixed driver and category match the closed allowlist.
+
+Each case remains a separate `sudo -- env -i` process invoking exactly one
+root-owned protected driver. The helper never opens a persistent root shell,
+never calls `sudo -v`, never stores a password, and never changes or refreshes
+the platform credential policy. Natural reuse of macOS's normal same-TTY sudo
+timestamp is an operating-system behavior, not a new SecureSandbox
+credential. Every child has a separate exclusive private log; any rejection,
+ambiguous output, lack of campaign advancement, custody failure, or boundary
+change stops the burst without retry. Qualification, biometric, reboot,
+destructive, and unknown-driver cases are ineligible. The helper's own records
+carry `authority: none`; accepted observations still come only from the
+campaign-bound protected drivers and validators.
+
 ## Exit criteria
 
 This DDD is complete only when the dedicated Mac has:

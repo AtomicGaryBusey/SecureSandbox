@@ -625,6 +625,40 @@ These are separate, visible ceremonies. Do not combine them into a persistent
 root shell, weaken `sudo` policy, extend the credential-cache timeout, or store
 the password.
 
+The consecutive provenance and archive fixtures are the one bounded exception
+to the former one-Terminal-window-per-case operator workflow. After the
+campaign's protected `next` query names either `host-provenance-fixture` or
+`host-archive-fixture`, run this source-side convenience helper from one
+visible operator Terminal:
+
+```bash
+cd "$HOME/SecureSandbox"
+/usr/bin/python3 -I \
+  scripts/harness-lifecycle-acceptance-ceremony-burst.py
+```
+
+The helper takes no case, path, executable, release, or authority argument. It
+derives the operator home from the invoking UID, reads the fixed campaign and
+observation roots, resolves only that campaign's root-owned exact-commit
+protected release, and asks the protected `next` command again before and
+after every case. Every case remains a distinct `sudo -- env -i` child running
+one fixed protected driver and writes a distinct exclusive mode-0600 log under
+`~/SecureSandbox-Acceptance-Handoff`. The helper never invokes `sudo -v`, opens
+a root shell, changes sudo policy or timeout, persists a credential, or retries
+a rejected case. macOS may naturally reuse its ordinary credential timestamp
+for later `sudo` children attached to the same visible TTY; SecureSandbox does
+not refresh or extend it.
+
+The burst is limited to 32 cases and stops before qualification, Touch ID,
+reboot, destructive, interactive, unknown-driver, or completed-campaign
+boundaries. A malformed result, changed next case, repeated case, untrusted
+path, pre-existing log, protected-driver rejection, or output overflow stops
+the burst immediately and retains the per-case log. The helper has no evidence
+or lifecycle authority: only each immutable protected driver can publish its
+case observations, and the ordinary protected `next` command remains the
+ordering authority. Do not use the helper to bypass or relaunch a currently
+waiting ceremony; let that exact invocation reach a terminal result first.
+
 1. Install the exact-commit protected Host acceptance release with
    `scripts/install-harness-lifecycle-acceptance-host.sh`. The installer must
    reread its root-owned manifest and all ten payload closures before success.

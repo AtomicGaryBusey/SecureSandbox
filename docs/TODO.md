@@ -591,6 +591,11 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
+  The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case
+  password loop for consecutive provenance/archive fixtures without a root
+  shell, sudo-cache manipulation, driver authority, or retry behavior. Publish
+  and transfer the reviewed helper, then use it only after the currently
+  waiting exact ceremony reaches a terminal result.
   The prior `ac5211ec...` campaign was retained and independently verified at
   exact successor `01f0a14...`. Neo campaign `496eca88...`, bound to
   `01f0a14...`, was retained without deletion and independently verified at

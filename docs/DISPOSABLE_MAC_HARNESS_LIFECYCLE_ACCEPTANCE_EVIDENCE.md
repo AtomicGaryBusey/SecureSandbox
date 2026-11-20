@@ -1180,3 +1180,24 @@ resolution. The complete focused acceptance family passes 221 script tests,
 27 DDD contract tests, and 25 shared-contract tests. Publication, protected
 installation, and one physical delayed projection remain pending before fresh
 bootstrap.
+
+## Bounded root-ceremony operator path
+
+The physical campaign exposed a usability defect in the source-side launch
+workflow: each otherwise consecutive, noninteractive provenance or archive
+case was opened in a fresh Terminal TTY, defeating the ordinary same-TTY sudo
+timestamp and forcing a separate administrator-password interaction. This did
+not strengthen the immutable protected-driver, fixed-next-case, evidence-
+custody, or fail-closed boundaries.
+
+The new bounded ceremony helper keeps one visible operator TTY while retaining
+one `sudo -- env -i` child per exact case. Focused tests prove that it admits
+only the two fixed noninteractive and non-destructive driver families, queries
+the protected next-case implementation before and after every child, emits no
+root shell or `sudo -v` invocation, creates private logs exclusively, stops at
+the qualification boundary, never retries rejection, and rejects a next case
+that does not advance. The helper itself has no evidence authority. Physical
+Neo use and the resulting observations remain pending; this source result is
+not a physical acceptance verdict. The complete acceptance-script discovery
+passes 234 tests, the DDD contract passes 28 tests, and the shared acceptance
+contract passes 14 tests at this checkpoint.

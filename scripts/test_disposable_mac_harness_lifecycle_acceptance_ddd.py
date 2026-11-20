@@ -52,6 +52,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.empty_campaign_retention = (
             ROOT / "scripts/harness-lifecycle-acceptance-retain-empty-campaign.py"
         ).read_text()
+        cls.progressed_qualification_retention = (
+            ROOT / "scripts/"
+            "harness-lifecycle-acceptance-retain-progressed-qualification.py"
+        ).read_text()
         cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
         cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
@@ -741,6 +745,20 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("one visible operator TTY", self.design)
         self.assertIn("Qualification collection\nremains unprivileged", self.design)
         self.assertIn("never invokes `sudo -v`", self.operator_queue)
+
+    def test_progressed_qualification_retention_preserves_current_rejection(self):
+        for phrase in (
+            'FAILURE_SCHEMA_V2 = (',
+            'RETENTION_DIAGNOSTIC_NAME = "retention-diagnostic.json"',
+            'SUPERVISOR_REJECTION_SCHEMA = (',
+            'validate_supervisor_rejection(',
+            'supervisor_rejection=supervisor_rejection',
+            'descriptor, RETENTION_DIAGNOSTIC_NAME, record',
+        ):
+            self.assertIn(phrase, self.progressed_qualification_retention)
+        self.assertIn(
+            "never rewrites\nthe supervisor record", self.design,
+        )
 
 
 if __name__ == "__main__":

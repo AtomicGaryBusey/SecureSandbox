@@ -1454,6 +1454,18 @@ unknown-driver cases are ineligible. The helper's own records
 carry `authority: none`; accepted observations still come only from the
 campaign-bound protected drivers and validators.
 
+A qualification control rejection is terminal for that campaign. Current
+supervisors reserve the exact case directory and write a canonical
+`control-rejection.json`; older supervisors left the reservation empty and
+escaped a bounded traceback. The no-delete progressed-qualification retention
+path accepts both layouts explicitly. For the current layout it never rewrites
+the supervisor record: it validates its campaign, procedure, timestamp,
+no-retry flag, and self-digest, binds it to the canonical supervisor error and
+authenticated Research audit, and appends a distinct
+`retention-diagnostic.json` before atomically retaining the whole campaign.
+The two layouts have different schemas and exact inventories; neither can be
+silently reinterpreted as the other.
+
 ## Exit criteria
 
 This DDD is complete only when the dedicated Mac has:

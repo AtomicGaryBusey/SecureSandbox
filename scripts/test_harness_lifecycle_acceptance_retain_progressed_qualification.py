@@ -216,6 +216,85 @@ class ProgressedQualificationRetentionTests(unittest.TestCase):
         self.assertIs(failure["retry_permitted"], False)
         self.assertEqual(result["failure_record_sha256"], failure["rejection_sha256"])
 
+    def test_retains_current_canonical_supervisor_rejection_without_overwrite(self):
+        audit = json.loads(self.audit.read_bytes())
+        failed_at = audit["control_audit_tail"][-1]["timestamp"]
+        case = acceptance.CASE_BY_ID[retention.RESERVED_CASE_ID]
+        rejection = {
+            "schema": retention.SUPERVISOR_REJECTION_SCHEMA,
+            "status": "rejected",
+            "campaign_id": self.campaign["campaign_id"],
+            "campaign_sha256": self.campaign["campaign_sha256"],
+            "machine_identity_sha256": self.campaign["machine_identity_sha256"],
+            "source_commit": self.campaign["source_commit"],
+            "case_id": retention.RESERVED_CASE_ID,
+            "procedure_sha256": acceptance.case_record(case)["procedure"][
+                "procedure_sha256"
+            ],
+            "observed_at": failed_at,
+            "error": retention.SUPERVISOR_ERROR,
+            "control_boundary": "authenticated-privileged-control",
+            "research_case_state": "unresolved-before-result",
+            "retry_permitted": False,
+            "candidate_authority": "none",
+            "production_material_used": False,
+        }
+        rejection["rejection_sha256"] = acceptance.digest(rejection)
+        reservation = (
+            self.root / "raw/qualification" / retention.RESERVED_CASE_ID
+        )
+        rejection_path = reservation / retention.FAILURE_NAME
+        rejection_payload = acceptance.canonical(rejection)
+        rejection_path.write_bytes(rejection_payload)
+        rejection_path.chmod(0o600)
+        self.supervisor.write_bytes(acceptance.canonical({
+            "schema": retention.SUPERVISOR_ERROR_SCHEMA,
+            "status": "rejected",
+            "error": retention.SUPERVISOR_OUTPUT_ERROR,
+        }))
+        replacement = "3" * 40
+        tips = {
+            name: replacement
+            for name, _url in retention.RETENTION.PREFLIGHT.AUTHORIZED_REMOTES
+        }
+        with mock.patch.object(retention.platform, "system", return_value="Darwin"), \
+                mock.patch.object(retention.RETENTION, "acl_absent", return_value=True), \
+                mock.patch.object(retention.RETENTION, "_is_ancestor"), \
+                mock.patch.object(retention, "verify_completed_binding",
+                                  return_value="5" * 64), \
+                mock.patch.object(retention.ACCEPTANCE_CLI, "next_case",
+                                  return_value=self.next_case()):
+            result = retention.retain(
+                expected_campaign_id=self.campaign["campaign_id"],
+                expected_source_commit=self.campaign["source_commit"],
+                acknowledgement=retention.ACKNOWLEDGEMENT,
+                supervisor_output=self.supervisor,
+                control_audit=self.audit,
+                diagnostic_source=self.diagnostic_source,
+                home=self.home,
+                protected_uid=self.uid,
+                source_probe=lambda: (replacement, tips),
+                identity_probe=lambda: self.campaign["machine_identity_sha256"],
+                predecessor_probe=lambda _commit: "4" * 64,
+                diagnostic_probe=lambda _commit: self.reviewed_diagnostic,
+                rename=self.rename,
+            )
+        destination = (
+            self.home / retention.RETENTION.RETAINED_RELATIVE
+            / self.campaign["campaign_id"] / "raw/qualification"
+            / retention.RESERVED_CASE_ID
+        )
+        self.assertEqual((destination / retention.FAILURE_NAME).read_bytes(),
+                         rejection_payload)
+        diagnostic = json.loads((
+            destination / retention.RETENTION_DIAGNOSTIC_NAME
+        ).read_bytes())
+        self.assertEqual(diagnostic["schema"], retention.FAILURE_SCHEMA_V2)
+        self.assertEqual(diagnostic["supervisor_rejection_sha256"],
+                         rejection["rejection_sha256"])
+        self.assertEqual(result["failure_record_sha256"],
+                         diagnostic["rejection_sha256"])
+
     def test_rejects_audit_without_exact_failed_control_event(self):
         audit = json.loads(self.audit.read_bytes())
         audit["control_audit_tail"] = audit["control_audit_tail"][:1]

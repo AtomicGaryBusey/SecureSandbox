@@ -1201,6 +1201,36 @@ rejects a next case that does not advance. The helper itself has no evidence
 authority. The Neo physically completed all remaining provenance and archive
 cases through the first published burst and advanced from 12 to 30 accepted
 cases. Qualification use of the extended helper remains pending and is not yet
-a physical verdict. The complete acceptance-script discovery passes 235
-tests, the DDD contract passes 28 tests, and the shared acceptance
+a physical verdict. The complete acceptance-script discovery passes 236
+tests, the DDD contract passes 29 tests, and the shared acceptance
 contract passes 14 tests at this checkpoint.
+
+## Canonical qualification-control rejection checkpoint
+
+Campaign `be598ae2...`, bound to exact protected release `d7dcf8b8...`, used
+the first published bounded ceremony runner to complete every remaining
+provenance and archive case, advancing from 12 to 30 accepted cases. The
+extended runner then collected and projected
+`qualification-no-preexecution`, producing two new root-owned observations and
+advancing to 31/91 cases. Its next authenticated Research deployment returned
+status 1 before Research created the second case. The Host supervisor retained
+an operator-owned canonical `control-rejection.json` for
+`qualification-zero-production-authority` with `retry_permitted:false`; the
+runner stopped and did not retry.
+
+A bounded authenticated diagnostic, supplied with the exact seven-file
+protected qualification closure and campaign, proved no active-run markers,
+no Claude process, no Research case output, an unchanged installed release,
+an exact Research campaign, and only the completed first fixture. Its control
+audit binds the prior accepted request and the later
+`command_failed/status_1` request. An earlier diagnostic missing that staged
+closure was retained as rejected diagnostic evidence and is not used.
+
+The retention repair now supports both the historical empty-reservation/
+traceback layout and the current canonical supervisor-rejection layout. For
+the current layout it preserves `control-rejection.json` byte-for-byte and
+appends a separately self-digested `retention-diagnostic.json` binding the
+supervisor output, Research audit, reviewed diagnostic source, and original
+rejection digest. Six focused retention tests pass, including non-overwrite of
+the supervisor record. Publication and physical no-delete retention remain
+pending; this campaign must not be retried.

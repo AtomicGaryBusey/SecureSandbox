@@ -598,6 +598,11 @@ in ignored local records, not in this file.
   provenance/archive prefix and advanced the campaign from 12 to 30 cases.
   Publish and transfer the reviewed qualification extension, then run its ten
   cases only from the exact protected next-case boundary.
+  Physical execution completed the first qualification case, then the second
+  Research-control request failed closed and retained a canonical no-retry
+  rejection. Publish the dual-layout retention repair, retain campaign
+  `be598ae2...` without overwrite, independently verify it, install the exact
+  successor protected release, and only then initialize a fresh campaign.
   The prior `ac5211ec...` campaign was retained and independently verified at
   exact successor `01f0a14...`. Neo campaign `496eca88...`, bound to
   `01f0a14...`, was retained without deletion and independently verified at

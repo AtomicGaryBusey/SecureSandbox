@@ -59,6 +59,9 @@ RESULT_SCHEMA = (
 FAILURE_SCHEMA = (
     "secure-sandbox-harness-lifecycle-progressed-qualification-rejection-v1"
 )
+FAILURE_SCHEMA_V2 = (
+    "secure-sandbox-harness-lifecycle-progressed-qualification-rejection-v2"
+)
 ERROR_SCHEMA = (
     "secure-sandbox-harness-lifecycle-progressed-qualification-retention-error-v1"
 )
@@ -68,7 +71,15 @@ ACKNOWLEDGEMENT = (
 COMPLETED_CASE_ID = "qualification-no-preexecution"
 RESERVED_CASE_ID = "qualification-zero-production-authority"
 FAILURE_NAME = "control-rejection.json"
+RETENTION_DIAGNOSTIC_NAME = "retention-diagnostic.json"
 SUPERVISOR_ERROR = "supervisor_command_rejected"
+SUPERVISOR_OUTPUT_ERROR = "qualification_research_command_rejected"
+SUPERVISOR_ERROR_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-supervisor-error-v1"
+)
+SUPERVISOR_REJECTION_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-qualification-control-rejection-v1"
+)
 CONTROL_ERROR = "status_1"
 QUALIFICATION_RAW = {
     "research-result.json", "quarantine-readback.json",
@@ -238,20 +249,77 @@ def trusted_external(path: Path, uid: int, *, canonical_json: bool) -> tuple[byt
     return raw, value
 
 
+def validate_supervisor_rejection(value: Any,
+                                  campaign: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "machine_identity_sha256", "source_commit", "case_id",
+        "procedure_sha256", "observed_at", "error", "control_boundary",
+        "research_case_state", "retry_permitted", "candidate_authority",
+        "production_material_used", "rejection_sha256",
+    }
+    unsigned = {key: item for key, item in value.items()
+                if key != "rejection_sha256"} if isinstance(value, dict) else {}
+    case = next(item for item in CASES if item.case_id == RESERVED_CASE_ID)
+    if (not isinstance(value, dict) or set(value) != expected
+            or value.get("schema") != SUPERVISOR_REJECTION_SCHEMA
+            or value.get("status") != "rejected"
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("machine_identity_sha256")
+               != campaign["machine_identity_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != RESERVED_CASE_ID
+            or value.get("procedure_sha256")
+               != ACCEPTANCE_CLI.case_record(case)["procedure"]["procedure_sha256"]
+            or value.get("error") != SUPERVISOR_ERROR
+            or value.get("control_boundary")
+               != "authenticated-privileged-control"
+            or value.get("research_case_state")
+               != "unresolved-before-result"
+            or value.get("retry_permitted") is not False
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or not isinstance(value.get("observed_at"), int)
+            or isinstance(value.get("observed_at"), bool)
+            or not campaign["created_at"] <= value["observed_at"] < campaign["expires_at"]
+            or value.get("rejection_sha256") != digest(unsigned)):
+        raise ProgressedQualificationRetentionError(
+            "progressed_qualification_supervisor_rejection_invalid",
+        )
+    return value
+
+
 def failure_record(campaign: dict[str, Any], supervisor_output: Path,
                    control_audit: Path, diagnostic_source: Path,
                    reviewed_diagnostic: bytes, uid: int,
-                   now: int) -> dict[str, Any]:
+                   now: int, *,
+                   supervisor_rejection: dict[str, Any] | None = None,
+                   ) -> dict[str, Any]:
     output_raw, _ = trusted_external(supervisor_output, uid, canonical_json=False)
+    canonical_error = False
+    try:
+        output_value = json.loads(output_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        output_value = None
+    if (isinstance(output_value, dict) and canonical(output_value) == output_raw
+            and set(output_value) == {"schema", "status", "error"}
+            and output_value.get("schema") == SUPERVISOR_ERROR_SCHEMA
+            and output_value.get("status") == "rejected"
+            and output_value.get("error") == SUPERVISOR_OUTPUT_ERROR):
+        canonical_error = True
     try:
         output_text = output_raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_supervisor_output_invalid",
         ) from error
-    if (not output_text.rstrip().endswith(
+    traceback_error = (
+        output_text.rstrip().endswith(
             "SupervisorError: supervisor_command_rejected")
-            or '"status":"recorded"' in output_text):
+        and '"status":"recorded"' not in output_text
+    )
+    if not canonical_error and not traceback_error:
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_supervisor_output_invalid",
         )
@@ -360,8 +428,18 @@ def failure_record(campaign: dict[str, Any], supervisor_output: Path,
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_control_audit_invalid",
         )
+    if supervisor_rejection is not None:
+        supervisor_rejection = validate_supervisor_rejection(
+            supervisor_rejection, campaign,
+        )
+        if (not canonical_error
+                or supervisor_rejection["observed_at"] != timestamp):
+            raise ProgressedQualificationRetentionError(
+                "progressed_qualification_supervisor_rejection_invalid",
+            )
     value = {
-        "schema": FAILURE_SCHEMA,
+        "schema": (FAILURE_SCHEMA_V2 if supervisor_rejection is not None
+                   else FAILURE_SCHEMA),
         "status": "rejected",
         "campaign_id": campaign["campaign_id"],
         "campaign_sha256": campaign["campaign_sha256"],
@@ -386,6 +464,10 @@ def failure_record(campaign: dict[str, Any], supervisor_output: Path,
         "candidate_authority": "none",
         "production_material_used": False,
     }
+    if supervisor_rejection is not None:
+        value["supervisor_rejection_sha256"] = supervisor_rejection[
+            "rejection_sha256"
+        ]
     value["rejection_sha256"] = digest(value)
     return value
 
@@ -424,10 +506,13 @@ def validate_failure(value: Any, campaign: dict[str, Any]) -> dict[str, Any]:
         "retry_permitted", "candidate_authority", "production_material_used",
         "rejection_sha256",
     }
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if schema == FAILURE_SCHEMA_V2:
+        expected.add("supervisor_rejection_sha256")
     unsigned = {key: item for key, item in value.items()
                 if key != "rejection_sha256"} if isinstance(value, dict) else {}
     if (not isinstance(value, dict) or set(value) != expected
-            or value.get("schema") != FAILURE_SCHEMA
+            or schema not in {FAILURE_SCHEMA, FAILURE_SCHEMA_V2}
             or value.get("status") != "rejected"
             or value.get("campaign_id") != campaign["campaign_id"]
             or value.get("campaign_sha256") != campaign["campaign_sha256"]
@@ -463,6 +548,8 @@ def validate_failure(value: Any, campaign: dict[str, Any]) -> dict[str, Any]:
                 "supervisor_output_sha256", "control_audit_sha256",
                 "diagnostic_source_sha256",
             ))
+            or (schema == FAILURE_SCHEMA_V2 and SHA256.fullmatch(str(
+                value.get("supervisor_rejection_sha256", ""))) is None)
             or value.get("rejection_sha256") != digest(unsigned)):
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_failure_record_invalid",
@@ -513,6 +600,17 @@ def validate_layout(root: Path, uid: int, *, protected_uid: int = 0
         f"{case.case_id}.{kind}.json"
         for case in prior_cases for kind in case.evidence_kinds
     }
+    reserved_directory = root / "raw/qualification" / RESERVED_CASE_ID
+    reserved_descriptor = RETENTION._directory(reserved_directory, uid)
+    try:
+        reserved_entries = set(os.listdir(reserved_descriptor))
+    finally:
+        os.close(reserved_descriptor)
+    if reserved_entries not in (
+            {FAILURE_NAME}, {FAILURE_NAME, RETENTION_DIAGNOSTIC_NAME}):
+        raise ProgressedQualificationRetentionError(
+            "progressed_qualification_reservation_invalid",
+        )
     expected_directories = (
         (Path("observations"), observations),
         (Path("raw"), RETENTION.EXPECTED_RAW),
@@ -528,7 +626,7 @@ def validate_layout(root: Path, uid: int, *, protected_uid: int = 0
             COMPLETED_CASE_ID, RESERVED_CASE_ID,
         }),
         (Path("raw/qualification") / COMPLETED_CASE_ID, QUALIFICATION_RAW),
-        (Path("raw/qualification") / RESERVED_CASE_ID, {FAILURE_NAME}),
+        (Path("raw/qualification") / RESERVED_CASE_ID, reserved_entries),
         (Path("raw/recovery"), set()),
     )
     for relative, expected in expected_directories:
@@ -568,11 +666,12 @@ def validate_layout(root: Path, uid: int, *, protected_uid: int = 0
           for name in ("machine-enrollment.json", "production-material-scan.json")],
         *[(Path("raw/qualification") / COMPLETED_CASE_ID / name, uid, 0o600)
           for name in sorted(QUALIFICATION_RAW)],
-        (Path("raw/qualification") / RESERVED_CASE_ID / FAILURE_NAME,
-         uid, 0o600),
+        *[(Path("raw/qualification") / RESERVED_CASE_ID / name, uid, 0o600)
+          for name in sorted(reserved_entries)],
     ]
     files = []
     failure = None
+    supervisor_rejection = None
     for relative, owner, mode in specs:
         raw = RETENTION._trusted_file_bytes(
             root / relative, owner, mode=mode, maximum=128 * 1024,
@@ -588,6 +687,13 @@ def validate_layout(root: Path, uid: int, *, protected_uid: int = 0
                 "progressed_qualification_json_invalid",
             )
         if relative.name == FAILURE_NAME:
+            if value.get("schema") == SUPERVISOR_REJECTION_SCHEMA:
+                supervisor_rejection = validate_supervisor_rejection(
+                    value, campaign,
+                )
+            else:
+                failure = validate_failure(value, campaign)
+        elif relative.name == RETENTION_DIAGNOSTIC_NAME:
             failure = validate_failure(value, campaign)
         files.append({
             "path": str(relative), "sha256": hashlib.sha256(raw).hexdigest(),
@@ -596,6 +702,21 @@ def validate_layout(root: Path, uid: int, *, protected_uid: int = 0
     if failure is None:
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_failure_record_missing",
+        )
+    if not (
+        (supervisor_rejection is None
+         and failure.get("schema") == FAILURE_SCHEMA)
+        or (supervisor_rejection is not None
+            and failure.get("schema") == FAILURE_SCHEMA_V2)
+    ):
+        raise ProgressedQualificationRetentionError(
+            "progressed_qualification_failure_record_invalid",
+        )
+    if (supervisor_rejection is not None
+            and failure.get("supervisor_rejection_sha256")
+               != supervisor_rejection["rejection_sha256"]):
+        raise ProgressedQualificationRetentionError(
+            "progressed_qualification_failure_record_invalid",
         )
     inventory = {
         "campaign_sha256": hashlib.sha256(campaign_raw).hexdigest(),
@@ -827,11 +948,31 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
             "progressed_qualification_diagnostic_source_unavailable",
         )
     observed_at = int(time.time()) if now is None else now
+    reservation = root / "raw/qualification" / RESERVED_CASE_ID
+    reservation_descriptor = RETENTION._directory(reservation, uid)
+    try:
+        reservation_entries = set(os.listdir(reservation_descriptor))
+    finally:
+        os.close(reservation_descriptor)
+    supervisor_rejection = None
+    if reservation_entries in (
+            {FAILURE_NAME}, {FAILURE_NAME, RETENTION_DIAGNOSTIC_NAME}):
+        existing_control = RETENTION._trusted_canonical_record(
+            reservation / FAILURE_NAME, uid, "qualification_control_rejection",
+        )
+        if existing_control.get("schema") == SUPERVISOR_REJECTION_SCHEMA:
+            supervisor_rejection = validate_supervisor_rejection(
+                existing_control, campaign,
+            )
+    elif reservation_entries:
+        raise ProgressedQualificationRetentionError(
+            "progressed_qualification_reservation_not_empty",
+        )
     record = failure_record(
         campaign, supervisor_output, control_audit, diagnostic_source,
         reviewed_diagnostic, uid, observed_at,
+        supervisor_rejection=supervisor_rejection,
     )
-    reservation = root / "raw/qualification" / RESERVED_CASE_ID
     descriptor = RETENTION._directory(reservation, uid)
     try:
         entries = set(os.listdir(descriptor))
@@ -840,6 +981,19 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
         elif entries == {FAILURE_NAME}:
             existing = RETENTION._trusted_canonical_record(
                 reservation / FAILURE_NAME, uid, "retention_failure_record",
+            )
+            if existing.get("schema") == SUPERVISOR_REJECTION_SCHEMA:
+                RETENTION._write_new_at(
+                    descriptor, RETENTION_DIAGNOSTIC_NAME, record,
+                )
+            elif existing != record:
+                raise ProgressedQualificationRetentionError(
+                    "progressed_qualification_failure_record_mismatch",
+                )
+        elif entries == {FAILURE_NAME, RETENTION_DIAGNOSTIC_NAME}:
+            existing = RETENTION._trusted_canonical_record(
+                reservation / RETENTION_DIAGNOSTIC_NAME, uid,
+                "retention_diagnostic_record",
             )
             if existing != record:
                 raise ProgressedQualificationRetentionError(

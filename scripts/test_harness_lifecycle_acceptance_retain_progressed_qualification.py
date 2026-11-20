@@ -115,7 +115,7 @@ class ProgressedQualificationRetentionTests(unittest.TestCase):
                     "error": "", "request_id": str(uuid.uuid4()),
                 },
                 {
-                    "timestamp": now - 5, "outcome": "started",
+                    "timestamp": now - 6, "outcome": "started",
                     "kind": "deploy",
                     "operation": "install-harness-lifecycle-acceptance-qualification.sh",
                     "error": "", "request_id": failed_request,
@@ -298,6 +298,22 @@ class ProgressedQualificationRetentionTests(unittest.TestCase):
     def test_rejects_audit_without_exact_failed_control_event(self):
         audit = json.loads(self.audit.read_bytes())
         audit["control_audit_tail"] = audit["control_audit_tail"][:1]
+        self.audit.write_bytes(acceptance.canonical(audit))
+        with mock.patch.object(retention.RETENTION, "acl_absent", return_value=True), \
+                self.assertRaisesRegex(
+                    retention.ProgressedQualificationRetentionError,
+                    "progressed_qualification_control_audit_invalid"):
+            retention.failure_record(
+                self.campaign, self.supervisor, self.audit,
+                self.diagnostic_source,
+                self.reviewed_diagnostic, self.uid, int(time.time()),
+            )
+
+    def test_rejects_audit_with_start_after_failed_control_event(self):
+        audit = json.loads(self.audit.read_bytes())
+        audit["control_audit_tail"][-2]["timestamp"] = (
+            audit["control_audit_tail"][-1]["timestamp"] + 1
+        )
         self.audit.write_bytes(acceptance.canonical(audit))
         with mock.patch.object(retention.RETENTION, "acl_absent", return_value=True), \
                 self.assertRaisesRegex(

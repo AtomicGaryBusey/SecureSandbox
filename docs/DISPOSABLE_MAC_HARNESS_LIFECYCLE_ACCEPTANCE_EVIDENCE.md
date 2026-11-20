@@ -1232,5 +1232,11 @@ the current layout it preserves `control-rejection.json` byte-for-byte and
 appends a separately self-digested `retention-diagnostic.json` binding the
 supervisor output, Research audit, reviewed diagnostic source, and original
 rejection digest. Six focused retention tests pass, including non-overwrite of
-the supervisor record. Publication and physical no-delete retention remain
+the supervisor record. The first physical retention invocation rejected before
+mutation because its validator incorrectly required the matched `started` and
+`command_failed` audit events to share one wall-clock second; the authentic
+Neo events are ordered one second apart under the same request UUID. The
+validator now accepts exactly one matched start at or before the failure while
+rejecting reversed ordering and duplicate or missing starts. Seven focused
+retention tests pass. Publication and physical no-delete retention remain
 pending; this campaign must not be retried.

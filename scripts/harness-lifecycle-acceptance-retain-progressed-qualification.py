@@ -407,6 +407,14 @@ def failure_record(campaign: dict[str, Any], supervisor_output: Path,
     event = failed[0]
     timestamp = event.get("timestamp")
     request_id = event.get("request_id")
+    started = [
+        item for item in tail
+        if item["kind"] == "deploy"
+        and item["operation"] == operation
+        and item["outcome"] == "started"
+        and item["error"] == ""
+        and item["request_id"] == request_id
+    ]
     if (not isinstance(timestamp, int) or isinstance(timestamp, bool)
             or not campaign["created_at"] <= timestamp < campaign["expires_at"]
             or timestamp > now
@@ -416,15 +424,9 @@ def failure_record(campaign: dict[str, Any], supervisor_output: Path,
                 r"[89ab][0-9a-f]{3}-[0-9a-f]{12}", request_id,
             ) is None
             or max(item["timestamp"] for item in accepted) >= timestamp
-            or not any(
-                item["kind"] == "deploy"
-                and item["operation"] == operation
-                and item["outcome"] == "started"
-                and item["error"] == ""
-                and item["request_id"] == request_id
-                and item["timestamp"] == timestamp
-                for item in tail
-            )):
+            or len(started) != 1
+            or not campaign["created_at"] <= started[0]["timestamp"]
+                   <= timestamp):
         raise ProgressedQualificationRetentionError(
             "progressed_qualification_control_audit_invalid",
         )

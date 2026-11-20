@@ -1463,6 +1463,12 @@ the supervisor record: it validates its campaign, procedure, timestamp,
 no-retry flag, and self-digest, binds it to the canonical supervisor error and
 authenticated Research audit, and appends a distinct
 `retention-diagnostic.json` before atomically retaining the whole campaign.
+The audit binds exactly one `started` event and one later-or-equal
+`command_failed/status_1` event by the same request UUID. It does not require
+their wall-clock seconds to be identical: the control service records the
+start before execution and the failure after execution, so a legitimate
+failure may cross a one-second boundary. Reversed ordering, duplicate starts,
+or a missing UUID match still reject before retention mutation.
 The two layouts have different schemas and exact inventories; neither can be
 silently reinterpreted as the other.
 

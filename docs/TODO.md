@@ -1212,6 +1212,15 @@ in ignored local records, not in this file.
   campaign atomically, install the protected successor, and initialize a fresh
   exact-source campaign before replay. Never retry, rewrite, or remove the
   failed reservation.
+  That retention and successor installation completed. Fresh campaign
+  `05ce4187...` again reached 31/91 cases and 36/198 observations before the
+  second qualification deployment produced the same canonical no-retry
+  rejection. The repeated failure is now traced to installed-release bytecode
+  pollution: the first Research case can create `__pycache__`, after which the
+  next deploy's exact inventory check rejects before case output. Publish the
+  no-bytecode/read-only-release repair, retain `05ce4187...` without deletion,
+  install the exact successor, and start a fresh campaign. Never retry either
+  terminal qualification request.
   Remaining physical execution on the dedicated disposable Mac must exercise
   the other nine qualification cases, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

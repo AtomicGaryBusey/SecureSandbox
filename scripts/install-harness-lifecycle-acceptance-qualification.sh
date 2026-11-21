@@ -92,11 +92,15 @@ if [[ ! -e "$release" && ! -L "$release" ]]; then
   done
   install -o root -g root -m 444 "${sources[6]}" \
     "$temporary/fixtures/harness-qualification/malicious_harness.py"
+  # The release is reused by every qualification case.  Python bytecode must
+  # never expand its exact inventory after the first case, and the release
+  # directories expose no ordinary write authority after publication.
+  find "$temporary" -type d -exec chmod 555 {} +
   sync -d "$temporary"
   mv "$temporary" "$release"
   sync -d "$base"
 fi
-[[ -d "$release" && ! -L "$release" && "$(stat -c %U:%G:%a "$release")" == root:root:755 ]] \
+[[ -d "$release" && ! -L "$release" && "$(stat -c %U:%G:%a "$release")" == root:root:555 ]] \
   || { echo "Installed qualification release is untrusted." >&2; exit 1; }
 
 declare -a destinations=(
@@ -124,7 +128,7 @@ done
    && "$(find "$release" -mindepth 1 ! -type f ! -type d -printf . | wc -c)" -eq 0 ]] \
   || { echo "Installed qualification inventory is untrusted." >&2; exit 1; }
 while IFS= read -r directory; do
-  [[ "$(stat -c %U:%G:%a "$directory")" == root:root:755 ]] \
+  [[ "$(stat -c %U:%G:%a "$directory")" == root:root:555 ]] \
     || { echo "Installed qualification directory is untrusted." >&2; exit 1; }
 done < <(find "$release" -type d -print)
 
@@ -149,8 +153,10 @@ else
     || { echo "Qualification campaign identity collision." >&2; exit 1; }
 fi
 
-"$release/scripts/harness-lifecycle-acceptance-qualification.py" --help >/dev/null
-/usr/bin/python3 -I \
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -B \
+  "$release/scripts/harness-lifecycle-acceptance-qualification.py" \
+  --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -B \
   "$release/scripts/harness-lifecycle-acceptance-qualification.py" execute \
   --campaign "$campaign/campaign.json" \
   --case "$case_id" \

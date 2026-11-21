@@ -1472,6 +1472,15 @@ or a missing UUID match still reject before retention mutation.
 The two layouts have different schemas and exact inventories; neither can be
 silently reinterpreted as the other.
 
+Qualification releases are multi-case immutable inputs. Their publication
+therefore makes every release directory root-owned mode `0555`, and every
+Python process that imports from the installed release runs with both `-B`
+and `PYTHONDONTWRITEBYTECODE=1`. The first qualification case must not create
+`__pycache__` or any other release entry that makes the exact seven-file,
+four-directory inventory fail on the second case. Staged-source compilation
+remains confined to the deployment namespace and is never part of the
+installed release.
+
 ## Exit criteria
 
 This DDD is complete only when the dedicated Mac has:

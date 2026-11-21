@@ -396,6 +396,24 @@ class HarnessLifecycleAcceptanceQualificationTests(unittest.TestCase):
                 self.assertIn(case.case_id, source)
         self.assertIn('/usr/bin/python3 -I', source)
         self.assertIn('--output-root "$campaign/qualification-fixtures"', source)
+        self.assertIn('find "$temporary" -type d -exec chmod 555 {} +', source)
+        self.assertIn(
+            '"$(stat -c %U:%G:%a "$release")" == root:root:555',
+            source,
+        )
+        self.assertIn(
+            '"$(stat -c %U:%G:%a "$directory")" == root:root:555',
+            source,
+        )
+        self.assertEqual(
+            source.count('PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -B'),
+            2,
+        )
+        self.assertNotIn(
+            '"$release/scripts/harness-lifecycle-acceptance-qualification.py" '
+            '--help',
+            source,
+        )
         supervisor_source = (
             ROOT / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py"
         ).read_text()

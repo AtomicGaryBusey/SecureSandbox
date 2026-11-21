@@ -1240,3 +1240,19 @@ validator now accepts exactly one matched start at or before the failure while
 rejecting reversed ordering and duplicate or missing starts. Seven focused
 retention tests pass. Publication and physical no-delete retention remain
 pending; this campaign must not be retried.
+
+The no-delete retention then completed and independently verified on the Neo.
+Protected successor `9df22af...` installed, its post-install preflight passed,
+and fresh campaign `05ce4187...` completed both bootstrap cases plus every
+provenance and archive case and `qualification-no-preexecution`, reaching
+31/91 cases and 36/198 observations. Its next qualification deployment failed
+with the same canonical `qualification_research_command_rejected` and retained
+a no-retry supervisor record. Reproduction on a fresh campaign exposed the
+underlying deterministic defect: the Research installer validated an exact
+seven-file/four-directory release, then invoked Python from that release
+without disabling bytecode writes. The successful first case could add
+`__pycache__`; the next deploy then rejected its expanded release inventory
+before creating the next case output. The successor makes release directories
+mode `0555` and runs both installed-release Python entrypoints with `-B` plus
+`PYTHONDONTWRITEBYTECODE=1`. Physical retention, successor installation, and a
+fresh replay remain pending; neither rejected campaign may be retried.

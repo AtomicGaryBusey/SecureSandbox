@@ -334,7 +334,7 @@ exit 2
         result = self.run_labctl("stop")
         self.assertEqual(result.returncode, 0, result.stderr)
         actions = self.log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(actions[0], "identity-ready")
+        identity = actions.index("identity-ready")
         stop_actions = [line for line in actions
                         if line.startswith("control ") and line.endswith(" run poweroff")]
         self.assertEqual(len(stop_actions), 3)
@@ -350,6 +350,8 @@ exit 2
                        if "sandbox-gateway-control" in line and line.endswith(" run poweroff"))
         disconnect = next(index for index, line in enumerate(actions)
                           if "--device-disconnect net0" in line)
+        self.assertLess(identity, target)
+        self.assertLess(identity, disconnect)
         self.assertLess(target, research)
         self.assertLess(research, gateway)
         self.assertLess(gateway, disconnect)
@@ -561,6 +563,40 @@ exit 2
                             if item["action"] == "guest_shutdown"))
         self.assertNotIn("run poweroff", self.log.read_text(encoding="utf-8"))
 
+    def test_stop_all_stopped_disconnected_needs_no_ephemeral_identities(self):
+        self.set_state(gateway="stopped", research="stopped", target="stopped",
+                       uplink="disconnected")
+        (self.scripts / "ensure-ssh-identities.sh").write_text(
+            '#!/bin/bash\nprintf "identity-unavailable\\n" >>"$MOCK_ACTION_LOG"\nexit 1\n',
+            encoding="utf-8",
+        )
+        result = self.run_labctl("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record(result)
+        self.assertEqual(record["status"], "verified")
+        self.assertEqual(record["observed"], {
+            "gateway": "stopped", "research": "stopped", "target": "stopped",
+            "gateway_net0": "disconnected",
+        })
+        actions = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("identity-unavailable", actions)
+        self.assertNotIn("control ", actions)
+
+    def test_stop_running_guest_rejects_identity_failure_before_mutation(self):
+        (self.scripts / "ensure-ssh-identities.sh").write_text(
+            '#!/bin/bash\nprintf "identity-unavailable\\n" >>"$MOCK_ACTION_LOG"\nexit 1\n',
+            encoding="utf-8",
+        )
+        result = self.run_labctl("stop")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["phase"], "preflight")
+        self.assertEqual(record["action_failures"], ["identity_readiness_failed"])
+        actions = self.log.read_text(encoding="utf-8")
+        self.assertIn("identity-unavailable", actions)
+        self.assertNotIn("run poweroff", actions)
+        self.assertNotIn("--device-disconnect", actions)
+
     def test_stop_rejects_if_post_dispatch_uplink_cannot_disconnect(self):
         result = self.run_labctl("stop", MOCK_NO_APPLY_ACTION="disconnect")
         self.assertNotEqual(result.returncode, 0)
@@ -686,6 +722,7 @@ exit 2
                     "target": "running", "gateway_net0": "connected"}
         with (patch.object(module, "publish_progress"),
               patch.object(module, "observe", return_value=(observed, {})),
+              patch.object(module, "ensure_guest_control_readiness"),
               patch.object(module, "vm_state",
                            side_effect=module.LifecycleError("vm_inventory_unavailable")),
               patch.object(module, "disconnect_gateway_uplink",
@@ -714,6 +751,7 @@ exit 2
 
         with (patch.object(module, "publish_progress"),
               patch.object(module, "observe", return_value=(observed, {})),
+              patch.object(module, "ensure_guest_control_readiness"),
               patch.object(module, "vm_state",
                            side_effect=module.LifecycleError("vm_inventory_unavailable")),
               patch.object(module, "disconnect_gateway_uplink",

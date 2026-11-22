@@ -1256,3 +1256,42 @@ before creating the next case output. The successor makes release directories
 mode `0555` and runs both installed-release Python entrypoints with `-B` plus
 `PYTHONDONTWRITEBYTECODE=1`. Physical retention, successor installation, and a
 fresh replay remain pending; neither rejected campaign may be retried.
+
+## Parallels 27.1.0 cross-VM transport incident checkpoint
+
+Exact protected Host release `1965de0...` installed successfully and its
+post-install preflight initialized campaign `ae9227fd...` with zero raw
+reservations and zero observations. Three exact bootstrap attempts then
+terminalized before campaign evidence with
+`gateway_control_unreachable_before_gui_close`. Each retained the same
+intermediate state: Gateway running, Research and Target stopped, and Gateway
+Shared disconnected. No case was accepted or relabeled.
+
+Gateway reached an Ubuntu 26.04.1 login prompt but exposed only link-local IPv6
+through Parallels; its fixed `172.30.10.1` control address was unreachable.
+Changing the documented keyboard optimization mode, recreating the GUI,
+restarting the guest, and rebooting the Neo did not restore console input or
+network transport. A Research-only comparison reproduced the missing IPv4 on
+both NICs, proving the symptom crosses VM configuration. During that comparison
+Parallels Desktop 27.1.0 build 58756 crashed in the retained
+`CVmGenericNetworkAdapter::getLinkRateLimit()` family while Research continued
+headlessly.
+
+All three VMs were independently restored to stopped. A read-only APFS clone
+of Research was converted off-machine for forensic inspection. The ext4 image
+was cleanly unmounted; its required netplan file is root-owned mode 0600 and
+contains the exact expected MAC and IPv4 bindings. Rotated guest logs prove
+netplan and `systemd-networkd` selected both generated units and repeatedly
+observed carrier. The private Parallels diagnostic separately records idle
+virtio queues, an unavailable USB-keyboard monitor, and failed vCPU kicks. The
+combined evidence localizes the unresolved failure below the guest
+configuration boundary without claiming a final vendor diagnosis.
+
+The stopped boundary also exposed that `labctl stop` restored ephemeral SSH
+identities before its first inventory. Source now moves that readiness gate
+under the lifecycle lock and invokes it only when at least one guest is
+running. Focused tests prove an all-stopped/disconnected stack yields a
+verified receipt without an identity source, while a running stack with failed
+identity readiness performs no guest or adapter mutation. Campaign
+`ae9227fd...` remains live and empty pending publication, protected install,
+and physical replay after the Parallels transport condition is resolved.

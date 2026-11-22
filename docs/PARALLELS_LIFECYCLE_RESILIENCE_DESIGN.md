@@ -111,13 +111,23 @@ remains a separate and stronger requirement after startup.
   guest stopped. The controller never invokes `prlctl stop`; therefore
   `--noforce`, `--acpi`, and `--kill` cannot become hidden fallback behavior.
 
-The shell entry point performs a credential-readiness gate before either
-mutating operation. The provisioning and control agents use separate fixed
-Unix sockets. Each socket must expose exactly one identity whose SHA-256
-fingerprint matches its regular, non-symlink public-key file. Missing, stale,
-or multi-key agents are rebuilt from the 1Password Agents vault by the existing
-`key-load` operation and checked again. An incomplete restore fails before the
-lifecycle controller can issue a VM, adapter, clock, or guest-control mutation.
+The shell entry point performs a credential-readiness gate before startup and
+acceptance bootstrap operations. Stop performs its first exact Parallels
+inventory under the lifecycle lock. If any guest is running, the controller
+then performs the same credential-readiness gate before its first protected
+control probe or mutation. If all three guests already read stopped, stop does
+not restore identities: it needs only independently parsed Parallels state and,
+when necessary, a verified Gateway uplink disconnect. This permits an exact
+all-stopped/disconnected shutdown receipt on a freshly rebooted host without
+granting missing credentials any authority over a running guest.
+
+The provisioning and control agents use separate fixed Unix sockets. Each
+socket must expose exactly one identity whose SHA-256 fingerprint matches its
+regular, non-symlink public-key file. Missing, stale, or multi-key agents are
+rebuilt from the 1Password Agents vault by the existing `key-load` operation
+and checked again. An incomplete restore while any guest is running fails under
+the lifecycle lock before the controller can issue a VM, adapter, clock, or
+guest-control mutation.
 Read-only `status` deliberately bypasses this gate so its no-mutation contract
 includes local credential state and vault access.
 

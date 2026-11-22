@@ -1252,6 +1252,18 @@ in ignored local records, not in this file.
   verify that campaign before tightening the home, reinstalling the
   exact successor, and initializing a new campaign. No manual deletion,
   relabeling, or reservation reuse is permitted.
+  Exact protected Host `1965de0...` then initialized empty campaign
+  `ae9227fd...`, but three bootstrap attempts rejected before evidence because
+  Gateway control remained unreachable. Gateway and Research both booted with
+  only link-local IPv6, and Parallels 27.1.0 crashed again in
+  `CVmGenericNetworkAdapter::getLinkRateLimit()`. Read-only Research-disk
+  forensics prove the exact root-owned netplan and both generated networkd
+  matches are present while Parallels diagnostics show idle virtio queues.
+  Keep the empty campaign and every retained log unchanged. Publish and install
+  the conditional stop-identity repair, obtain a verified all-stopped receipt
+  without guest credentials, then qualify a reversible alternate Parallels NIC
+  backend or a vendor-fixed Parallels build on a disposable clone before
+  resuming bootstrap. Do not weaken the fixed IPv4 or protected-control gates.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

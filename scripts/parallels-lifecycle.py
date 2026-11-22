@@ -27,6 +27,7 @@ SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
 PGREP = Path("/usr/bin/pgrep")
 SYNC_SCRIPT = ROOT / "scripts/sync-lab-time.sh"
 VERIFY_SCRIPT = ROOT / "scripts/verify-boundaries.sh"
+IDENTITY_READINESS_SCRIPT = ROOT / "scripts/ensure-ssh-identities.sh"
 RUNTIME_DIR = Path(tempfile.gettempdir())
 LOCK_PATH = RUNTIME_DIR / "secure-sandbox-lifecycle.lock"
 PROGRESS_PATH = RUNTIME_DIR / "secure-sandbox-lifecycle-progress.json"
@@ -449,13 +450,35 @@ def disconnect_gateway_uplink(outcomes: list[dict[str, str]]) -> bool:
     )
 
 
-def require_mutation_prerequisites() -> None:
-    for path, executable in ((PRLCTL, True), (CONTROL_CLIENT, True), (SSH_CONFIG, False)):
+def require_host_mutation_prerequisites() -> None:
+    require_regular(PRLCTL, executable=True)
+
+
+def require_guest_control_prerequisites() -> None:
+    for path, executable in ((CONTROL_CLIENT, True), (SSH_CONFIG, False)):
         require_regular(path, executable=executable)
 
 
+def require_mutation_prerequisites() -> None:
+    """Compatibility surface for callers that can require guest control."""
+    require_host_mutation_prerequisites()
+    require_guest_control_prerequisites()
+
+
+def ensure_guest_control_readiness() -> None:
+    """Restore ephemeral identities only when a running guest needs control."""
+    require_guest_control_prerequisites()
+    require_regular(IDENTITY_READINESS_SCRIPT, executable=True)
+    result = command([str(IDENTITY_READINESS_SCRIPT)], timeout=60)
+    if result.returncode != 0:
+        raise LifecycleError("identity_readiness_failed")
+
+
 def ensure_mutation_preconditions(operation: str) -> int:
-    require_mutation_prerequisites()
+    if operation == "start":
+        require_mutation_prerequisites()
+    else:
+        require_host_mutation_prerequisites()
     try:
         if gui_running():
             emit(operation, "rejected", "preflight", [], ["parallels_gui_running"])
@@ -577,6 +600,13 @@ def stop(*, inherited_lock: int | None = None) -> int:
                 or initial["gateway_net0"] not in ("connected", "disconnected")):
             emit("stop", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
+        if any(initial[key] == "running" for key, _, _ in VMS):
+            try:
+                ensure_guest_control_readiness()
+            except (LifecycleError, subprocess.TimeoutExpired) as error:
+                emit("stop", "rejected", "preflight", outcomes,
+                     [str(error) or error.__class__.__name__])
+                return 1
         if initial["gateway_net0"] == "disconnected":
             # The private Host endpoint on control-net remains authenticated
             # and reachable after Shared is disconnected. Prove every running

@@ -66,8 +66,11 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
 
     def test_mutations_restore_exact_ephemeral_identities_but_status_does_not(self):
         labctl = self.text("scripts/labctl")
+        controller = self.text("scripts/parallels-lifecycle.py")
         readiness = self.text("scripts/ensure-ssh-identities.sh")
-        self.assertEqual(labctl.count('"$root_dir/scripts/ensure-ssh-identities.sh"'), 3)
+        self.assertEqual(labctl.count('"$root_dir/scripts/ensure-ssh-identities.sh"'), 2)
+        self.assertIn("ensure_guest_control_readiness()", controller)
+        self.assertIn('if any(initial[key] == "running"', controller)
         status = labctl[labctl.index("  status)"):labctl.index("  snapshots)")]
         self.assertNotIn("ensure-ssh-identities", status)
         self.assertIn("[[ \"$count\" == 1 && \"$actual\" == \"$expected\" ]]", readiness)

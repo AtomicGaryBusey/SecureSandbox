@@ -99,6 +99,23 @@ class ReprovisionScriptTests(unittest.TestCase):
         self.assertIn('recover_transaction(repo, transaction', text)
         self.assertIn('atomic_json(transaction_path(repo), transaction)', text)
 
+    def test_network_backend_migration_is_explicit_dry_and_recoverable(self):
+        wrapper = (
+            ROOT / "scripts/migrate-vm-network-backend.sh"
+        ).read_text(encoding="utf-8")
+        client = (ROOT / "scripts/vm-operation.py").read_text(encoding="utf-8")
+        maintenance = (ROOT / "scripts/vm-maintenance.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('vm-operation.py" migrate-network-backend', wrapper)
+        self.assertIn('if not args.apply:', client)
+        self.assertIn('"network_adapter_type": plan["network_adapter_type"]', client)
+        self.assertIn("def migrate_network_backend(", maintenance)
+        self.assertIn("BACKEND_TRANSACTION_SCHEMA", maintenance)
+        self.assertIn("vm_network_backend_progress_unjournaled", maintenance)
+        self.assertIn("vm_network_backend_readback_invalid", maintenance)
+        self.assertNotIn("prlctl delete", wrapper)
+
     def test_dependency_provisioning_normalizes_stopped_guests_before_lifecycle_probe(self):
         text = (ROOT / "scripts/provision-fresh-vm-dependencies.sh").read_text(encoding="utf-8")
         gateway = text.index("all_names=(SecureSandbox-Gateway")

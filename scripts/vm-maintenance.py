@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 SCHEMA = "secure-sandbox-vm-maintenance-plan-v1"
 TRANSACTION_SCHEMA = "secure-sandbox-vm-reprovision-transaction-v1"
+BACKEND_TRANSACTION_SCHEMA = "secure-sandbox-vm-network-backend-transaction-v1"
 NAMES = ("SecureSandbox-Gateway", "SecureSandbox-Research", "SecureSandbox-Target")
 ROLES = ("gateway", "research", "target")
 NETWORK_MACS = {
@@ -48,6 +49,27 @@ NETWORK_MACS = {
 # enrolled MacBook Neo proved the complete private path with e1000 adapters.
 # Bind the backend into planning, creation, and every security readback.
 NETWORK_ADAPTER_TYPE = "e1000"
+NETWORK_TOPOLOGY = {
+    "SecureSandbox-Gateway": {
+        "net0": ("shared", ""),
+        "net1": ("host", "control-net"),
+    },
+    "SecureSandbox-Research": {
+        "net1": ("host", "control-net"),
+        "net2": ("host", "lab-net"),
+    },
+    "SecureSandbox-Target": {
+        "net1": ("host", "lab-net"),
+    },
+}
+NETWORK_MIGRATION_ORDER = tuple(
+    (name, device)
+    for name in NAMES
+    for device in NETWORK_TOPOLOGY[name]
+)
+NETWORK_MIGRATION_STEPS = tuple(
+    f"{name}:{device}" for name, device in NETWORK_MIGRATION_ORDER
+)
 LAYOUTS = {
     "standard": {
         "gateway": {"cpus": 1, "memory_mib": 2048, "disk_mib": 12288},
@@ -62,9 +84,15 @@ LAYOUTS = {
 }
 INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 PRLCTL = Path("/Applications/Parallels Desktop.app/Contents/MacOS/prlctl")
+PGREP = Path("/usr/bin/pgrep")
 NC = Path("/usr/bin/nc")
 NETWORK_CONFIG = Path("/Library/Preferences/Parallels/network.desktop.xml")
 MIN_FREE_BYTES = 30 * 1024 * 1024 * 1024
+PARALLELS_MUTATING_PROCESSES = (
+    ("prl_client_app", "parallels_gui_must_be_closed"),
+    ("Parallels Mounter", "parallels_mounter_must_be_closed"),
+    ("XPCMounter", "parallels_mounter_must_be_closed"),
+)
 VM_UUID = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
 PRL_JSON_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 ACL_TYPE_EXTENDED = 0x00000100
@@ -87,6 +115,54 @@ if _ACL_FREE is not None:
 
 class MaintenanceError(RuntimeError):
     pass
+
+
+def require_parallels_mutating_apps_absent() -> None:
+    """Fail closed unless the Parallels GUI and disk mounters are absent."""
+    for process, conflict in PARALLELS_MUTATING_PROCESSES:
+        try:
+            result = subprocess.run(
+                [str(PGREP), "-x", process], check=False,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise MaintenanceError("parallels_process_state_unavailable") from error
+        if result.returncode == 0:
+            raise MaintenanceError(conflict)
+        if result.returncode != 1:
+            raise MaintenanceError("parallels_process_state_unavailable")
+
+
+def expected_network_adapters(card: str) -> dict[str, list[dict[str, str]]]:
+    if card not in {"virtio", NETWORK_ADAPTER_TYPE}:
+        raise MaintenanceError("vm_network_adapter_type_invalid")
+    return {
+        name: [
+            {
+                "key": device,
+                "type": kind,
+                "iface": iface,
+                "mac": NETWORK_MACS[name][device],
+                "card": card,
+            }
+            for device, (kind, iface) in NETWORK_TOPOLOGY[name].items()
+        ]
+        for name in NAMES
+    }
+
+
+def require_gateway_shared_disconnected(
+    name: str, hardware: dict[str, Any],
+) -> None:
+    if name != "SecureSandbox-Gateway":
+        return
+    shared = hardware.get("net0")
+    if not isinstance(shared, dict) or shared.get("state") != "disconnected":
+        raise MaintenanceError(
+            "vm_network_backend_gateway_shared_not_disconnected"
+        )
 
 
 def host_memory_bytes() -> int:
@@ -226,6 +302,10 @@ def transaction_path(repo: Path) -> Path:
     return repo / ".private/vm-maintenance-transactions/reprovision.json"
 
 
+def backend_transaction_path(repo: Path) -> Path:
+    return repo / ".private/vm-maintenance-transactions/network-backend.json"
+
+
 def validate_transaction(repo: Path, value: Any, uid: int) -> dict[str, Any]:
     if (not isinstance(value, dict) or set(value) != {
             "schema", "repo", "plan_sha256", "quarantine", "originals",
@@ -292,6 +372,66 @@ def pending_transaction(repo: Path, uid: int) -> dict[str, Any] | None:
         os.close(descriptor)
     value = json.loads(bytes(data).decode("utf-8"))
     return validate_transaction(repo, value, uid)
+
+
+def validate_backend_transaction(repo: Path, value: Any) -> dict[str, Any]:
+    if (not isinstance(value, dict) or set(value) != {
+            "schema", "repo", "plan_sha256", "vms", "completed",
+        } or value.get("schema") != BACKEND_TRANSACTION_SCHEMA
+            or value.get("repo") != str(repo)
+            or not isinstance(value.get("plan_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["plan_sha256"])
+            or not isinstance(value.get("vms"), list)
+            or not isinstance(value.get("completed"), list)):
+        raise MaintenanceError("network_backend_transaction_invalid")
+    identities = value["vms"]
+    if ([item.get("name") for item in identities if isinstance(item, dict)]
+            != list(NAMES)):
+        raise MaintenanceError("network_backend_transaction_invalid")
+    for identity in identities:
+        if (not isinstance(identity, dict) or set(identity) != {
+                "name", "uuid", "expected_home", "state",
+                "bundle_device", "bundle_inode",
+            } or identity.get("state") != "stopped"
+                or not isinstance(identity.get("uuid"), str)
+                or not VM_UUID.fullmatch(identity["uuid"])
+                or identity.get("expected_home")
+                    != str(repo / f"vms/{identity.get('name')}.pvm")
+                or type(identity.get("bundle_device")) is not int
+                or type(identity.get("bundle_inode")) is not int):
+            raise MaintenanceError("network_backend_transaction_invalid")
+    completed = value["completed"]
+    if (completed != list(NETWORK_MIGRATION_STEPS[:len(completed)])
+            or len(completed) > len(NETWORK_MIGRATION_STEPS)):
+        raise MaintenanceError("network_backend_transaction_invalid")
+    return value
+
+
+def pending_backend_transaction(repo: Path, uid: int) -> dict[str, Any] | None:
+    path = backend_transaction_path(repo)
+    if not path.exists():
+        return None
+    trusted_directory(repo / ".private", uid)
+    trusted_directory(path.parent, uid)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > 64 * 1024):
+            raise MaintenanceError("network_backend_transaction_untrusted")
+        data = bytearray()
+        while chunk := os.read(descriptor, 64 * 1024 + 1 - len(data)):
+            data.extend(chunk)
+            if len(data) > 64 * 1024:
+                raise MaintenanceError("network_backend_transaction_untrusted")
+        after = os.fstat(descriptor)
+        if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise MaintenanceError("network_backend_transaction_changed")
+    finally:
+        os.close(descriptor)
+    return validate_backend_transaction(repo, json.loads(bytes(data).decode("utf-8")))
 
 
 def sha256_regular(path: Path, maximum: int = 16 * 1024 * 1024 * 1024) -> str:
@@ -668,12 +808,7 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
         if (key.startswith("net") and isinstance(device, dict)
             and device.get("enabled", True))
     ], key=lambda item: item["key"])
-    expected_networks = [
-        {"key": "net0", "type": "shared", "iface": "",
-         "mac": NETWORK_MACS[NAMES[0]]["net0"], "card": NETWORK_ADAPTER_TYPE},
-        {"key": "net1", "type": "host", "iface": "control-net",
-         "mac": NETWORK_MACS[NAMES[0]]["net1"], "card": NETWORK_ADAPTER_TYPE},
-    ]
+    expected_networks = expected_network_adapters(NETWORK_ADAPTER_TYPE)[NAMES[0]]
     if (value.get("Name") != NAMES[0] or value.get("State") != "running"
             or not VM_UUID.fullmatch(identifier)
             or home.is_symlink() or not stat.S_ISDIR(home_info.st_mode)
@@ -767,6 +902,89 @@ def same_vm_identity(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
     ))
 
 
+def vm_network_adapter_inventory(
+    identities: list[dict[str, Any]],
+) -> dict[str, list[dict[str, str]]]:
+    """Read the exact stopped topology and retain its adapter backend."""
+    expected_without_card = expected_network_adapters("virtio")
+    result: dict[str, list[dict[str, str]]] = {}
+    for expected_identity in identities:
+        name = expected_identity["name"]
+        actual_identity = vm_identity(
+            expected_identity["uuid"], Path(expected_identity["expected_home"])
+        )
+        if not same_vm_identity(actual_identity, expected_identity):
+            raise MaintenanceError(f"vm_network_backend_identity_changed:{name}")
+        values = json.loads(run([
+            str(PRLCTL), "list", "-a", "-i", "-j", expected_identity["uuid"],
+        ], capture=True))
+        if (not isinstance(values, list) or len(values) != 1
+                or not isinstance(values[0], dict)):
+            raise MaintenanceError(f"vm_network_backend_inventory_invalid:{name}")
+        value = values[0]
+        try:
+            identifier = normalize_vm_uuid(value.get("ID"))
+        except MaintenanceError as error:
+            raise MaintenanceError(
+                f"vm_network_backend_inventory_invalid:{name}"
+            ) from error
+        hardware = value.get("Hardware")
+        if (value.get("Name") != name or value.get("State") != "stopped"
+                or identifier != expected_identity["uuid"]
+                or not isinstance(hardware, dict)):
+            raise MaintenanceError(f"vm_network_backend_inventory_invalid:{name}")
+        require_gateway_shared_disconnected(name, hardware)
+        networks = sorted([
+            {
+                "key": key,
+                "type": device.get("type", ""),
+                "iface": device.get("iface") or "",
+                "mac": str(device.get("mac", "")).upper(),
+                "card": device.get("card", ""),
+            }
+            for key, device in hardware.items()
+            if key.startswith("net") and isinstance(device, dict)
+            and device.get("enabled") is True
+        ], key=lambda item: item["key"])
+        if len(networks) != len([key for key in hardware if key.startswith("net")]):
+            raise MaintenanceError(f"vm_network_backend_inventory_invalid:{name}")
+        topology = [{key: value for key, value in item.items() if key != "card"}
+                    for item in networks]
+        expected_topology = [
+            {key: value for key, value in item.items() if key != "card"}
+            for item in expected_without_card[name]
+        ]
+        if (topology != expected_topology
+                or any(item["card"] not in {"virtio", NETWORK_ADAPTER_TYPE}
+                       for item in networks)):
+            raise MaintenanceError(f"vm_network_backend_inventory_invalid:{name}")
+        result[name] = networks
+    if set(result) != set(NAMES):
+        raise MaintenanceError("vm_network_backend_inventory_invalid")
+    return result
+
+
+def network_backend_progress(
+    inventory: dict[str, list[dict[str, str]]],
+) -> list[str]:
+    by_device = {
+        (name, item["key"]): item["card"]
+        for name, networks in inventory.items()
+        for item in networks
+    }
+    completed: list[str] = []
+    seen_virtio = False
+    for name, device in NETWORK_MIGRATION_ORDER:
+        card = by_device.get((name, device))
+        if card == NETWORK_ADAPTER_TYPE and not seen_virtio:
+            completed.append(f"{name}:{device}")
+        elif card == "virtio":
+            seen_virtio = True
+        else:
+            raise MaintenanceError("vm_network_backend_progress_invalid")
+    return completed
+
+
 def vm_cpu_memory(selector: str) -> tuple[int, int]:
     """Read configured resources independently of a preceding `prlctl set`."""
     detail = run([str(PRLCTL), "list", "-a", "-i", selector], capture=True)
@@ -842,8 +1060,13 @@ def build_plan(repo_value: str, operation: str, uid: int,
     seeds = seed_hashes(repo)
     networks = private_network_config()
     transaction = pending_transaction(repo, uid)
+    backend_transaction = pending_backend_transaction(repo, uid)
     if transaction is not None and operation != "reprovision":
         raise MaintenanceError("maintenance_recovery_required")
+    if backend_transaction is not None and operation != "migrate-network-backend":
+        raise MaintenanceError("network_backend_recovery_required")
+    if transaction is not None and backend_transaction is not None:
+        raise MaintenanceError("maintenance_transaction_conflict")
     if transaction is None:
         vms = vm_inventory(repo, operation)
         if operation == "reprovision":
@@ -858,6 +1081,23 @@ def build_plan(repo_value: str, operation: str, uid: int,
             raise MaintenanceError("insufficient_recoverable_storage")
     else:
         vms = transaction["originals"]
+    if operation == "migrate-network-backend":
+        require_parallels_mutating_apps_absent()
+        inventory = vm_network_adapter_inventory(vms)
+        progress = network_backend_progress(inventory)
+        if backend_transaction is None:
+            if progress == list(NETWORK_MIGRATION_STEPS):
+                raise MaintenanceError("vm_network_backend_migration_not_required")
+            if progress:
+                raise MaintenanceError("vm_network_backend_progress_unjournaled")
+        else:
+            if backend_transaction["vms"] != vms:
+                raise MaintenanceError("vm_network_backend_identity_changed")
+            completed = backend_transaction["completed"]
+            if progress not in (
+                    completed,
+                    list(NETWORK_MIGRATION_STEPS[:len(completed) + 1])):
+                raise MaintenanceError("vm_network_backend_progress_invalid")
     plan = {
         "schema": SCHEMA, "operation": operation, "invoking_uid": uid,
         "layout_profile": layout_profile, "layout": layout,
@@ -868,9 +1108,17 @@ def build_plan(repo_value: str, operation: str, uid: int,
         "network_config": networks, "network_macs": NETWORK_MACS,
         "network_adapter_type": NETWORK_ADAPTER_TYPE,
     }
+    if operation == "migrate-network-backend":
+        plan["network_backend_transition"] = {
+            "from": "virtio", "to": NETWORK_ADAPTER_TYPE,
+            "steps": list(NETWORK_MIGRATION_STEPS),
+        }
     if transaction is not None:
         plan["recovery_transaction_sha256"] = hashlib.sha256(canonical(transaction)).hexdigest()
     plan["plan_sha256"] = hashlib.sha256(canonical(plan)).hexdigest()
+    if (backend_transaction is not None
+            and backend_transaction["plan_sha256"] != plan["plan_sha256"]):
+        raise MaintenanceError("network_backend_transaction_plan_changed")
     return plan
 
 
@@ -1042,19 +1290,7 @@ def create_all(repo: Path, installer: Path,
 
 def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, Any]],
                    layout: dict[str, dict[str, int]]) -> None:
-    expected_networks = {
-        NAMES[0]: [
-            {"key": "net0", "type": "shared", "iface": "", "mac": NETWORK_MACS[NAMES[0]]["net0"], "card": NETWORK_ADAPTER_TYPE},
-            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[0]]["net1"], "card": NETWORK_ADAPTER_TYPE},
-        ],
-        NAMES[1]: [
-            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[1]]["net1"], "card": NETWORK_ADAPTER_TYPE},
-            {"key": "net2", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[1]]["net2"], "card": NETWORK_ADAPTER_TYPE},
-        ],
-        NAMES[2]: [
-            {"key": "net1", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[2]]["net1"], "card": NETWORK_ADAPTER_TYPE},
-        ],
-    }
+    expected_networks = expected_network_adapters(NETWORK_ADAPTER_TYPE)
     for name, role in zip(NAMES, ROLES):
         identity = identities[name]
         expected = layout[role]
@@ -1198,6 +1434,89 @@ def recover_transaction(repo: Path, transaction: dict[str, Any], uid: int,
     return quarantine
 
 
+def migrate_network_backend(
+    repo: Path,
+    expected_vms: list[dict[str, Any]],
+    plan_sha256: str,
+    uid: int,
+) -> bool:
+    """Converge the exact stopped topology from virtio to e1000.
+
+    The durable prefix journal permits only the one next fixed adapter. A
+    crash after Parallels commits but before journal publication is recovered
+    only when independent readback is exactly one step ahead.
+    """
+    lock_descriptor, directories = acquire_maintenance_lock(repo, uid)
+    try:
+        require_parallels_mutating_apps_absent()
+        if pending_transaction(repo, uid) is not None:
+            raise MaintenanceError("maintenance_recovery_required")
+        transaction = pending_backend_transaction(repo, uid)
+        recovered = transaction is not None
+        inventory = vm_network_adapter_inventory(expected_vms)
+        progress = network_backend_progress(inventory)
+        if transaction is None:
+            if progress:
+                raise MaintenanceError("vm_network_backend_progress_unjournaled")
+            transaction = {
+                "schema": BACKEND_TRANSACTION_SCHEMA,
+                "repo": str(repo),
+                "plan_sha256": plan_sha256,
+                "vms": expected_vms,
+                "completed": [],
+            }
+            for directory, identity in directories.values():
+                assert_directory_identity(directory, identity, uid)
+            atomic_json(backend_transaction_path(repo), transaction)
+        else:
+            if (transaction["plan_sha256"] != plan_sha256
+                    or transaction["vms"] != expected_vms):
+                raise MaintenanceError("network_backend_transaction_plan_changed")
+            completed = transaction["completed"]
+            if progress == list(NETWORK_MIGRATION_STEPS[:len(completed) + 1]):
+                transaction["completed"] = progress
+                atomic_json(backend_transaction_path(repo), transaction)
+            elif progress != completed:
+                raise MaintenanceError("vm_network_backend_progress_invalid")
+
+        identities = {identity["name"]: identity for identity in expected_vms}
+        while len(transaction["completed"]) < len(NETWORK_MIGRATION_STEPS):
+            require_parallels_mutating_apps_absent()
+            for directory, identity in directories.values():
+                assert_directory_identity(directory, identity, uid)
+            expected_progress = transaction["completed"]
+            current = network_backend_progress(
+                vm_network_adapter_inventory(expected_vms)
+            )
+            if current != expected_progress:
+                raise MaintenanceError("vm_network_backend_progress_changed")
+            index = len(expected_progress)
+            name, device = NETWORK_MIGRATION_ORDER[index]
+            set_vm(
+                identities[name]["uuid"], "--device-set", device,
+                "--adapter-type", NETWORK_ADAPTER_TYPE,
+            )
+            require_parallels_mutating_apps_absent()
+            observed = network_backend_progress(
+                vm_network_adapter_inventory(expected_vms)
+            )
+            next_progress = list(NETWORK_MIGRATION_STEPS[:index + 1])
+            if observed != next_progress:
+                raise MaintenanceError("vm_network_backend_readback_invalid")
+            transaction["completed"] = next_progress
+            atomic_json(backend_transaction_path(repo), transaction)
+
+        final_inventory = vm_network_adapter_inventory(expected_vms)
+        if network_backend_progress(final_inventory) != list(NETWORK_MIGRATION_STEPS):
+            raise MaintenanceError("vm_network_backend_final_readback_invalid")
+        path = backend_transaction_path(repo)
+        path.unlink()
+        fsync_directory(path.parent)
+        return recovered
+    finally:
+        os.close(lock_descriptor)
+
+
 def reprovision(repo: Path, installer: Path, expected_vms: list[dict[str, Any]],
                 plan_sha256: str, uid: int,
                 layout: dict[str, dict[str, int]] | None = None,
@@ -1278,6 +1597,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=(
         "plan-create", "plan-reprovision", "create", "reprovision",
+        "plan-migrate-network-backend", "migrate-network-backend",
         "plan-preserve-legacy", "preserve-legacy", "proxy-gateway",
     ))
     parser.add_argument("--repo")
@@ -1408,6 +1728,15 @@ def main() -> int:
             create_all(repo, installer, layout=plan["layout"],
                        expected_networks=plan_network_config)
             result = {"status": "created", "plan_sha256": plan["plan_sha256"]}
+        elif operation == "migrate-network-backend":
+            recovered = migrate_network_backend(
+                repo, plan["vms"], plan["plan_sha256"], uid,
+            )
+            result = {
+                "status": "recovered" if recovered else "migrated",
+                "plan_sha256": plan["plan_sha256"],
+                "network_adapter_type": NETWORK_ADAPTER_TYPE,
+            }
         else:
             quarantine, recovered = reprovision(repo, installer, plan["vms"], plan["plan_sha256"], uid,
                                                 plan["layout"], plan_network_config)

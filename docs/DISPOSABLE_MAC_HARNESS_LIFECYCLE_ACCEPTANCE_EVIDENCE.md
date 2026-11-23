@@ -1335,6 +1335,11 @@ Source now makes `e1000` an explicit plan and authorization fact, creates the
 Gateway Shared adapter and every private adapter with that backend, rejects
 backend drift during post-create, proxy, provisioning, recovery, and boundary
 readback, and uses the same backend for temporary provisioning adapters. The
-production VM migration remains a separate stopped-only, exact-identity,
-operator-authorized action; bootstrap must not resume against the old virtio
-bundles.
+separate production migration is dry by default and operator-authorized. Its
+durable fixed-prefix transaction accepts only the exact stopped identities and
+known topology, requires absent Parallels GUI and mounter processes plus a
+disconnected Gateway Shared adapter at the mutation boundary, changes one
+adapter at a time, independently re-reads the full topology after each step,
+and never boots, unregisters, moves, or deletes a VM.
+Physical migration and post-migration boundary replay remain pending;
+bootstrap must not resume against the old virtio bundles.

@@ -425,6 +425,9 @@ OPERATION_RESOURCES = {
     "installer-repair-store-access": "/Library/Application Support/SecureSandbox/installers",
     "vm-create": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
     "vm-reprovision": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
+    "vm-migrate-network-backend": (
+        "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target"
+    ),
     "vm-preserve-legacy": "SecureSandbox quarantined VM data preservation",
     "model-profile-activate": "Gateway broker and Research harness model authority",
     "native-stack-signin-begin": "Native vendor harness and model stack authority",
@@ -2221,7 +2224,7 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         if parameters["expected_sha256"] != expected:
             raise AuthorizationError("installer_expected_sha256_invalid")
         return
-    if operation in {"vm-create", "vm-reprovision"}:
+    if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
         if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
                                "network_config", "network_config_sha256", "network_macs",
                                "network_macs_sha256", "network_adapter_type",
@@ -3522,7 +3525,7 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "/usr/bin/python3", "-I", str(release / "installer_verifier"),
             "--release-directory", parameters["release_directory"], action, "--path-only",
         ]
-    if operation in {"vm-create", "vm-reprovision"}:
+    if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
         return [
             "/usr/bin/python3", "-I", str(release / "vm_maintenance"),
             operation.removeprefix("vm-"), "--repo", parameters["repo"],
@@ -5659,7 +5662,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         })
     if value["operation"] == "vm-preserve-legacy":
         timeout = 8 * 60 * 60
-    elif value["operation"] in {"vm-create", "vm-reprovision"}:
+    elif value["operation"] in {
+            "vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
         timeout = 3600
     elif value["operation"].startswith("installer-"):
         timeout = 1800
@@ -10118,7 +10122,7 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
 def authorization_execution_timeout(operation: str) -> int:
     if operation == "vm-preserve-legacy":
         return 8 * 60 * 60 + 300
-    if operation in {"vm-create", "vm-reprovision"}:
+    if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
         return 3600 + 300
     if operation.startswith("installer-"):
         return 1800 + 300
@@ -10526,7 +10530,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
         return [f"Repository: {parameters['repo']}",
                 f"Release directory: {parameters['release_directory']}",
                 f"Installer SHA-256: {parameters['expected_sha256']}"]
-    if operation in {"vm-create", "vm-reprovision"}:
+    if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
         return [f"Repository: {parameters['repo']}",
                 f"VM set: {OPERATION_RESOURCES[operation]}",
                 f"VM layout: {parameters['layout_profile']} ({parameters['host_memory_bytes']} host bytes)",

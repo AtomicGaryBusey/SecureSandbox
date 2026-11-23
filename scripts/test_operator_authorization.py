@@ -2986,6 +2986,22 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn("net0:001C42BC794F", details)
         self.assertIn(parameters["network_macs_sha256"], details)
         self.assertIn("VM network adapter backend: e1000", details)
+        AUTH.validate_parameters(
+            "vm-migrate-network-backend", parameters, self.home,
+        )
+        migration = {
+            "operation": "vm-migrate-network-backend",
+            "parameters": parameters,
+            "invoking_uid": self.uid,
+        }
+        migration_command = AUTH.operation_command(
+            migration, Path("/protected/release"),
+        )
+        self.assertEqual(migration_command[3], "migrate-network-backend")
+        self.assertIn(
+            "VM network adapter backend: e1000",
+            "\n".join(AUTH.operation_details(migration)),
+        )
 
     def test_legacy_preservation_request_is_strictly_typed_and_forwarded(self):
         uuid_value = "{00000000-0000-4000-8000-000000000001}"

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tempfile
+import types
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -145,6 +146,44 @@ class VmMaintenanceTests(unittest.TestCase):
             self.assertEqual(sum(role["memory_mib"] for role in layout.values()), 5632)
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):
                 VM.checked_layout("standard")
+
+    def test_network_backend_migration_plan_binds_fixed_order(self):
+        identities = [
+            {
+                "name": name,
+                "uuid": "{" + f"{index:08d}-4444-4444-8444-{index:012d}" + "}",
+                "expected_home": f"/repo/vms/{name}.pvm",
+                "state": "stopped", "bundle_device": 1,
+                "bundle_inode": index,
+            }
+            for index, name in enumerate(VM.NAMES, start=1)
+        ]
+        with (mock.patch.object(
+                  VM, "checked_layout",
+                  return_value=(VM.LAYOUTS["neo-8gb"], 8 * 1024**3)),
+              mock.patch.object(VM, "trusted_repo", return_value=Path("/repo")),
+              mock.patch.object(VM, "installer_path", return_value=Path("/installer")),
+              mock.patch.object(VM, "seed_hashes", return_value={
+                  "gateway": "a" * 64, "research": "b" * 64,
+                  "target": "c" * 64,
+              }),
+              mock.patch.object(VM, "private_network_config",
+                                return_value=self.NETWORKS),
+              mock.patch.object(VM, "pending_transaction", return_value=None),
+              mock.patch.object(VM, "pending_backend_transaction", return_value=None),
+              mock.patch.object(VM, "vm_inventory", return_value=identities),
+              mock.patch.object(VM, "vm_network_adapter_inventory",
+                                return_value=VM.expected_network_adapters("virtio")),
+              mock.patch.object(VM, "require_parallels_mutating_apps_absent"),
+              mock.patch.object(VM, "prlctl_hash", return_value="d" * 64)):
+            plan = VM.build_plan(
+                "/repo", "migrate-network-backend", os.geteuid(), "neo-8gb",
+            )
+        self.assertEqual(plan["network_backend_transition"], {
+            "from": "virtio", "to": "e1000",
+            "steps": list(VM.NETWORK_MIGRATION_STEPS),
+        })
+        self.assertRegex(plan["plan_sha256"], r"^[0-9a-f]{64}$")
         with mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3):
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):
                 VM.checked_layout("neo-8gb")
@@ -565,6 +604,181 @@ class VmMaintenanceTests(unittest.TestCase):
             mock.call("target-id", "--device-add", "net", "--type", "host-only",
                       "--iface", "lab-net", "--adapter-type", "e1000"),
         ])
+
+    def test_network_backend_migration_is_ordered_durable_and_stopped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            identities = []
+            for index, name in enumerate(VM.NAMES, start=1):
+                home = repo / "vms" / f"{name}.pvm"
+                home.mkdir(parents=True)
+                info = home.lstat()
+                identities.append({
+                    "name": name,
+                    "uuid": "{" + f"{index:08d}-1111-4111-8111-{index:012d}" + "}",
+                    "expected_home": str(home),
+                    "state": "stopped",
+                    "bundle_device": info.st_dev,
+                    "bundle_inode": info.st_ino,
+                })
+            cards = {step: "virtio" for step in VM.NETWORK_MIGRATION_STEPS}
+            mutations = []
+
+            def inventory(_identities):
+                result = VM.expected_network_adapters("virtio")
+                for name, devices in result.items():
+                    for device in devices:
+                        device["card"] = cards[f"{name}:{device['key']}"]
+                return result
+
+            uuid_names = {item["uuid"]: item["name"] for item in identities}
+
+            def mutate(identifier, *arguments):
+                self.assertEqual(arguments[0:2], ("--device-set", arguments[1]))
+                self.assertEqual(arguments[2:], ("--adapter-type", "e1000"))
+                step = f"{uuid_names[identifier]}:{arguments[1]}"
+                self.assertEqual(step, VM.NETWORK_MIGRATION_STEPS[len(mutations)])
+                cards[step] = "e1000"
+                mutations.append(step)
+
+            with (mock.patch.object(VM, "pending_transaction", return_value=None),
+                  mock.patch.object(VM, "require_parallels_mutating_apps_absent") as apps_absent,
+                  mock.patch.object(VM, "vm_network_adapter_inventory",
+                                    side_effect=inventory),
+                  mock.patch.object(VM, "set_vm", side_effect=mutate)):
+                recovered = VM.migrate_network_backend(
+                    repo, identities, "a" * 64, os.geteuid(),
+                )
+            self.assertFalse(recovered)
+            self.assertEqual(mutations, list(VM.NETWORK_MIGRATION_STEPS))
+            self.assertEqual(
+                apps_absent.call_count, 1 + 2 * len(VM.NETWORK_MIGRATION_STEPS),
+            )
+            self.assertFalse(VM.backend_transaction_path(repo).exists())
+
+    def test_network_backend_migration_recovers_one_unjournaled_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            identities = []
+            for index, name in enumerate(VM.NAMES, start=1):
+                home = repo / "vms" / f"{name}.pvm"
+                home.mkdir(parents=True)
+                info = home.lstat()
+                identities.append({
+                    "name": name,
+                    "uuid": "{" + f"{index:08d}-2222-4222-8222-{index:012d}" + "}",
+                    "expected_home": str(home),
+                    "state": "stopped",
+                    "bundle_device": info.st_dev,
+                    "bundle_inode": info.st_ino,
+                })
+            cards = {step: "virtio" for step in VM.NETWORK_MIGRATION_STEPS}
+            mutations = []
+            interrupt = [True]
+
+            def inventory(_identities):
+                if (interrupt[0]
+                        and cards[VM.NETWORK_MIGRATION_STEPS[0]] == "e1000"):
+                    interrupt[0] = False
+                    raise VM.MaintenanceError("simulated_readback_interruption")
+                result = VM.expected_network_adapters("virtio")
+                for name, devices in result.items():
+                    for device in devices:
+                        device["card"] = cards[f"{name}:{device['key']}"]
+                return result
+
+            uuid_names = {item["uuid"]: item["name"] for item in identities}
+
+            def mutate(identifier, *arguments):
+                step = f"{uuid_names[identifier]}:{arguments[1]}"
+                cards[step] = "e1000"
+                mutations.append(step)
+
+            with (mock.patch.object(VM, "pending_transaction", return_value=None),
+                  mock.patch.object(VM, "require_parallels_mutating_apps_absent"),
+                  mock.patch.object(VM, "vm_network_adapter_inventory",
+                                    side_effect=inventory),
+                  mock.patch.object(VM, "set_vm", side_effect=mutate)):
+                with self.assertRaisesRegex(
+                        VM.MaintenanceError, "simulated_readback_interruption"):
+                    VM.migrate_network_backend(
+                        repo, identities, "b" * 64, os.geteuid(),
+                    )
+                self.assertTrue(VM.backend_transaction_path(repo).exists())
+                recovered = VM.migrate_network_backend(
+                    repo, identities, "b" * 64, os.geteuid(),
+                )
+            self.assertTrue(recovered)
+            self.assertEqual(mutations, list(VM.NETWORK_MIGRATION_STEPS))
+            self.assertFalse(VM.backend_transaction_path(repo).exists())
+
+    def test_network_backend_migration_rejects_unjournaled_or_nonprefix_state(self):
+        inventory = VM.expected_network_adapters("virtio")
+        inventory[VM.NAMES[1]][0]["card"] = "e1000"
+        with self.assertRaisesRegex(
+                VM.MaintenanceError, "vm_network_backend_progress_invalid"):
+            VM.network_backend_progress(inventory)
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            identities = []
+            for index, name in enumerate(VM.NAMES, start=1):
+                home = repo / "vms" / f"{name}.pvm"
+                home.mkdir(parents=True)
+                info = home.lstat()
+                identities.append({
+                    "name": name,
+                    "uuid": "{" + f"{index:08d}-3333-4333-8333-{index:012d}" + "}",
+                    "expected_home": str(home), "state": "stopped",
+                    "bundle_device": info.st_dev, "bundle_inode": info.st_ino,
+                })
+            prefix = VM.expected_network_adapters("virtio")
+            prefix[VM.NAMES[0]][0]["card"] = "e1000"
+            with (mock.patch.object(VM, "pending_transaction", return_value=None),
+                  mock.patch.object(VM, "require_parallels_mutating_apps_absent"),
+                  mock.patch.object(VM, "vm_network_adapter_inventory",
+                                    return_value=prefix),
+                  mock.patch.object(VM, "set_vm") as set_vm):
+                with self.assertRaisesRegex(
+                        VM.MaintenanceError,
+                        "vm_network_backend_progress_unjournaled"):
+                    VM.migrate_network_backend(
+                        repo, identities, "c" * 64, os.geteuid(),
+                    )
+            set_vm.assert_not_called()
+
+    def test_network_backend_migration_requires_closed_parallels_apps(self):
+        for returncode, expected in (
+                (0, "parallels_gui_must_be_closed"),
+                (2, "parallels_process_state_unavailable")):
+            with (mock.patch.object(
+                    VM.subprocess, "run",
+                    return_value=types.SimpleNamespace(returncode=returncode)),
+                  self.assertRaisesRegex(VM.MaintenanceError, expected)):
+                VM.require_parallels_mutating_apps_absent()
+        with mock.patch.object(
+                VM.subprocess, "run",
+                return_value=types.SimpleNamespace(returncode=1)):
+            VM.require_parallels_mutating_apps_absent()
+        with (mock.patch.object(
+                VM.subprocess, "run", side_effect=(
+                    types.SimpleNamespace(returncode=1),
+                    types.SimpleNamespace(returncode=0),
+                )), self.assertRaisesRegex(
+                    VM.MaintenanceError, "parallels_mounter_must_be_closed")):
+            VM.require_parallels_mutating_apps_absent()
+
+    def test_network_backend_gateway_shared_requires_disconnected_state(self):
+        VM.require_gateway_shared_disconnected(
+            VM.NAMES[0], {"net0": {"state": "disconnected"}},
+        )
+        VM.require_gateway_shared_disconnected(
+            VM.NAMES[1], {"net0": {"state": "connected"}},
+        )
+        for hardware in ({}, {"net0": {}}, {"net0": {"state": "connected"}}):
+            with self.assertRaisesRegex(
+                    VM.MaintenanceError,
+                    "vm_network_backend_gateway_shared_not_disconnected"):
+                VM.require_gateway_shared_disconnected(VM.NAMES[0], hardware)
 
     def test_vm_network_macs_are_exact_and_device_bound(self):
         with mock.patch.object(VM, "set_vm") as set_vm:

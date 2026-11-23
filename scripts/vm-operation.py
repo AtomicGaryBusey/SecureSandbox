@@ -20,7 +20,10 @@ LEGACY_RESOURCE = "SecureSandbox quarantined VM data preservation"
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("create", "reprovision", "preserve-legacy"))
+    parser.add_argument(
+        "operation",
+        choices=("create", "reprovision", "migrate-network-backend", "preserve-legacy"),
+    )
     parser.add_argument("--generation")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--requesting-agent", default=os.environ.get("SECURE_SANDBOX_REQUESTING_AGENT"))
@@ -88,8 +91,15 @@ def main() -> int:
             "layout_profile": plan["layout_profile"], "layout": plan["layout"],
             "host_memory_bytes": plan["host_memory_bytes"],
         }
-        default_purpose = ("Create the reviewed SecureSandbox VM set" if args.operation == "create"
-                           else "Reprovision the reviewed SecureSandbox VM set with recoverable quarantine")
+        default_purpose = {
+            "create": "Create the reviewed SecureSandbox VM set",
+            "reprovision": (
+                "Reprovision the reviewed SecureSandbox VM set with recoverable quarantine"
+            ),
+            "migrate-network-backend": (
+                "Migrate the exact stopped SecureSandbox VM adapters to qualified e1000"
+            ),
+        }[args.operation]
         resource = RESOURCE
     purpose = args.purpose or default_purpose
     command = [

@@ -8,8 +8,10 @@ operator-visible authorization broker. The remaining typed operations are:
 - publish the pinned Canonical installer;
 - publish the byte-for-byte reviewed autoinstall derivative;
 - repair protected-store traversal modes after verifying the canonical image;
-- create the exact three-VM SecureSandbox set; and
-- reprovision that set while retaining the originals in ignored quarantine.
+- create the exact three-VM SecureSandbox set;
+- migrate the exact stopped adapter set to the physically qualified backend;
+  and
+- reprovision the VM set while retaining the originals in ignored quarantine.
 
 Read-only verification, installer construction in the user's workspace, and VM
 dry-run planning remain unprivileged. No project workflow invokes a generic
@@ -41,6 +43,7 @@ binds:
 - the exact VM names and current stopped/absent state;
 - the protected installer path and digest;
 - all three verified seed-image digests; and
+- the exact fixed network adapter backend and per-device MAC identities; and
 - the root-owned, non-writable `prlctl` path and digest.
 
 The broker displays those bindings and passes the operation, invoking UID,
@@ -75,6 +78,19 @@ replacement UUIDs whose home and bundle identity still match, restores only
 the recorded original bundles, verifies re-registration, and leaves the journal
 intact on any unknown name/UUID collision. Rollback never deletes a same-named
 VM it did not create.
+
+The adapter-backend migration is a distinct, dry-by-default operation. It
+accepts only the exact three stopped VM identities and exact known topology,
+with every adapter initially `virtio` or at the one durable prefix recorded by
+its own journal. It changes one fixed adapter at a time to `e1000`, performs an
+independent complete-topology readback after every mutation, and fsyncs the
+advanced prefix. A crash after Parallels commits but before journal publication
+can recover only when readback is exactly one step ahead. Any unjournaled
+prefix, non-prefix mixture, identity change, extra adapter, backend drift, or
+running VM fails closed. Planning, entry, and both sides of each mutation also
+require the Parallels GUI, Parallels Mounter, and its XPC mounter to be
+observably absent; Gateway Shared must remain disconnected. The operation never
+boots, unregisters, deletes, quarantines, or moves a VM bundle.
 
 ## Receipts and concurrency
 

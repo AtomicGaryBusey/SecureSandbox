@@ -132,6 +132,15 @@ readbacks reject any other backend. This is grounded in retained disposable-
 Neo three-clone transport evidence rather than inferred from a successful
 `prlctl set` response.
 
+Existing exact stopped VMs use a separate dry-by-default migration plan and
+Touch ID operation. A private mode-0600 journal records the fixed five-adapter
+prefix. Planning and every mutation boundary require the Parallels GUI,
+Parallels Mounter, and its XPC mounter to be observably absent, and Gateway
+Shared must remain disconnected. Each mutation is followed by a complete
+identity/topology readback;
+re-entry accepts only the recorded prefix or exactly one additional committed
+step. The migration never boots, unregisters, moves, or deletes a VM.
+
 Installer availability is also a pre-mutation gate. `reprovision-vms.sh`
 authenticates the signed Canonical manifest and re-hashes the root-private
 installer before unregistering any VM. The pristine Canonical image is not

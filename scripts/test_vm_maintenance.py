@@ -162,11 +162,12 @@ class VmMaintenanceTests(unittest.TestCase):
                   VM, "checked_layout",
                   return_value=(VM.LAYOUTS["neo-8gb"], 8 * 1024**3)),
               mock.patch.object(VM, "trusted_repo", return_value=Path("/repo")),
-              mock.patch.object(VM, "installer_path", return_value=Path("/installer")),
+              mock.patch.object(
+                  VM, "installer_path", return_value=Path("/installer")) as installer,
               mock.patch.object(VM, "seed_hashes", return_value={
                   "gateway": "a" * 64, "research": "b" * 64,
                   "target": "c" * 64,
-              }),
+              }) as seeds,
               mock.patch.object(VM, "private_network_config",
                                 return_value=self.NETWORKS),
               mock.patch.object(VM, "pending_transaction", return_value=None),
@@ -183,6 +184,11 @@ class VmMaintenanceTests(unittest.TestCase):
             "from": "virtio", "to": "e1000",
             "steps": list(VM.NETWORK_MIGRATION_STEPS),
         })
+        installer.assert_not_called()
+        seeds.assert_not_called()
+        self.assertNotIn("installer_path", plan)
+        self.assertNotIn("installer_sha256", plan)
+        self.assertNotIn("seed_sha256", plan)
         self.assertRegex(plan["plan_sha256"], r"^[0-9a-f]{64}$")
         with mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3):
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):

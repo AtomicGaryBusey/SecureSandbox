@@ -92,6 +92,12 @@ require the Parallels GUI, Parallels Mounter, and its XPC mounter to be
 observably absent; Gateway Shared must remain disconnected. The operation never
 boots, unregisters, deletes, quarantines, or moves a VM bundle.
 
+Unlike create and reprovision, adapter migration neither reads nor attaches an
+installer or seed image. Its plan and authorization schema therefore omit those
+unrelated media authorities and bind only the components the operation can
+actually consume. A rotated protected seed-control key cannot block or silently
+influence this topology-only transaction.
+
 ## Receipts and concurrency
 
 Installer and VM apply requests use the same UUIDv4 nonce, three-minute request

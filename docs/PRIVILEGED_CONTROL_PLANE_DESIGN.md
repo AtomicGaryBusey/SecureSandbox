@@ -140,6 +140,8 @@ Shared must remain disconnected. Each mutation is followed by a complete
 identity/topology readback;
 re-entry accepts only the recorded prefix or exactly one additional committed
 step. The migration never boots, unregisters, moves, or deletes a VM.
+Because it never reads or attaches installation media, its authorization plan
+does not import create/reprovision's installer and seed bindings.
 
 Installer availability is also a pre-mutation gate. `reprovision-vms.sh`
 authenticates the signed Canonical manifest and re-hashes the root-private

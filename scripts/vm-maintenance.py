@@ -1056,8 +1056,11 @@ def build_plan(repo_value: str, operation: str, uid: int,
         if (vms_directory.is_symlink() or not stat.S_ISDIR(info.st_mode)
                 or info.st_uid != uid):
             raise MaintenanceError("vm_directory_untrusted")
-    installer = installer_path(repo)
-    seeds = seed_hashes(repo)
+    installer: Path | None = None
+    seeds: dict[str, str] | None = None
+    if operation in {"create", "reprovision"}:
+        installer = installer_path(repo)
+        seeds = seed_hashes(repo)
     networks = private_network_config()
     transaction = pending_transaction(repo, uid)
     backend_transaction = pending_backend_transaction(repo, uid)
@@ -1102,12 +1105,18 @@ def build_plan(repo_value: str, operation: str, uid: int,
         "schema": SCHEMA, "operation": operation, "invoking_uid": uid,
         "layout_profile": layout_profile, "layout": layout,
         "host_memory_bytes": host_memory,
-        "repo": str(repo), "installer_path": str(installer),
-        "installer_sha256": INSTALLER_SHA256, "prlctl_path": str(PRLCTL),
-        "prlctl_sha256": prlctl_hash(), "seed_sha256": seeds, "vms": vms,
+        "repo": str(repo), "prlctl_path": str(PRLCTL),
+        "prlctl_sha256": prlctl_hash(), "vms": vms,
         "network_config": networks, "network_macs": NETWORK_MACS,
         "network_adapter_type": NETWORK_ADAPTER_TYPE,
     }
+    if operation in {"create", "reprovision"}:
+        assert installer is not None and seeds is not None
+        plan.update({
+            "installer_path": str(installer),
+            "installer_sha256": INSTALLER_SHA256,
+            "seed_sha256": seeds,
+        })
     if operation == "migrate-network-backend":
         plan["network_backend_transition"] = {
             "from": "virtio", "to": NETWORK_ADAPTER_TYPE,
@@ -1687,27 +1696,39 @@ def main() -> int:
             print(json.dumps(build_plan(args.repo, operation, args.invoking_uid,
                                         args.layout_profile), sort_keys=True))
             return 0
-        expected_components = {
+        expected_components: dict[str, Any] = {
             "prlctl_sha256": args.expected_prlctl_sha256,
-            "installer_sha256": args.expected_installer_sha256,
-            "seed_sha256": {
-                "gateway": args.expected_seed_gateway_sha256,
-                "research": args.expected_seed_research_sha256,
-                "target": args.expected_seed_target_sha256,
-            },
             "layout_profile": args.expected_layout_profile,
             "host_memory_bytes": args.expected_host_memory_bytes,
         }
+        required_bindings = [
+            args.expected_prlctl_sha256, args.expected_network_config_sha256,
+            args.expected_network_macs_sha256, args.expected_layout_profile,
+            args.expected_layout_sha256, args.expected_host_memory_bytes,
+        ]
+        media_bindings = (
+            args.expected_installer_sha256,
+            args.expected_seed_gateway_sha256,
+            args.expected_seed_research_sha256,
+            args.expected_seed_target_sha256,
+        )
+        if operation == "migrate-network-backend":
+            if any(value is not None for value in media_bindings):
+                raise MaintenanceError("vm_migration_media_bindings_forbidden")
+        else:
+            required_bindings.extend([
+                *media_bindings,
+            ])
+            expected_components.update({
+                "installer_sha256": args.expected_installer_sha256,
+                "seed_sha256": {
+                    "gateway": args.expected_seed_gateway_sha256,
+                    "research": args.expected_seed_research_sha256,
+                    "target": args.expected_seed_target_sha256,
+                },
+            })
         if (not args.expected_plan_sha256
-                or any(value is None for value in (
-                    args.expected_prlctl_sha256, args.expected_network_config_sha256,
-                    args.expected_network_macs_sha256,
-                    args.expected_installer_sha256,
-                    args.expected_seed_gateway_sha256, args.expected_seed_research_sha256,
-                    args.expected_seed_target_sha256,
-                    args.expected_layout_profile, args.expected_layout_sha256,
-                    args.expected_host_memory_bytes,
-                ))):
+                or any(value is None for value in required_bindings)):
             raise MaintenanceError("expected_plan_bindings_required")
         uid = args.invoking_uid
         drop_privileges(uid)
@@ -1723,8 +1744,8 @@ def main() -> int:
             raise MaintenanceError("vm_layout_changed")
         validate_plan_bindings(plan, args.expected_plan_sha256, expected_components)
         repo = Path(plan["repo"])
-        installer = Path(plan["installer_path"])
         if operation == "create":
+            installer = Path(plan["installer_path"])
             create_all(repo, installer, layout=plan["layout"],
                        expected_networks=plan_network_config)
             result = {"status": "created", "plan_sha256": plan["plan_sha256"]}
@@ -1738,6 +1759,7 @@ def main() -> int:
                 "network_adapter_type": NETWORK_ADAPTER_TYPE,
             }
         else:
+            installer = Path(plan["installer_path"])
             quarantine, recovered = reprovision(repo, installer, plan["vms"], plan["plan_sha256"], uid,
                                                 plan["layout"], plan_network_config)
             result = {"status": "recovered" if recovered else "reprovisioned",

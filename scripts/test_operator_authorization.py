@@ -2986,22 +2986,36 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn("net0:001C42BC794F", details)
         self.assertIn(parameters["network_macs_sha256"], details)
         self.assertIn("VM network adapter backend: e1000", details)
+        migration_parameters = {
+            name: value for name, value in parameters.items()
+            if name not in {"installer_sha256", "seed_sha256"}
+        }
         AUTH.validate_parameters(
-            "vm-migrate-network-backend", parameters, self.home,
+            "vm-migrate-network-backend", migration_parameters, self.home,
         )
+        with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "operation_parameters_invalid"):
+            AUTH.validate_parameters(
+                "vm-migrate-network-backend", parameters, self.home,
+            )
         migration = {
             "operation": "vm-migrate-network-backend",
-            "parameters": parameters,
+            "parameters": migration_parameters,
             "invoking_uid": self.uid,
         }
         migration_command = AUTH.operation_command(
             migration, Path("/protected/release"),
         )
         self.assertEqual(migration_command[3], "migrate-network-backend")
+        self.assertNotIn("--expected-installer-sha256", migration_command)
+        self.assertNotIn("--expected-seed-gateway-sha256", migration_command)
+        migration_details = "\n".join(AUTH.operation_details(migration))
         self.assertIn(
             "VM network adapter backend: e1000",
-            "\n".join(AUTH.operation_details(migration)),
+            migration_details,
         )
+        self.assertNotIn("Installer SHA-256:", migration_details)
+        self.assertNotIn("Seed SHA-256 values:", migration_details)
 
     def test_legacy_preservation_request_is_strictly_typed_and_forwarded(self):
         uuid_value = "{00000000-0000-4000-8000-000000000001}"

@@ -1343,3 +1343,12 @@ adapter at a time, independently re-reads the full topology after each step,
 and never boots, unregisters, moves, or deletes a VM.
 Physical migration and post-migration boundary replay remain pending;
 bootstrap must not resume against the old virtio bundles.
+
+The first prompt-free production migration plan rejected before mutation on a
+protected seed-control-key mismatch. This exposed an irrelevant inherited
+dependency: the topology-only operation had reused create/reprovision's media
+schema even though it never reads or attaches an installer or seed. Source now
+omits those media authorities only for backend migration while retaining the
+exact VM, layout, Parallels binary, network, MAC, process, disconnected-uplink,
+and transaction bindings. Physical replay remains pending publication and
+installation of that correction.

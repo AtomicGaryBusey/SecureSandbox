@@ -73,7 +73,7 @@ def main() -> int:
         default_purpose = "Preserve legacy VM data and import verified GLM continuity state"
         resource = LEGACY_RESOURCE
     else:
-        parameters = {
+        parameters: dict[str, object] = {
             "repo": str(repo), "plan_sha256": plan["plan_sha256"],
             "prlctl_sha256": plan["prlctl_sha256"],
             "network_config": plan["network_config"],
@@ -87,10 +87,14 @@ def main() -> int:
                  + "\n").encode()
             ).hexdigest(),
             "network_adapter_type": plan["network_adapter_type"],
-            "installer_sha256": plan["installer_sha256"], "seed_sha256": plan["seed_sha256"],
             "layout_profile": plan["layout_profile"], "layout": plan["layout"],
             "host_memory_bytes": plan["host_memory_bytes"],
         }
+        if args.operation != "migrate-network-backend":
+            parameters.update({
+                "installer_sha256": plan["installer_sha256"],
+                "seed_sha256": plan["seed_sha256"],
+            })
         default_purpose = {
             "create": "Create the reviewed SecureSandbox VM set",
             "reprovision": (

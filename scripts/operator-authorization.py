@@ -2225,11 +2225,15 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError("installer_expected_sha256_invalid")
         return
     if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
-        if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
-                               "network_config", "network_config_sha256", "network_macs",
-                               "network_macs_sha256", "network_adapter_type",
-                               "layout_profile", "layout",
-                               "host_memory_bytes"}:
+        common = {
+            "repo", "plan_sha256", "prlctl_sha256", "network_config",
+            "network_config_sha256", "network_macs", "network_macs_sha256",
+            "network_adapter_type", "layout_profile", "layout",
+            "host_memory_bytes",
+        }
+        media = {"installer_sha256", "seed_sha256"}
+        expected = common if operation == "vm-migrate-network-backend" else common | media
+        if set(parameters) != expected:
             raise AuthorizationError("operation_parameters_invalid")
         repo = Path(parameters["repo"])
         try:
@@ -2303,12 +2307,13 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError("vm_network_identity_invalid")
         if parameters["network_adapter_type"] != "e1000":
             raise AuthorizationError("vm_network_adapter_type_invalid")
-        if parameters["installer_sha256"] != AUTOINSTALL_INSTALLER_SHA256:
-            raise AuthorizationError("installer_expected_sha256_invalid")
-        seeds = parameters["seed_sha256"]
-        if (not isinstance(seeds, dict) or set(seeds) != {"gateway", "research", "target"}
-                or any(not isinstance(value, str) or not SHA256.fullmatch(value) for value in seeds.values())):
-            raise AuthorizationError("seed_sha256_invalid")
+        if operation != "vm-migrate-network-backend":
+            if parameters["installer_sha256"] != AUTOINSTALL_INSTALLER_SHA256:
+                raise AuthorizationError("installer_expected_sha256_invalid")
+            seeds = parameters["seed_sha256"]
+            if (not isinstance(seeds, dict) or set(seeds) != {"gateway", "research", "target"}
+                    or any(not isinstance(value, str) or not SHA256.fullmatch(value) for value in seeds.values())):
+                raise AuthorizationError("seed_sha256_invalid")
         profile = parameters["layout_profile"]
         layouts = {
             "standard": {"gateway": (1, 2048, 12288), "research": (4, 6144, 51200), "target": (2, 4096, 40960)},
@@ -3526,7 +3531,7 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--release-directory", parameters["release_directory"], action, "--path-only",
         ]
     if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
-        return [
+        command = [
             "/usr/bin/python3", "-I", str(release / "vm_maintenance"),
             operation.removeprefix("vm-"), "--repo", parameters["repo"],
             "--invoking-uid", str(value["invoking_uid"]),
@@ -3534,15 +3539,19 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--expected-prlctl-sha256", parameters["prlctl_sha256"],
             "--expected-network-config-sha256", parameters["network_config_sha256"],
             "--expected-network-macs-sha256", parameters["network_macs_sha256"],
-            "--expected-installer-sha256", parameters["installer_sha256"],
-            "--expected-seed-gateway-sha256", parameters["seed_sha256"]["gateway"],
-            "--expected-seed-research-sha256", parameters["seed_sha256"]["research"],
-            "--expected-seed-target-sha256", parameters["seed_sha256"]["target"],
             "--layout-profile", parameters["layout_profile"],
             "--expected-layout-profile", parameters["layout_profile"],
             "--expected-layout-sha256", hashlib.sha256(canonical(parameters["layout"])).hexdigest(),
             "--expected-host-memory-bytes", str(parameters["host_memory_bytes"]),
         ]
+        if operation != "vm-migrate-network-backend":
+            command.extend([
+                "--expected-installer-sha256", parameters["installer_sha256"],
+                "--expected-seed-gateway-sha256", parameters["seed_sha256"]["gateway"],
+                "--expected-seed-research-sha256", parameters["seed_sha256"]["research"],
+                "--expected-seed-target-sha256", parameters["seed_sha256"]["target"],
+            ])
+        return command
     if operation == "vm-preserve-legacy":
         return [
             "/usr/bin/python3", "-I", str(release / "vm_maintenance"),
@@ -10531,7 +10540,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
                 f"Release directory: {parameters['release_directory']}",
                 f"Installer SHA-256: {parameters['expected_sha256']}"]
     if operation in {"vm-create", "vm-reprovision", "vm-migrate-network-backend"}:
-        return [f"Repository: {parameters['repo']}",
+        details = [f"Repository: {parameters['repo']}",
                 f"VM set: {OPERATION_RESOURCES[operation]}",
                 f"VM layout: {parameters['layout_profile']} ({parameters['host_memory_bytes']} host bytes)",
                 "VM resources: " + ", ".join(
@@ -10562,11 +10571,16 @@ def operation_details(value: dict[str, Any]) -> list[str]:
                     )
                 ),
                 f"VM network identities SHA-256: {parameters['network_macs_sha256']}",
-                f"VM network adapter backend: {parameters['network_adapter_type']}",
+                f"VM network adapter backend: {parameters['network_adapter_type']}"]
+        if operation != "vm-migrate-network-backend":
+            details.extend([
                 f"Installer SHA-256: {parameters['installer_sha256']}",
                 "Seed SHA-256 values: " + ", ".join(
-                    f"{role}={parameters['seed_sha256'][role]}" for role in ("gateway", "research", "target")
-                )]
+                    f"{role}={parameters['seed_sha256'][role]}"
+                    for role in ("gateway", "research", "target")
+                ),
+            ])
+        return details
     if operation == "vm-preserve-legacy":
         tool_set_sha256 = hashlib.sha256(canonical(parameters["tools"])).hexdigest()
         return [

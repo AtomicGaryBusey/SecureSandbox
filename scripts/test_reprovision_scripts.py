@@ -114,6 +114,7 @@ class ReprovisionScriptTests(unittest.TestCase):
         self.assertIn("BACKEND_TRANSACTION_SCHEMA", maintenance)
         self.assertIn("vm_network_backend_progress_unjournaled", maintenance)
         self.assertIn("vm_network_backend_readback_invalid", maintenance)
+        self.assertIn("vm_migration_media_bindings_forbidden", maintenance)
         self.assertNotIn("prlctl delete", wrapper)
 
     def test_dependency_provisioning_normalizes_stopped_guests_before_lifecycle_probe(self):

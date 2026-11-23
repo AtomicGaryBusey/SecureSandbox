@@ -121,6 +121,15 @@ when necessary, a verified Gateway uplink disconnect. This permits an exact
 all-stopped/disconnected shutdown receipt on a freshly rebooted host without
 granting missing credentials any authority over a running guest.
 
+Physical validation on the disposable Neo installed exact protected release
+`b3bddb3...` and exercised this branch with both `op-agents` and the checkout
+key-converter absent. The controller returned a verified complete stop record
+with all three VMs stopped and Gateway `net0` disconnected; a separate direct
+Parallels inventory agreed exactly. The retained canonical record is bound to
+the installed root-owned release and clean source commit. This validation is
+limited to already-stopped recovery and does not waive guest authentication for
+any running-state transition.
+
 The provisioning and control agents use separate fixed Unix sockets. Each
 socket must expose exactly one identity whose SHA-256 fingerprint matches its
 regular, non-symlink public-key file. Missing, stale, or multi-key agents are
@@ -264,9 +273,10 @@ Automated tests must prove:
 10. the real stack survives controlled stop, repeated stopped-state recovery,
    controlled start, repeated running-state recovery, and the complete live
    boundary gate with the GUI closed.
-11. status never restores credentials, start and stop gate every mutation on
-    identity readiness, missing agents are restored and rechecked, and a failed
-    restore produces no Parallels action.
+11. status never restores credentials; start and any stop with a running guest
+    gate every mutation on identity readiness; an exact all-stopped stop can
+    verify the independently read-back boundary without restoring identities;
+    and a failed required restore produces no Parallels action.
 12. the explicit stopped-service bootstrap starts only Gateway from exact
     all-stopped state, accepts only the exact Gateway-only recovery state,
     rejects GUI PID change and post-termination service loss, and delegates through the

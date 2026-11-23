@@ -1259,10 +1259,13 @@ in ignored local records, not in this file.
   `CVmGenericNetworkAdapter::getLinkRateLimit()`. Read-only Research-disk
   forensics prove the exact root-owned netplan and both generated networkd
   matches are present while Parallels diagnostics show idle virtio queues.
-  Keep the empty campaign and every retained log unchanged. Publish and install
-  the conditional stop-identity repair, obtain a verified all-stopped receipt
-  without guest credentials, then qualify a reversible alternate Parallels NIC
-  backend or a vendor-fixed Parallels build on a disposable clone before
+  Keep the empty campaign and every retained log unchanged. Conditional
+  stop-identity repair `b3bddb3...` is published on both authorized remotes,
+  installed as an exact root-owned protected release, and physically verified
+  on the Neo without `op-agents` or the key converter. Its retained canonical
+  record and independent Parallels readback prove all three VMs stopped and
+  Gateway `net0` disconnected. Next qualify a reversible alternate Parallels
+  NIC backend or a vendor-fixed Parallels build on a disposable clone before
   resuming bootstrap. Do not weaken the fixed IPv4 or protected-control gates.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor

@@ -1292,6 +1292,21 @@ identities before its first inventory. Source now moves that readiness gate
 under the lifecycle lock and invokes it only when at least one guest is
 running. Focused tests prove an all-stopped/disconnected stack yields a
 verified receipt without an identity source, while a running stack with failed
-identity readiness performs no guest or adapter mutation. Campaign
-`ae9227fd...` remains live and empty pending publication, protected install,
-and physical replay after the Parallels transport condition is resolved.
+identity readiness performs no guest or adapter mutation.
+
+The repair was published as `b3bddb3...` to both authorized remotes, installed
+on the Neo as the root-owned mode-0555 protected release with a mode-0444
+manifest, and physically replayed from the exact clean `public-release`
+checkout. Both `op-agents` and the checkout's key-converter interpreter were
+absent. With the Parallels GUI and stale Mounter process absent, `labctl stop`
+returned a verified complete record with no action failures, all three guests
+stopped, and Gateway `net0` disconnected. A separate direct `prlctl` inventory
+then reported the same three stopped VMs and disconnected adapter. The
+canonical proof was retained on the Neo as
+`credential-free-stopped-readback-b3bddb3.json` at
+`2026-11-23T02:08:30Z`; its retained private SHA-256 begins `296e82a...`.
+Campaign `ae9227fd...` remains live and empty with zero reservations and zero
+observations. This closes the credential-free stopped-readback regression; it
+does not resolve the independent Parallels guest transport failure. Bootstrap
+remains paused pending a reversible alternate NIC-backend qualification or a
+vendor-fixed Parallels build on a disposable clone.

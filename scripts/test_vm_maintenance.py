@@ -69,9 +69,10 @@ class VmMaintenanceTests(unittest.TestCase):
                 ],
             },
             "Hardware": {
-                "net0": {"enabled": True, "type": "shared", "mac": "001C42BC794F"},
+                "net0": {"enabled": True, "type": "shared", "mac": "001C42BC794F",
+                         "card": "e1000"},
                 "net1": {"enabled": True, "type": "host", "iface": "control-net",
-                         "mac": "001C4292EA7F"},
+                         "mac": "001C4292EA7F", "card": "e1000"},
                 "cdrom0": {"enabled": False},
                 "cdrom1": {"enabled": False},
             },
@@ -135,6 +136,7 @@ class VmMaintenanceTests(unittest.TestCase):
             self.assertEqual(first["layout_profile"], "standard")
             self.assertEqual(first["layout"]["research"]["memory_mib"], 6144)
             self.assertEqual(first["network_config"], self.NETWORKS)
+            self.assertEqual(first["network_adapter_type"], "e1000")
 
     def test_neo_layout_is_explicit_and_host_bound(self):
         with mock.patch.object(VM, "host_memory_bytes", return_value=8 * 1024**3):
@@ -342,6 +344,10 @@ class VmMaintenanceTests(unittest.TestCase):
                     **canonical["Hardware"],
                     "net0": {"enabled": True, "type": "shared", "mac": "001C42FFFFFF"},
                 }},
+                "wrong-card": {**canonical, "Hardware": {
+                    **canonical["Hardware"],
+                    "net1": {**canonical["Hardware"]["net1"], "card": "virtio"},
+                }},
                 "extra-nic": {**canonical, "Hardware": {
                     **canonical["Hardware"],
                     "net2": {"enabled": True, "type": "shared", "mac": "001C42000000"},
@@ -529,6 +535,36 @@ class VmMaintenanceTests(unittest.TestCase):
                     expected_networks=self.NETWORKS,
                 )
         cleanup.assert_not_called()
+
+    def test_created_network_adapters_use_qualified_e1000_backend(self):
+        with (tempfile.TemporaryDirectory() as temporary,
+              mock.patch.object(VM, "create_one",
+                                side_effect=("gateway-id", "research-id", "target-id")),
+              mock.patch.object(VM, "set_vm") as set_vm,
+              mock.patch.object(VM, "set_vm_network_macs"),
+              mock.patch.object(VM, "verify_created"),
+              mock.patch.object(VM, "protected_seed_paths", return_value={
+                  "gateway": Path("/seed/gateway"),
+                  "research": Path("/seed/research"),
+                  "target": Path("/seed/target"),
+              })):
+            VM.create_all(Path(temporary), Path("/installer"))
+        network_calls = [
+            call for call in set_vm.call_args_list
+            if "--adapter-type" in call.args
+        ]
+        self.assertEqual(network_calls, [
+            mock.call("gateway-id", "--device-set", "net0",
+                      "--adapter-type", "e1000"),
+            mock.call("gateway-id", "--device-add", "net", "--type", "host-only",
+                      "--iface", "control-net", "--adapter-type", "e1000"),
+            mock.call("research-id", "--device-add", "net", "--type", "host-only",
+                      "--iface", "control-net", "--adapter-type", "e1000"),
+            mock.call("research-id", "--device-add", "net", "--type", "host-only",
+                      "--iface", "lab-net", "--adapter-type", "e1000"),
+            mock.call("target-id", "--device-add", "net", "--type", "host-only",
+                      "--iface", "lab-net", "--adapter-type", "e1000"),
+        ])
 
     def test_vm_network_macs_are_exact_and_device_bound(self):
         with mock.patch.object(VM, "set_vm") as set_vm:

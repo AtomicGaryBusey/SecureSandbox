@@ -1,7 +1,8 @@
 # MacBook Neo 8 GB VM layout qualification
 
-Status: **source candidate implemented, not physically qualified or admitted**. The existing
-three-VM allocation is 2 GiB Gateway, 6 GiB Research, and 4 GiB Target.
+Status: **source candidate implemented; network backend physically qualified,
+full layout and campaign not yet admitted**. The existing three-VM allocation
+is 2 GiB Gateway, 6 GiB Research, and 4 GiB Target.
 `scripts/vm-maintenance.py` hard-codes it, and the resource discussion in
 `DESIGN.md` assumes a 24 GB MacBook Air. Do not provision that layout on an
 8 GB Neo or treat this candidate as an installed release.
@@ -14,6 +15,14 @@ independent readback. No guest may be merged into the host or another guest.
 Do not enable dynamic memory or host integration to compensate for the smaller
 machine. The candidate changes only CPU and static RAM allocations; disks and
 containment policy remain as designed.
+
+The Neo's Parallels 27.1.0 installation failed to transport fixed IPv4 over
+`virtio` despite correct guest netplan, carrier, and networkd readback. A
+stopped, reversible three-clone experiment preserved every network and MAC
+binding and proved the complete private path with `e1000`. Source therefore
+binds `e1000` into the maintenance plan, Touch ID display, VM creation, proxy,
+temporary dependency provisioning, and boundary verification. This is a
+backend repair, not a reduction in the three-VM boundary.
 
 ## Candidate for measurement
 
@@ -45,10 +54,10 @@ Creation independently reads back CPU, RAM, and the sole virtual disk's size,
 type, and bundle location as well as the existing isolation settings.
 Reprovision refuses a layout transition; an explicit
 reviewed migration path is still required if that ever becomes necessary.
-This source is committed on the local `neo-8gb-vm-layout` branch. The full
-exact-candidate check has not passed on this Mac, and the candidate has not
-passed physical Parallels 27 readback. A protected release must be built from
-the reviewed commit before any qualified VM creation.
+The full exact-candidate and 91-case acceptance campaign have not passed on
+this Mac. A protected release must be built from the reviewed commit and the
+stopped production VMs must pass the separately reviewed exact-identity e1000
+migration before bootstrap resumes.
 
 ## Physical qualification order
 

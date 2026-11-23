@@ -41,13 +41,13 @@ payloads=("$root_dir/scripts/install-research-auditd.sh" "$root_dir/scripts/inst
 expected_adapters_for_role() {
   case "$1" in
     SecureSandbox-Gateway)
-      print -r -- '[{"key":"net0","enabled":true,"type":"shared","iface":null,"card":"virtio"},{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"virtio"}]'
+      print -r -- '[{"key":"net0","enabled":true,"type":"shared","iface":null,"card":"e1000"},{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"e1000"}]'
       ;;
     SecureSandbox-Research)
-      print -r -- '[{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"virtio"},{"key":"net2","enabled":true,"type":"host","iface":"lab-net","card":"virtio"}]'
+      print -r -- '[{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"e1000"},{"key":"net2","enabled":true,"type":"host","iface":"lab-net","card":"e1000"}]'
       ;;
     SecureSandbox-Target)
-      print -r -- '[{"key":"net1","enabled":true,"type":"host","iface":"lab-net","card":"virtio"}]'
+      print -r -- '[{"key":"net1","enabled":true,"type":"host","iface":"lab-net","card":"e1000"}]'
       ;;
     *) return 1 ;;
   esac
@@ -106,7 +106,7 @@ verify_transition_policy() {
       and $new[0].value.enabled == true
       and $new[0].value.type == "shared"
       and ($new[0].value.iface // null) == null
-      and $new[0].value.card == "virtio"
+      and $new[0].value.card == "e1000"
       and (if $expected_net_key == "" then true
            else $new[0].key == $expected_net_key and $new[0].value.mac == $expected_mac end))
   ' >/dev/null
@@ -371,7 +371,7 @@ provision_one() {
     '([.[0].Hardware | to_entries[] | select(.key | startswith("net"))] | sort_by(.key)) == $adapters' >/dev/null \
     || { print -u2 "vm_topology_changed:$name"; return 1; }
   write_adapter_transaction adding "$name" "$vm_id" "$state" "$before_adapters"
-  "$prlctl" set "$vm_id" --device-add net --type shared --adapter-type virtio
+  "$prlctl" set "$vm_id" --device-add net --type shared --adapter-type e1000
   "$prlctl" set "$vm_id" --auto-share-gamepad off
   after="$($prlctl list -a -i -j "$vm_id")"
   verify_transition_policy "$after" "$name" "$vm_id" "$before_adapters" \

@@ -2224,7 +2224,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
     if operation in {"vm-create", "vm-reprovision"}:
         if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
                                "network_config", "network_config_sha256", "network_macs",
-                               "network_macs_sha256", "layout_profile", "layout",
+                               "network_macs_sha256", "network_adapter_type",
+                               "layout_profile", "layout",
                                "host_memory_bytes"}:
             raise AuthorizationError("operation_parameters_invalid")
         repo = Path(parameters["repo"])
@@ -2297,6 +2298,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 or hashlib.sha256(canonical(macs)).hexdigest()
                     != parameters["network_macs_sha256"]):
             raise AuthorizationError("vm_network_identity_invalid")
+        if parameters["network_adapter_type"] != "e1000":
+            raise AuthorizationError("vm_network_adapter_type_invalid")
         if parameters["installer_sha256"] != AUTOINSTALL_INSTALLER_SHA256:
             raise AuthorizationError("installer_expected_sha256_invalid")
         seeds = parameters["seed_sha256"]
@@ -10555,6 +10558,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
                     )
                 ),
                 f"VM network identities SHA-256: {parameters['network_macs_sha256']}",
+                f"VM network adapter backend: {parameters['network_adapter_type']}",
                 f"Installer SHA-256: {parameters['installer_sha256']}",
                 "Seed SHA-256 values: " + ", ".join(
                     f"{role}={parameters['seed_sha256'][role]}" for role in ("gateway", "research", "target")

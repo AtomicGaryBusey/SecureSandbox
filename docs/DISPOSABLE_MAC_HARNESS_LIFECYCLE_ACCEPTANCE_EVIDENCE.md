@@ -1310,3 +1310,31 @@ observations. This closes the credential-free stopped-readback regression; it
 does not resolve the independent Parallels guest transport failure. Bootstrap
 remains paused pending a reversible alternate NIC-backend qualification or a
 vendor-fixed Parallels build on a disposable clone.
+
+## Parallels e1000 disposable-clone qualification checkpoint
+
+The reversible alternate-backend experiment succeeded without mutating any of
+the three production VM bundles. Stopped clones of Gateway, Research, and
+Target retained the exact private-network names and MAC identities while every
+private adapter changed from `virtio` to `e1000`; the Gateway clone's inherited
+Shared adapter remained disabled and disconnected. All three clones booted.
+Strict host-key checking then proved Gateway at `172.30.10.1`, Research at both
+`172.30.10.2` and `172.30.20.1`, and Target at `172.30.20.2`. Gateway reached
+Research over ICMP and SSH, Research reached Target over ICMP and SSH, and
+Target returned three of three packets to Research with carrier present.
+
+Each clone was then stopped through ACPI and independently read back as
+stopped. The three production originals remained stopped throughout, and
+their configuration hashes exactly matched their pre-experiment values. No
+clone was deleted. Campaign `ae9227fd...` still has no observation entries, no
+raw files, and no nonempty raw directory. The canonical proof and its exact
+SHA-256 sidecar are retained in the Neo's private acceptance handoff. This
+qualifies the e1000 private transport repair, not the campaign itself.
+
+Source now makes `e1000` an explicit plan and authorization fact, creates the
+Gateway Shared adapter and every private adapter with that backend, rejects
+backend drift during post-create, proxy, provisioning, recovery, and boundary
+readback, and uses the same backend for temporary provisioning adapters. The
+production VM migration remains a separate stopped-only, exact-identity,
+operator-authorized action; bootstrap must not resume against the old virtio
+bundles.

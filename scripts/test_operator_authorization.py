@@ -2913,6 +2913,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             },
             "installer_sha256": AUTH.AUTOINSTALL_INSTALLER_SHA256,
             "seed_sha256": {"gateway": "c" * 64, "research": "d" * 64, "target": "e" * 64},
+            "network_adapter_type": "e1000",
             "layout_profile": "neo-8gb",
             "layout": {"gateway": {"cpus": 1, "memory_mib": 1536, "disk_mib": 12288},
                        "research": {"cpus": 2, "memory_mib": 2560, "disk_mib": 51200},
@@ -2952,6 +2953,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 "SecureSandbox-Target": {"net1": "001C4249D2AB"},
             }},
             {**parameters, "network_macs_sha256": "f" * 64},
+            {**parameters, "network_adapter_type": "virtio"},
             {**parameters, "layout_profile": "standard"},
             {**parameters, "layout": {**parameters["layout"], "research": {
                 **parameters["layout"]["research"], "memory_mib": 6144}}},
@@ -2983,6 +2985,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn(parameters["network_config_sha256"], details)
         self.assertIn("net0:001C42BC794F", details)
         self.assertIn(parameters["network_macs_sha256"], details)
+        self.assertIn("VM network adapter backend: e1000", details)
 
     def test_legacy_preservation_request_is_strictly_typed_and_forwarded(self):
         uuid_value = "{00000000-0000-4000-8000-000000000001}"

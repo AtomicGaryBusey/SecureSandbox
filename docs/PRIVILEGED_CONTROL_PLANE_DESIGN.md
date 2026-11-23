@@ -125,6 +125,13 @@ The stopped pre-v1 VMs are not silently upgraded and must not be used as evidenc
 
 `reprovision-vms.sh` makes this replacement explicit and recoverable. Its default mode only verifies and prints the plan. `--apply` accepts only the three stopped VMs at their exact expected bundle paths, unregisters and moves those bundles into ignored local quarantine without deleting them, then invokes all-or-nothing fresh creation with the verified installer and role seeds. If fresh creation fails, newly created VMs are removed and the original bundles are moved back and re-registered. A successful run retains the originals until post-acceptance retirement is separately authorized.
 
+The network adapter backend is also a plan and authorization fact. Fresh VMs
+use `e1000` for the Gateway Shared adapter and every private adapter; exact
+post-create, Gateway-proxy, temporary-provisioning, recovery, and boundary
+readbacks reject any other backend. This is grounded in retained disposable-
+Neo three-clone transport evidence rather than inferred from a successful
+`prlctl set` response.
+
 Installer availability is also a pre-mutation gate. `reprovision-vms.sh`
 authenticates the signed Canonical manifest and re-hashes the root-private
 installer before unregistering any VM. The pristine Canonical image is not

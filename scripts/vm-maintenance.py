@@ -43,6 +43,11 @@ NETWORK_MACS = {
         "net1": "001C4249D2AA",
     },
 }
+# Parallels Desktop 27.1.0 on Apple silicon can leave virtio-net queues idle
+# while the guest reports carrier. A disposable-clone qualification on the
+# enrolled MacBook Neo proved the complete private path with e1000 adapters.
+# Bind the backend into planning, creation, and every security readback.
+NETWORK_ADAPTER_TYPE = "e1000"
 LAYOUTS = {
     "standard": {
         "gateway": {"cpus": 1, "memory_mib": 2048, "disk_mib": 12288},
@@ -657,6 +662,7 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
             "type": device.get("type", ""),
             "iface": device.get("iface") or "",
             "mac": str(device.get("mac", "")).upper(),
+            "card": device.get("card", ""),
         }
         for key, device in hardware.items()
         if (key.startswith("net") and isinstance(device, dict)
@@ -664,9 +670,9 @@ def gateway_proxy_endpoint(uid: int, *, repo: Path | None = None,
     ], key=lambda item: item["key"])
     expected_networks = [
         {"key": "net0", "type": "shared", "iface": "",
-         "mac": NETWORK_MACS[NAMES[0]]["net0"]},
+         "mac": NETWORK_MACS[NAMES[0]]["net0"], "card": NETWORK_ADAPTER_TYPE},
         {"key": "net1", "type": "host", "iface": "control-net",
-         "mac": NETWORK_MACS[NAMES[0]]["net1"]},
+         "mac": NETWORK_MACS[NAMES[0]]["net1"], "card": NETWORK_ADAPTER_TYPE},
     ]
     if (value.get("Name") != NAMES[0] or value.get("State") != "running"
             or not VM_UUID.fullmatch(identifier)
@@ -860,6 +866,7 @@ def build_plan(repo_value: str, operation: str, uid: int,
         "installer_sha256": INSTALLER_SHA256, "prlctl_path": str(PRLCTL),
         "prlctl_sha256": prlctl_hash(), "seed_sha256": seeds, "vms": vms,
         "network_config": networks, "network_macs": NETWORK_MACS,
+        "network_adapter_type": NETWORK_ADAPTER_TYPE,
     }
     if transaction is not None:
         plan["recovery_transaction_sha256"] = hashlib.sha256(canonical(transaction)).hexdigest()
@@ -995,20 +1002,21 @@ def create_all(repo: Path, installer: Path,
         gateway = create_one(repo, NAMES[0], layout["gateway"]["cpus"], layout["gateway"]["memory_mib"],
                              layout["gateway"]["disk_mib"], seeds["gateway"], installer, created, on_created)
         revalidate_networks()
-        set_vm(gateway, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
+        set_vm(gateway, "--device-set", "net0", "--adapter-type", NETWORK_ADAPTER_TYPE)
+        set_vm(gateway, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", NETWORK_ADAPTER_TYPE)
         set_vm_network_macs(gateway, NAMES[0])
         research = create_one(repo, NAMES[1], layout["research"]["cpus"], layout["research"]["memory_mib"],
                               layout["research"]["disk_mib"], seeds["research"], installer, created, on_created)
         revalidate_networks()
-        set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
+        set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", NETWORK_ADAPTER_TYPE)
         revalidate_networks()
-        set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
+        set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", NETWORK_ADAPTER_TYPE)
         set_vm(research, "--device-del", "net0")
         set_vm_network_macs(research, NAMES[1])
         target = create_one(repo, NAMES[2], layout["target"]["cpus"], layout["target"]["memory_mib"],
                             layout["target"]["disk_mib"], seeds["target"], installer, created, on_created)
         revalidate_networks()
-        set_vm(target, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
+        set_vm(target, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", NETWORK_ADAPTER_TYPE)
         set_vm(target, "--device-del", "net0")
         set_vm_network_macs(target, NAMES[2])
         for identifier in (gateway, research, target):
@@ -1036,15 +1044,15 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
                    layout: dict[str, dict[str, int]]) -> None:
     expected_networks = {
         NAMES[0]: [
-            {"key": "net0", "type": "shared", "iface": "", "mac": NETWORK_MACS[NAMES[0]]["net0"]},
-            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[0]]["net1"]},
+            {"key": "net0", "type": "shared", "iface": "", "mac": NETWORK_MACS[NAMES[0]]["net0"], "card": NETWORK_ADAPTER_TYPE},
+            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[0]]["net1"], "card": NETWORK_ADAPTER_TYPE},
         ],
         NAMES[1]: [
-            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[1]]["net1"]},
-            {"key": "net2", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[1]]["net2"]},
+            {"key": "net1", "type": "host", "iface": "control-net", "mac": NETWORK_MACS[NAMES[1]]["net1"], "card": NETWORK_ADAPTER_TYPE},
+            {"key": "net2", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[1]]["net2"], "card": NETWORK_ADAPTER_TYPE},
         ],
         NAMES[2]: [
-            {"key": "net1", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[2]]["net1"]},
+            {"key": "net1", "type": "host", "iface": "lab-net", "mac": NETWORK_MACS[NAMES[2]]["net1"], "card": NETWORK_ADAPTER_TYPE},
         ],
     }
     for name, role in zip(NAMES, ROLES):
@@ -1069,6 +1077,7 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
                 "type": device.get("type", ""),
                 "iface": device.get("iface") or "",
                 "mac": str(device.get("mac", "")).upper(),
+                "card": device.get("card", ""),
             }
             for key, device in hardware.items()
             if key.startswith("net") and isinstance(device, dict) and device.get("enabled", True)

@@ -259,11 +259,11 @@ for vm in SecureSandbox-Gateway SecureSandbox-Research SecureSandbox-Target; do
     fail "$vm automatic device sharing disabled"
   fi
   if [[ "$vm" == SecureSandbox-Gateway ]]; then
-    expected_adapters='[{"key":"net0","enabled":true,"type":"shared","iface":null,"card":"virtio"},{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"virtio"}]'
+    expected_adapters='[{"key":"net0","enabled":true,"type":"shared","iface":null,"card":"e1000"},{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"e1000"}]'
   elif [[ "$vm" == SecureSandbox-Research ]]; then
-    expected_adapters='[{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"virtio"},{"key":"net2","enabled":true,"type":"host","iface":"lab-net","card":"virtio"}]'
+    expected_adapters='[{"key":"net1","enabled":true,"type":"host","iface":"control-net","card":"e1000"},{"key":"net2","enabled":true,"type":"host","iface":"lab-net","card":"e1000"}]'
   else
-    expected_adapters='[{"key":"net1","enabled":true,"type":"host","iface":"lab-net","card":"virtio"}]'
+    expected_adapters='[{"key":"net1","enabled":true,"type":"host","iface":"lab-net","card":"e1000"}]'
   fi
   if jq -e --argjson expected "$expected_adapters" '
       ([.[0].Hardware | to_entries[] | select(.key | startswith("net"))

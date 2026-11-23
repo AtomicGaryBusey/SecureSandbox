@@ -1264,9 +1264,13 @@ in ignored local records, not in this file.
   installed as an exact root-owned protected release, and physically verified
   on the Neo without `op-agents` or the key converter. Its retained canonical
   record and independent Parallels readback prove all three VMs stopped and
-  Gateway `net0` disconnected. Next qualify a reversible alternate Parallels
-  NIC backend or a vendor-fixed Parallels build on a disposable clone before
-  resuming bootstrap. Do not weaken the fixed IPv4 or protected-control gates.
+  Gateway `net0` disconnected. The reversible three-clone experiment has now
+  qualified `e1000` across the complete Gateway-to-Research-to-Target private
+  path while leaving all originals stopped and byte-identical. Publish the
+  backend-bound source, run the stopped-only exact-identity migration through
+  explicit operator authorization, re-prove boundaries, and only then resume
+  the still-empty campaign. Do not weaken the fixed IPv4 or protected-control
+  gates.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

@@ -81,6 +81,8 @@ class ReprovisionScriptTests(unittest.TestCase):
         self.assertIn('"--device-bootorder", "cdrom0 cdrom1 hdd0"', text)
         self.assertIn('set_vm(research, "--device-del", "net0")', text)
         self.assertIn('set_vm(target, "--device-del", "net0")', text)
+        self.assertIn('NETWORK_ADAPTER_TYPE = "e1000"', text)
+        self.assertIn('"network_adapter_type": NETWORK_ADAPTER_TYPE', text)
         self.assertIn('for identity in reversed(created)', text)
         self.assertIn('drop_privileges(uid)', text)
 
@@ -167,15 +169,15 @@ class ReprovisionScriptTests(unittest.TestCase):
         }
         adapters = {
             "SecureSandbox-Gateway": {
-                "net0": {"enabled": True, "type": "shared", "iface": None, "card": "virtio"},
-                "net1": {"enabled": True, "type": "host", "iface": "control-net", "card": "virtio"},
+                "net0": {"enabled": True, "type": "shared", "iface": None, "card": "e1000"},
+                "net1": {"enabled": True, "type": "host", "iface": "control-net", "card": "e1000"},
             },
             "SecureSandbox-Research": {
-                "net1": {"enabled": True, "type": "host", "iface": "control-net", "card": "virtio"},
-                "net2": {"enabled": True, "type": "host", "iface": "lab-net", "card": "virtio"},
+                "net1": {"enabled": True, "type": "host", "iface": "control-net", "card": "e1000"},
+                "net2": {"enabled": True, "type": "host", "iface": "lab-net", "card": "e1000"},
             },
             "SecureSandbox-Target": {
-                "net1": {"enabled": True, "type": "host", "iface": "lab-net", "card": "virtio"},
+                "net1": {"enabled": True, "type": "host", "iface": "lab-net", "card": "e1000"},
             },
         }
         sharing = {
@@ -204,7 +206,7 @@ class ReprovisionScriptTests(unittest.TestCase):
             drifted = [dict(inventories["SecureSandbox-Research"][0])]
             drifted[0]["Hardware"] = dict(drifted[0]["Hardware"])
             drifted[0]["Hardware"]["net0"] = {
-                "enabled": True, "type": "shared", "iface": None, "card": "virtio",
+                "enabled": True, "type": "shared", "iface": None, "card": "e1000",
             }
             by_handle = {**inventories, **{uuids[name]: value for name, value in inventories.items()}}
             by_handle[uuids["SecureSandbox-Research"]] = drifted
@@ -291,7 +293,7 @@ class ReprovisionScriptTests(unittest.TestCase):
                 home = root / "vms" / f"{name}.pvm"
                 home.mkdir(parents=True)
                 hardware = {
-                    key: {"enabled": True, "type": kind, "iface": iface, "card": "virtio", "mac": mac}
+                    key: {"enabled": True, "type": kind, "iface": iface, "card": "e1000", "mac": mac}
                     for key, kind, iface, mac in role_adapters[name]
                 }
                 inventories[name] = [{

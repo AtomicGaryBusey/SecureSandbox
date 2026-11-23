@@ -946,16 +946,21 @@ SecureSandbox uses three isolated Linux guests on an operator-controlled host:
   CPU, memory, process, time, and output limits.
 
 The internal subnet layout, canonical per-device MAC identities, and Host SSH
-aliases are tracked protocol and release authority.  The portable SSH payload
-uses OpenSSH `%d` paths beneath the admitted operator's home. Parallels Shared
+aliases are tracked protocol and release authority. The signed SSH payload
+uses only fixed paths beneath the root-owned Host SSH trust store. Parallels Shared
 networking legitimately assigns the Gateway address by DHCP, so the signed
-Gateway aliases use a fixed, shell-safe proxy command instead of embedding an
-address. The proxy accepts only port 22, validates the root-owned Parallels
+Gateway aliases use a fixed protected proxy bridge instead of embedding an
+address. The bridge validates the active configuration, immutable trust
+generation, physical Mac, and exact loaded operator identities, then drops its
+resolver to the enrolled operator with no supplementary groups. The resolver
+accepts only port 22, validates the root-owned Parallels
 network configuration, requires the exact running Gateway bundle and canonical
 two-NIC/MAC topology with no installer media, and forwards only to its sole IPv4
 address inside the validated Shared DHCP scope. Stable `HostKeyAlias` values
 keep strict `known_hosts` authentication authoritative after address changes.
-Private keys, `known_hosts`, archive
+Private keys remain only in ephemeral operator SSH agents. Canonical public
+keys and the three exact `known_hosts` aliases are projected by a separate
+Touch-ID-only enrollment into immutable root-owned generations. Archive
 recipients, retention names, provider credential references, model profiles,
 and persona selections remain ignored machine-local state.
 
@@ -1118,7 +1123,7 @@ copied into ignored overrides.  Copy and edit only the remaining examples,
 without adding their live copies to Git:
 
 ```text
-config/ssh_config.example                     -> signed portable Host payload (`%d/SecureSandbox/...`)
+config/ssh_config.example                     -> signed Host payload (root-owned machine SSH trust paths)
 config/netplan-gateway.example.yaml           -> signed Gateway seed netplan
 config/netplan-research.example.yaml          -> signed Research seed netplan
 config/netplan-target.example.yaml            -> signed Target seed netplan

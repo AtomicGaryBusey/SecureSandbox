@@ -1,18 +1,15 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
-Status: active only on the dedicated disposable Mac. Campaign `496eca88...`,
-bound to exact source `01f0a14...`, has been retained without deletion and
-independently verified at exact replacement `7bbdd61...`. The verifier bound
-historical epoch `1795086630`, reproduced
-`bootstrap_host_receipt_invalid`, proved age `20135` seconds, verified both
-protected ten-driver releases, and retained exactly three canonical
-operator-owned mode-0600 raw records with zero observations. Result digest
-`08abf158...` and plan digest `27b82095...` agree on independent readback; the
-former live campaign path is absent. Gateway and Research remain running,
-Target stopped, Shared disconnected, and Parallels GUI closed. Do not rerun
-collection, projection, or retention. No fresh campaign may begin until the
-multi-day continuation contract below is implemented, published, installed,
-and independently verified.
+Status: active only on the dedicated disposable Mac. The current exact-source
+campaign is 40/91 complete with 198 validated root-owned observations. Gateway
+and Research are running and reachable, Target is stopped and unreachable,
+Gateway Shared is disconnected, and `touchid-approve-exact-plan` is next. The
+first authorization prepare failed before creating case state, a plan, a
+broker request, or a Touch ID authorization because the fresh-Mac root control
+path has no enrolled machine SSH trust and the Gateway proxy correctly refuses
+root execution. Preserve the campaign exactly. Do not retry case 41, copy or
+symlink user trust into `/var/root`, reconnect Shared, or alter VM state to
+work around the failure.
 
 ## Current-Mac gate
 
@@ -25,6 +22,19 @@ No Touch ID prompt or root-password prompt is currently runnable on the
 development Mac.
 
 ## Current Neo resumption
+
+Publish, sign, notarize, install, and independently verify the compatible Host
+repair whose active SSH aliases use only the protected machine trust store.
+Then authorize a separate `host-ssh-trust-enroll` Touch ID request that binds
+the exact operator, machine, signed SSH configuration, two public agent
+identities, and exactly one Gateway, Research, and Target HostKeyAlias. The
+root-owned immutable projection contains no private key. Only after the current
+Host control client validates the projection, drops the SSH child to the
+enrolled operator, and independently returns canonical Research generation
+status may case 41 be prepared again. The failed preparation itself is not a
+case attempt and created no authorization state.
+
+### Historical retained-campaign resumption notes
 
 Preserve retained campaign `496eca88...`, its exact three raw files, zero
 observations, plan `27b82095...`, diagnostic `83f903a5...`, and result
@@ -107,6 +117,95 @@ The agent must first prove and report all of the following without mutation:
 If any check fails or is ambiguous, do not request a password or Touch ID.
 
 ### Enrollment receipt and read-only gate
+
+The Host SSH trust repair has a separate enrollment ceremony after the signed
+Host update is installed and verified. Before invoking it, require `runs/` to
+be an operator-owned ACL-free mode-0700 directory; require its
+`provisioning_key.pub`, `control_key.pub`, and `known_hosts` to be regular,
+single-link, operator-owned mode-0600 files; and require exactly the matching
+identity in each dedicated agent socket. `known_hosts` must contain only the
+canonical Gateway, Research, and Target Ed25519 aliases. Do not generate,
+replace, scan, or chmod trust content implicitly.
+
+Run this read-only source and path preflight first:
+
+```bash
+/usr/bin/stat -f '%N|uid=%u|gid=%g|mode=%Lp|type=%HT|links=%l' \
+  "$HOME" \
+  "$HOME/SecureSandbox" \
+  "$HOME/SecureSandbox/vms" \
+  "$HOME/SecureSandbox/vms/SecureSandbox-Gateway.pvm" \
+  "$HOME/SecureSandbox/runs" \
+  "$HOME/SecureSandbox/runs/provisioning_key.pub" \
+  "$HOME/SecureSandbox/runs/control_key.pub" \
+  "$HOME/SecureSandbox/runs/known_hosts"
+/bin/ls -lde \
+  "$HOME" \
+  "$HOME/SecureSandbox" \
+  "$HOME/SecureSandbox/vms" \
+  "$HOME/SecureSandbox/vms/SecureSandbox-Gateway.pvm" \
+  "$HOME/SecureSandbox/runs" \
+  "$HOME/SecureSandbox/runs/provisioning_key.pub" \
+  "$HOME/SecureSandbox/runs/control_key.pub" \
+  "$HOME/SecureSandbox/runs/known_hosts"
+SSH_AUTH_SOCK=/tmp/secure-sandbox-ssh-agent.sock /usr/bin/ssh-add -L
+SSH_AUTH_SOCK=/tmp/secure-sandbox-control-ssh-agent.sock /usr/bin/ssh-add -L
+```
+
+The home, repository, `vms`, Gateway bundle, and `runs` chain must be owned by
+the operator and the operator's primary group and must not be group/other
+writable. The home may have only macOS's deny-only `group:everyone deny delete`
+ACL; the repository and every descendant listed above must be ACL-free. The
+three source files must also be regular, single-link, mode-0600 files. Each
+agent command must return exactly the corresponding enrolled public identity.
+Any extra identity, allowing ACL, ownership/mode drift, or ambiguous output
+stops before Touch ID.
+
+From the exact checkout, as the unprivileged operator and without `sudo`, run:
+
+```bash
+SECURE_SANDBOX_REQUESTING_AGENT='Codex' \
+SECURE_SANDBOX_REQUESTING_SESSION='Disposable-Mac-acceptance' \
+/usr/bin/python3 -I scripts/enroll-host-ssh-trust.py
+```
+
+The wrapper first asks the installed manager for a short-lived canonical plan.
+Only a valid plan reaches the installed Touch ID broker. The result must be a
+canonical `secure-sandbox-host-ssh-trust-enrollment-result-v1`, followed by an
+independent canonical `secure-sandbox-host-ssh-trust-status-v1` readback from
+the installed manager. There is no password fallback. After that, run this
+literal read-only root Research generation-status diagnostic through the
+active control client:
+
+```bash
+sudo -- /usr/bin/env -i \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \
+  /usr/bin/python3 -I \
+  /usr/local/libexec/secure-sandbox-host/current/control_client \
+  client --ssh-config \
+  /usr/local/libexec/secure-sandbox-host/current/ssh_config \
+  sandbox-research-control run harness-generation-status \
+| /usr/bin/python3 -c \
+  'import json,sys; value=json.load(sys.stdin); assert value.get("schema") == "secure-sandbox-harness-generation-status-v1" and value.get("status") == "verified" and value.get("boundary", {}).get("status") == "verified"; print(json.dumps(value, sort_keys=True))'
+```
+
+Then re-read the retained campaign with its exact source driver:
+
+```bash
+campaign_root="$HOME/Library/Application Support/SecureSandbox/harness-acceptance"
+/usr/bin/python3 -I \
+  "$HOME/SecureSandbox-Acceptance-1965/scripts/harness-lifecycle-acceptance.py" \
+  status \
+  --campaign "$campaign_root/campaign.json" \
+  --observations "$campaign_root/observations" \
+| /usr/bin/python3 -c \
+  'import json,sys; value=json.load(sys.stdin); assert value.get("schema") == "secure-sandbox-harness-lifecycle-acceptance-status-v1" and value.get("case_count") == 91 and value.get("completed_case_count") == 40 and value.get("next_case") == "touchid-approve-exact-plan" and value.get("authority") == "none"; print(json.dumps(value, sort_keys=True))'
+```
+
+Retry case 41 only if both commands succeed exactly. Do not infer readiness
+from enrollment success alone: the root diagnostic additionally proves the
+operator identity drop and the canonical `vms/SecureSandbox-Gateway.pvm`
+path boundary used by the signed control client.
 
 On the disposable Mac only, create the short-lived enrollment receipt in a
 new private handoff directory outside both the repository and SecureSandbox's

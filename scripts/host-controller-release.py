@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import binascii
 import contextlib
 import contextvars
 import ctypes
@@ -43,9 +45,12 @@ UUID4 = re.compile(
 
 ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
+ACL_NEXT_ENTRY = -1
+ACL_EXTENDED_DENY = 2
 _ACL_LIBC = ctypes.CDLL(None, use_errno=True)
 _ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
 _ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_GET_TAG_TYPE = getattr(_ACL_LIBC, "acl_get_tag_type", None)
 _ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
 if _ACL_GET_FD_NP is not None:
     _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -55,6 +60,11 @@ if _ACL_GET_ENTRY is not None:
         ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
     ]
     _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_GET_TAG_TYPE is not None:
+    _ACL_GET_TAG_TYPE.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+    ]
+    _ACL_GET_TAG_TYPE.restype = ctypes.c_int
 if _ACL_FREE is not None:
     _ACL_FREE.argtypes = [ctypes.c_void_p]
     _ACL_FREE.restype = ctypes.c_int
@@ -287,6 +297,40 @@ GPGV_RUNTIME_SYSTEM_DEPENDENCY_PREFIXES = (
 )
 OTOOL_BINARY = Path("/usr/bin/otool")
 DEFAULT_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
+HOST_SSH_TRUST_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust"
+)
+HOST_SSH_TRUST_PLAN_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-enrollment-plan-v1"
+)
+HOST_SSH_TRUST_AUTHORIZATION_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-authorization-v1"
+)
+HOST_SSH_TRUST_MANIFEST_SCHEMA = "secure-sandbox-host-ssh-trust-v1"
+HOST_SSH_TRUST_MATERIAL_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-material-v1"
+)
+HOST_SSH_TRUST_RESULT_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-enrollment-result-v1"
+)
+HOST_SSH_TRUST_ALIASES = (
+    "SecureSandbox-Gateway",
+    "SecureSandbox-Research",
+    "SecureSandbox-Target",
+)
+HOST_SSH_TRUST_SOURCE_PATHS = {
+    "provisioning_key": Path("runs/provisioning_key.pub"),
+    "control_key": Path("runs/control_key.pub"),
+    "known_hosts": Path("runs/known_hosts"),
+}
+HOST_SSH_AGENT_SOCKETS = {
+    "provisioning_key": Path("/tmp/secure-sandbox-ssh-agent.sock"),
+    "control_key": Path("/tmp/secure-sandbox-control-ssh-agent.sock"),
+}
+HOST_SSH_TRUST_MAX_SOURCE = 64 * 1024
+HOST_SSH_TRUST_MAX_LIFETIME = 300
+HOST_SSH_TRUST_REPOSITORY_NAME = "SecureSandbox"
+HOST_SSH_FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
 NATIVE_DEPLOYMENT_STATE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-deployment"
 )
@@ -760,8 +804,42 @@ def reject_extended_acl(descriptor: int, failure: str) -> None:
             raise ReleaseFailure("extended_acl_release_failed")
 
 
+def reject_allowing_acl(descriptor: int, failure: str) -> None:
+    """Admit the standard deny-only macOS home ACL, never an ACL grant."""
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_GET_TAG_TYPE is None or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise ReleaseFailure("extended_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise ReleaseFailure(failure)
+    try:
+        entry = ctypes.c_void_p()
+        entry_id = ACL_FIRST_ENTRY
+        while True:
+            ctypes.set_errno(0)
+            result = _ACL_GET_ENTRY(acl, entry_id, ctypes.byref(entry))
+            if result != 0:
+                if ctypes.get_errno() in {errno.ENOENT, errno.EINVAL}:
+                    break
+                raise ReleaseFailure(failure)
+            tag = ctypes.c_int()
+            if (_ACL_GET_TAG_TYPE(entry, ctypes.byref(tag)) != 0
+                    or tag.value != ACL_EXTENDED_DENY):
+                raise ReleaseFailure(failure)
+            entry_id = ACL_NEXT_ENTRY
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise ReleaseFailure("extended_acl_release_failed")
+
+
 def verify_acl_free_directory(
-    path: Path, expected_uid: int, expected_mode: int, failure: str,
+    path: Path, expected_uid: int, expected_mode: int, failure: str, *,
+    allow_deny_only_acl: bool = False,
 ) -> os.stat_result:
     try:
         before = path.lstat()
@@ -773,7 +851,10 @@ def verify_acl_free_directory(
         raise ReleaseFailure(failure) from error
     try:
         opened = os.fstat(descriptor)
-        reject_extended_acl(descriptor, failure)
+        if allow_deny_only_acl:
+            reject_allowing_acl(descriptor, failure)
+        else:
+            reject_extended_acl(descriptor, failure)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
@@ -8613,6 +8694,1245 @@ def canonical_state_record(value: object) -> bytes:
         raise ReleaseFailure("install_transition_record_invalid") from error
 
 
+_HOST_MACHINE_UUID = re.compile(
+    rb'"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]{36})"'
+)
+_HOST_MACHINE_SERIAL = re.compile(
+    rb'"IOPlatformSerialNumber"\s*=\s*"([^"\r\n]{1,128})"'
+)
+_HOST_MACHINE_MODEL = re.compile(
+    rb'"model"\s*=\s*<"([^"\r\n]{1,128})'
+)
+
+
+def host_machine_identity(
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> str:
+    if sys.platform != "darwin":
+        raise ReleaseFailure("host_ssh_trust_mac_required")
+    try:
+        result = runner(
+            ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=10,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseFailure("host_ssh_trust_machine_identity_failed") from error
+    if (result.returncode != 0 or not 0 < len(result.stdout) <= 1024 * 1024
+            or result.stderr):
+        raise ReleaseFailure("host_ssh_trust_machine_identity_failed")
+    platform_uuid = _HOST_MACHINE_UUID.search(result.stdout)
+    serial = _HOST_MACHINE_SERIAL.search(result.stdout)
+    model = _HOST_MACHINE_MODEL.search(result.stdout)
+    if platform_uuid is None or serial is None or model is None:
+        raise ReleaseFailure("host_ssh_trust_machine_identity_invalid")
+    material = b"\0".join(
+        (platform_uuid.group(1).lower(), serial.group(1), model.group(1)),
+    )
+    return sha256_bytes(material)
+
+
+def _host_ssh_key(raw: bytes, failure: str) -> tuple[bytes, str]:
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ReleaseFailure(failure) from error
+    if not text.endswith("\n") or text.count("\n") != 1 or "\r" in text:
+        raise ReleaseFailure(failure)
+    fields = text[:-1].split(" ", 2)
+    if len(fields) not in {2, 3} or fields[0] != "ssh-ed25519" or not fields[1]:
+        raise ReleaseFailure(failure)
+    if len(fields) == 3 and (
+        not fields[2] or any(ord(character) < 32 or ord(character) > 126
+                             for character in fields[2])
+    ):
+        raise ReleaseFailure(failure)
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ReleaseFailure(failure) from error
+    if (len(blob) != 4 + 11 + 4 + 32
+            or int.from_bytes(blob[:4], "big") != 11
+            or blob[4:15] != b"ssh-ed25519"
+            or int.from_bytes(blob[15:19], "big") != 32):
+        raise ReleaseFailure(failure)
+    encoded = base64.b64encode(blob).decode("ascii")
+    if encoded != fields[1]:
+        raise ReleaseFailure(failure)
+    projected = f"ssh-ed25519 {encoded}\n".encode("ascii")
+    fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest()
+    ).decode("ascii").rstrip("=")
+    return projected, fingerprint
+
+
+def _host_ssh_known_hosts(raw: bytes) -> tuple[bytes, dict[str, str]]:
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ReleaseFailure("host_ssh_trust_known_hosts_invalid") from error
+    if not text.endswith("\n") or "\r" in text or len(raw) > HOST_SSH_TRUST_MAX_SOURCE:
+        raise ReleaseFailure("host_ssh_trust_known_hosts_invalid")
+    entries: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if (len(fields) != 3 or fields[0] not in HOST_SSH_TRUST_ALIASES
+                or fields[0] in entries or fields[1] != "ssh-ed25519"):
+            raise ReleaseFailure("host_ssh_trust_known_hosts_invalid")
+        projected, fingerprint = _host_ssh_key(
+            f"{fields[1]} {fields[2]}\n".encode("ascii"),
+            "host_ssh_trust_known_hosts_invalid",
+        )
+        entries[fields[0]] = (
+            projected.decode("ascii").split(" ", 1)[1].strip(),
+            fingerprint,
+        )
+    if (set(entries) != set(HOST_SSH_TRUST_ALIASES)
+            or len({fingerprint for _key, fingerprint in entries.values()})
+               != len(HOST_SSH_TRUST_ALIASES)):
+        raise ReleaseFailure("host_ssh_trust_known_hosts_invalid")
+    projected = "".join(
+        f"{alias} ssh-ed25519 {entries[alias][0]}\n"
+        for alias in HOST_SSH_TRUST_ALIASES
+    ).encode("ascii")
+    return projected, {
+        alias: entries[alias][1] for alias in HOST_SSH_TRUST_ALIASES
+    }
+
+
+def _host_ssh_source_record(
+    repo: Path, relative: Path, operator_uid: int,
+) -> tuple[dict[str, Any], bytes]:
+    path = repo / relative
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_source_untrusted") from error
+    raw = read_acl_free_regular(
+        path, operator_uid, 0o600, "host_ssh_trust_source_untrusted",
+        maximum=HOST_SSH_TRUST_MAX_SOURCE,
+    )
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_source_untrusted") from error
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if identity(before) != identity(info):
+        raise ReleaseFailure("host_ssh_trust_source_untrusted")
+    if relative.name == "known_hosts":
+        projected, host_fingerprints = _host_ssh_known_hosts(raw)
+        extra: dict[str, Any] = {"host_fingerprints": host_fingerprints}
+    else:
+        projected, fingerprint = _host_ssh_key(
+            raw, "host_ssh_trust_public_key_invalid",
+        )
+        extra = {"fingerprint": fingerprint}
+    record = {
+        "relative_path": relative.as_posix(),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode),
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "nlink": info.st_nlink,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+        "source_sha256": sha256_bytes(raw),
+        "projected_sha256": sha256_bytes(projected),
+        **extra,
+    }
+    return record, projected
+
+
+def _host_ssh_agent_key(
+    socket_path: Path, operator_uid: int, operator_gid: int,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> tuple[bytes, str]:
+    try:
+        before = socket_path.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_agent_socket_untrusted") from error
+    if (not stat.S_ISSOCK(before.st_mode) or before.st_uid != operator_uid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600):
+        raise ReleaseFailure("host_ssh_trust_agent_socket_untrusted")
+    process_options: dict[str, Any] = {}
+    if os.geteuid() == 0:
+        if (not isinstance(operator_gid, int) or isinstance(operator_gid, bool)
+                or not 1 <= operator_gid < 2 ** 31):
+            raise ReleaseFailure("host_ssh_trust_agent_identity_invalid")
+        process_options = {
+            "user": operator_uid,
+            "group": operator_gid,
+            "extra_groups": [],
+        }
+    try:
+        result = runner(
+            ["/usr/bin/ssh-add", "-L"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                 "SSH_AUTH_SOCK": str(socket_path)},
+            **process_options,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseFailure("host_ssh_trust_agent_query_failed") from error
+    after = socket_path.lstat()
+    if ((before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+         before.st_gid, before.st_nlink, before.st_size,
+         before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_uid,
+                after.st_gid, after.st_nlink, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns)
+            or result.returncode != 0 or result.stderr
+            or not 0 < len(result.stdout) <= HOST_SSH_TRUST_MAX_SOURCE):
+        raise ReleaseFailure("host_ssh_trust_agent_query_failed")
+    lines = result.stdout.splitlines(keepends=True)
+    if len(lines) != 1:
+        raise ReleaseFailure("host_ssh_trust_agent_identity_invalid")
+    return _host_ssh_key(lines[0], "host_ssh_trust_agent_identity_invalid")
+
+
+def host_ssh_trust_sources(
+    repo: Path, operator_uid: int, *,
+    agent_runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    socket_paths: Mapping[str, Path] = HOST_SSH_AGENT_SOCKETS,
+) -> tuple[dict[str, dict[str, Any]], dict[str, bytes]]:
+    try:
+        account = pwd.getpwuid(operator_uid)
+        home = Path(account.pw_dir).resolve(strict=True)
+        repo = repo.resolve(strict=True)
+    except (KeyError, AttributeError, TypeError, ValueError, OSError) as error:
+        raise ReleaseFailure("host_ssh_trust_operator_invalid") from error
+    if (operator_uid <= 0 or account.pw_uid != operator_uid
+            or not isinstance(account.pw_gid, int)
+            or isinstance(account.pw_gid, bool)
+            or not 1 <= account.pw_gid < 2 ** 31
+            or repo != home / HOST_SSH_TRUST_REPOSITORY_NAME):
+        raise ReleaseFailure("host_ssh_trust_repository_invalid")
+    try:
+        home_info = home.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_repository_invalid") from error
+    if (not stat.S_ISDIR(home_info.st_mode) or stat.S_ISLNK(home_info.st_mode)
+            or home_info.st_uid != operator_uid
+            or stat.S_IMODE(home_info.st_mode) & 0o022):
+        raise ReleaseFailure("host_ssh_trust_repository_invalid")
+    verify_acl_free_directory(
+        home, operator_uid, stat.S_IMODE(home_info.st_mode),
+        "host_ssh_trust_repository_invalid", allow_deny_only_acl=True,
+    )
+    repo_info = repo.lstat()
+    if (not stat.S_ISDIR(repo_info.st_mode) or stat.S_ISLNK(repo_info.st_mode)
+            or repo_info.st_uid != operator_uid or repo_info.st_mode & 0o022):
+        raise ReleaseFailure("host_ssh_trust_repository_invalid")
+    verify_acl_free_directory(
+        repo, operator_uid, stat.S_IMODE(repo_info.st_mode),
+        "host_ssh_trust_repository_invalid",
+    )
+    verify_acl_free_directory(
+        repo / "runs", operator_uid, 0o700,
+        "host_ssh_trust_source_directory_untrusted",
+    )
+    records: dict[str, dict[str, Any]] = {}
+    projected: dict[str, bytes] = {}
+    for name, relative in HOST_SSH_TRUST_SOURCE_PATHS.items():
+        records[name], projected[name] = _host_ssh_source_record(
+            repo, relative, operator_uid,
+        )
+    if projected["provisioning_key"] == projected["control_key"]:
+        raise ReleaseFailure("host_ssh_trust_public_keys_not_distinct")
+    for name in ("provisioning_key", "control_key"):
+        if name not in socket_paths:
+            raise ReleaseFailure("host_ssh_trust_agent_socket_untrusted")
+        loaded, fingerprint = _host_ssh_agent_key(
+            Path(socket_paths[name]), operator_uid, account.pw_gid,
+            agent_runner,
+        )
+        if (loaded != projected[name]
+                or fingerprint != records[name]["fingerprint"]):
+            raise ReleaseFailure("host_ssh_trust_agent_identity_mismatch")
+    return records, projected
+
+
+def host_ssh_trust_material(plan: Mapping[str, Any]) -> dict[str, Any]:
+    sources = plan["sources"]
+    return {
+        "schema": HOST_SSH_TRUST_MATERIAL_SCHEMA,
+        "operator_uid": plan["operator_uid"],
+        "machine_identity_sha256": plan["machine_identity_sha256"],
+        "ssh_config_sha256": plan["ssh_config_sha256"],
+        "provisioning_public_key_sha256": sources["provisioning_key"]["projected_sha256"],
+        "provisioning_public_key_fingerprint": sources["provisioning_key"]["fingerprint"],
+        "control_public_key_sha256": sources["control_key"]["projected_sha256"],
+        "control_public_key_fingerprint": sources["control_key"]["fingerprint"],
+        "known_hosts_sha256": sources["known_hosts"]["projected_sha256"],
+        "known_host_fingerprints": sources["known_hosts"]["host_fingerprints"],
+    }
+
+
+def _host_ssh_trust_digest(value: object) -> str:
+    return sha256_bytes(canonical_state_record(value))
+
+
+def host_ssh_trust_root_for_install(install_root: Path) -> Path:
+    """Keep test/non-system layouts isolated from the machine trust floor."""
+    if install_root == DEFAULT_INSTALL_ROOT:
+        return HOST_SSH_TRUST_ROOT
+    return install_root.parent / f".{install_root.name}.host-ssh-trust"
+
+
+def _host_ssh_trust_parent(
+    trust_root: Path, expected_uid: int,
+) -> os.stat_result:
+    """Bind the mode-bit-only authority boundary above the trust store."""
+    if (not trust_root.is_absolute() or trust_root == Path("/")
+            or trust_root.name in {"", ".", ".."}):
+        raise ReleaseFailure("host_ssh_trust_parent_untrusted")
+    parent = trust_root.parent
+    try:
+        parent_info = parent.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_parent_untrusted") from error
+    parent_mode = stat.S_IMODE(parent_info.st_mode)
+    if (not stat.S_ISDIR(parent_info.st_mode)
+            or stat.S_ISLNK(parent_info.st_mode)
+            or parent_info.st_uid != expected_uid
+            or parent_mode not in {0o700, 0o755}
+            or parent_info.st_mode & 0o022):
+        raise ReleaseFailure("host_ssh_trust_parent_untrusted")
+    return verify_acl_free_directory(
+        parent, expected_uid, parent_mode,
+        "host_ssh_trust_parent_untrusted",
+    )
+
+
+def _host_ssh_trust_directory_identity(
+    item: os.stat_result,
+) -> tuple[int, ...]:
+    return (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+
+
+def _host_ssh_trust_recoverable_prefix(
+    trust_root: Path, expected_uid: int,
+) -> bool:
+    """Recognize only empty pre-publication prefixes left by old creators.
+
+    An unprivileged plan process cannot inspect a root-owned mode-0700 prefix.
+    It may tentatively describe that one shape as unselected; the privileged
+    enrollment process must later prove the prefix is ACL-free and exactly
+    empty before normalizing it under fresh authorization.
+    """
+    try:
+        root_named = trust_root.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_root_untrusted") from error
+    root_mode = stat.S_IMODE(root_named.st_mode)
+    if (not stat.S_ISDIR(root_named.st_mode)
+            or stat.S_ISLNK(root_named.st_mode)
+            or root_named.st_uid != expected_uid
+            or root_mode not in {0o700, 0o755}):
+        return False
+    can_inspect_root = os.geteuid() in {0, expected_uid} or root_mode == 0o755
+    if not can_inspect_root:
+        return root_mode == 0o700
+    root_opened = verify_acl_free_directory(
+        trust_root, expected_uid, root_mode,
+        "host_ssh_trust_root_untrusted",
+    )
+    try:
+        inventory = os.listdir(trust_root)
+        root_after = trust_root.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_root_untrusted") from error
+    if (_host_ssh_trust_directory_identity(root_opened)
+            != _host_ssh_trust_directory_identity(root_after)):
+        raise ReleaseFailure("host_ssh_trust_root_untrusted")
+    if not inventory:
+        return True
+    if inventory != ["generations"]:
+        return False
+    generations = trust_root / "generations"
+    try:
+        generations_named = generations.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_generations_untrusted") from error
+    generations_mode = stat.S_IMODE(generations_named.st_mode)
+    if (not stat.S_ISDIR(generations_named.st_mode)
+            or stat.S_ISLNK(generations_named.st_mode)
+            or generations_named.st_uid != expected_uid
+            or generations_mode not in {0o700, 0o755}):
+        return False
+    can_inspect_generations = (
+        os.geteuid() in {0, expected_uid} or generations_mode == 0o755
+    )
+    if not can_inspect_generations:
+        return generations_mode == 0o700
+    generations_opened = verify_acl_free_directory(
+        generations, expected_uid, generations_mode,
+        "host_ssh_trust_generations_untrusted",
+    )
+    try:
+        generation_inventory = os.listdir(generations)
+        generations_after = generations.lstat()
+        root_final = trust_root.lstat()
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_generations_untrusted") from error
+    if (generation_inventory
+            or _host_ssh_trust_directory_identity(generations_opened)
+               != _host_ssh_trust_directory_identity(generations_after)
+            or _host_ssh_trust_directory_identity(root_opened)
+               != _host_ssh_trust_directory_identity(root_final)):
+        return False
+    return True
+
+
+def validate_host_ssh_trust_plan(
+    value: object, *, now: int | None = None, require_fresh: bool = True,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "plan_id", "created_at", "expires_at", "operator_uid",
+        "machine_identity_sha256", "host_release_id", "ssh_config_sha256",
+        "previous_trust_id", "sources", "trust_id", "plan_sha256",
+    }
+    key_fields = {
+        "relative_path", "device", "inode", "mode", "uid", "gid",
+        "nlink", "size", "mtime_ns", "ctime_ns", "source_sha256",
+        "projected_sha256", "fingerprint",
+    }
+    known_fields = key_fields - {"fingerprint"} | {"host_fingerprints"}
+    current = int(time.time()) if now is None else now
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_ssh_trust_plan_invalid")
+    sources = value.get("sources")
+    if (value.get("schema") != HOST_SSH_TRUST_PLAN_SCHEMA
+            or UUID4.fullmatch(str(value.get("plan_id", ""))) is None
+            or not isinstance(value.get("created_at"), int)
+            or isinstance(value.get("created_at"), bool)
+            or not isinstance(value.get("expires_at"), int)
+            or isinstance(value.get("expires_at"), bool)
+            or not value["created_at"] <= value["expires_at"]
+            or value["expires_at"] - value["created_at"]
+               > HOST_SSH_TRUST_MAX_LIFETIME
+            or (require_fresh and not value["created_at"] <= current < value["expires_at"])
+            or not isinstance(value.get("operator_uid"), int)
+            or isinstance(value.get("operator_uid"), bool)
+            or not 1 <= value["operator_uid"] < 2 ** 31
+            or any(SHA256.fullmatch(str(value.get(name, ""))) is None
+                   for name in ("machine_identity_sha256", "host_release_id",
+                                "ssh_config_sha256", "trust_id", "plan_sha256"))
+            or (value.get("previous_trust_id") is not None
+                and SHA256.fullmatch(str(value["previous_trust_id"])) is None)
+            or not isinstance(sources, dict)
+            or set(sources) != set(HOST_SSH_TRUST_SOURCE_PATHS)):
+        raise ReleaseFailure("host_ssh_trust_plan_invalid")
+    for name, relative in HOST_SSH_TRUST_SOURCE_PATHS.items():
+        record = sources.get(name)
+        expected_fields = known_fields if name == "known_hosts" else key_fields
+        if (not isinstance(record, dict) or set(record) != expected_fields
+                or record.get("relative_path") != relative.as_posix()
+                or any(not isinstance(record.get(field), int)
+                       or isinstance(record.get(field), bool)
+                       or record[field] < 0
+                       for field in ("device", "inode", "uid", "gid", "size",
+                                     "mtime_ns", "ctime_ns"))
+                or record.get("mode") != 0o600 or record.get("nlink") != 1
+                or record.get("uid") != value["operator_uid"]
+                or not 0 < record["size"] <= HOST_SSH_TRUST_MAX_SOURCE
+                or any(SHA256.fullmatch(str(record.get(field, ""))) is None
+                       for field in ("source_sha256", "projected_sha256"))):
+            raise ReleaseFailure("host_ssh_trust_plan_invalid")
+        if name == "known_hosts":
+            fingerprints = record.get("host_fingerprints")
+            if (not isinstance(fingerprints, dict)
+                    or tuple(fingerprints) != HOST_SSH_TRUST_ALIASES
+                    or any(not isinstance(item, str)
+                           or HOST_SSH_FINGERPRINT.fullmatch(item) is None
+                           for item in fingerprints.values())
+                    or len(set(fingerprints.values()))
+                       != len(HOST_SSH_TRUST_ALIASES)):
+                raise ReleaseFailure("host_ssh_trust_plan_invalid")
+        elif (not isinstance(record.get("fingerprint"), str)
+              or HOST_SSH_FINGERPRINT.fullmatch(record["fingerprint"]) is None):
+            raise ReleaseFailure("host_ssh_trust_plan_invalid")
+    unsigned = {name: item for name, item in value.items()
+                if name != "plan_sha256"}
+    if (value["trust_id"] != _host_ssh_trust_digest(host_ssh_trust_material(value))
+            or value["plan_sha256"] != _host_ssh_trust_digest(unsigned)):
+        raise ReleaseFailure("host_ssh_trust_plan_invalid")
+    return dict(value)
+
+
+def validate_host_ssh_trust_authorization(
+    value: object, plan: Mapping[str, Any], *, now: int | None = None,
+    require_fresh: bool = True,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "authorization_id", "request_sha256",
+        "pending_receipt_sha256", "plan_id", "plan_sha256", "trust_id",
+        "operator_uid", "method", "password_fallback", "authorized_at",
+        "expires_at", "host_release_id", "requesting_agent_sha256",
+        "requesting_session_sha256", "status", "authorization_sha256",
+    }
+    current = int(time.time()) if now is None else now
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_ssh_trust_authorization_invalid")
+    unsigned = {name: item for name, item in value.items()
+                if name != "authorization_sha256"}
+    if (value.get("schema") != HOST_SSH_TRUST_AUTHORIZATION_SCHEMA
+            or UUID4.fullmatch(str(value.get("authorization_id", ""))) is None
+            or any(SHA256.fullmatch(str(value.get(name, ""))) is None
+                   for name in ("request_sha256", "pending_receipt_sha256",
+                                "plan_sha256", "trust_id", "host_release_id",
+                                "requesting_agent_sha256",
+                                "requesting_session_sha256",
+                                "authorization_sha256"))
+            or value.get("plan_id") != plan["plan_id"]
+            or value.get("plan_sha256") != plan["plan_sha256"]
+            or value.get("trust_id") != plan["trust_id"]
+            or value.get("operator_uid") != plan["operator_uid"]
+            or value.get("host_release_id") != plan["host_release_id"]
+            or value.get("method") != "touch-id"
+            or value.get("password_fallback") is not False
+            or value.get("status") != "authorized"
+            or not isinstance(value.get("authorized_at"), int)
+            or isinstance(value.get("authorized_at"), bool)
+            or not isinstance(value.get("expires_at"), int)
+            or isinstance(value.get("expires_at"), bool)
+            or not value["authorized_at"] <= value["expires_at"]
+            or (require_fresh
+                and not value["authorized_at"] <= current < value["expires_at"])
+            or value["expires_at"] > plan["expires_at"]
+            or value["expires_at"] - value["authorized_at"] > 120
+            or value["authorization_sha256"] != _host_ssh_trust_digest(unsigned)):
+        raise ReleaseFailure("host_ssh_trust_authorization_invalid")
+    return dict(value)
+
+
+def host_ssh_trust_host_binding(
+    install_root: Path = DEFAULT_INSTALL_ROOT, expected_uid: int = 0,
+) -> tuple[str, str]:
+    release, manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    raw = read_acl_free_regular(
+        release / "ssh_config", expected_uid, EXPECTED_MODES["ssh_config"],
+        "host_ssh_trust_config_untrusted", maximum=1024 * 1024,
+    )
+    digest = sha256_bytes(raw)
+    if manifest.get("payloads", {}).get("ssh_config") != digest:
+        raise ReleaseFailure("host_ssh_trust_config_changed")
+    return release.name, digest
+
+
+def _host_ssh_trust_manifest(
+    generation: Path, trust_id: str, expected_uid: int,
+) -> tuple[dict[str, Any], str]:
+    verify_acl_free_directory(
+        generation, expected_uid, 0o555,
+        "host_ssh_trust_generation_untrusted",
+    )
+    names = {
+        "provisioning": "provisioning_key.pub",
+        "control": "control_key.pub",
+        "known_hosts": "known_hosts",
+        "manifest": "manifest.json",
+    }
+    if set(os.listdir(generation)) != set(names.values()):
+        raise ReleaseFailure("host_ssh_trust_generation_inventory_invalid")
+    provisioning = read_acl_free_regular(
+        generation / names["provisioning"], expected_uid, 0o444,
+        "host_ssh_trust_generation_untrusted", maximum=HOST_SSH_TRUST_MAX_SOURCE,
+    )
+    control = read_acl_free_regular(
+        generation / names["control"], expected_uid, 0o444,
+        "host_ssh_trust_generation_untrusted", maximum=HOST_SSH_TRUST_MAX_SOURCE,
+    )
+    known_hosts = read_acl_free_regular(
+        generation / names["known_hosts"], expected_uid, 0o444,
+        "host_ssh_trust_generation_untrusted", maximum=HOST_SSH_TRUST_MAX_SOURCE,
+    )
+    manifest_raw = read_acl_free_regular(
+        generation / names["manifest"], expected_uid, 0o444,
+        "host_ssh_trust_generation_untrusted", maximum=HOST_SSH_TRUST_MAX_SOURCE,
+    )
+    try:
+        manifest = json.loads(manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("host_ssh_trust_manifest_invalid") from error
+    fields = {
+        "schema", "trust_id", "operator_uid", "machine_identity_sha256",
+        "enrolled_release_id", "ssh_config_sha256",
+        "provisioning_public_key_sha256",
+        "provisioning_public_key_fingerprint", "control_public_key_sha256",
+        "control_public_key_fingerprint", "known_hosts_sha256",
+        "known_host_fingerprints", "plan_sha256", "enrolled_at",
+        "manifest_sha256",
+    }
+    if (not isinstance(manifest, dict) or set(manifest) != fields
+            or manifest_raw != canonical_state_record(manifest)
+            or manifest.get("schema") != HOST_SSH_TRUST_MANIFEST_SCHEMA
+            or manifest.get("trust_id") != trust_id
+            or any(SHA256.fullmatch(str(manifest.get(name, ""))) is None
+                   for name in (
+                       "trust_id", "machine_identity_sha256",
+                       "enrolled_release_id", "ssh_config_sha256",
+                       "provisioning_public_key_sha256",
+                       "control_public_key_sha256", "known_hosts_sha256",
+                       "plan_sha256", "manifest_sha256",
+                   ))
+            or not isinstance(manifest.get("operator_uid"), int)
+            or isinstance(manifest.get("operator_uid"), bool)
+            or not 1 <= manifest["operator_uid"] < 2 ** 31
+            or not isinstance(manifest.get("enrolled_at"), int)
+            or isinstance(manifest.get("enrolled_at"), bool)
+            or manifest["enrolled_at"] <= 0
+            or not isinstance(manifest.get("provisioning_public_key_fingerprint"), str)
+            or not isinstance(manifest.get("control_public_key_fingerprint"), str)
+            or not isinstance(manifest.get("known_host_fingerprints"), dict)
+            or tuple(manifest["known_host_fingerprints"]) != HOST_SSH_TRUST_ALIASES):
+        raise ReleaseFailure("host_ssh_trust_manifest_invalid")
+    projected_provisioning, provisioning_fingerprint = _host_ssh_key(
+        provisioning, "host_ssh_trust_generation_untrusted",
+    )
+    projected_control, control_fingerprint = _host_ssh_key(
+        control, "host_ssh_trust_generation_untrusted",
+    )
+    projected_known_hosts, known_fingerprints = _host_ssh_known_hosts(known_hosts)
+    unsigned = {name: item for name, item in manifest.items()
+                if name != "manifest_sha256"}
+    material = {
+        "schema": HOST_SSH_TRUST_MATERIAL_SCHEMA,
+        "operator_uid": manifest["operator_uid"],
+        "machine_identity_sha256": manifest["machine_identity_sha256"],
+        "ssh_config_sha256": manifest["ssh_config_sha256"],
+        "provisioning_public_key_sha256": sha256_bytes(projected_provisioning),
+        "provisioning_public_key_fingerprint": provisioning_fingerprint,
+        "control_public_key_sha256": sha256_bytes(projected_control),
+        "control_public_key_fingerprint": control_fingerprint,
+        "known_hosts_sha256": sha256_bytes(projected_known_hosts),
+        "known_host_fingerprints": known_fingerprints,
+    }
+    if (provisioning != projected_provisioning or control != projected_control
+            or known_hosts != projected_known_hosts
+            or manifest["provisioning_public_key_sha256"]
+               != sha256_bytes(provisioning)
+            or manifest["provisioning_public_key_fingerprint"]
+               != provisioning_fingerprint
+            or manifest["control_public_key_sha256"] != sha256_bytes(control)
+            or manifest["control_public_key_fingerprint"] != control_fingerprint
+            or manifest["known_hosts_sha256"] != sha256_bytes(known_hosts)
+            or manifest["known_host_fingerprints"] != known_fingerprints
+            or manifest["trust_id"] != _host_ssh_trust_digest(material)
+            or manifest["manifest_sha256"] != _host_ssh_trust_digest(unsigned)):
+        raise ReleaseFailure("host_ssh_trust_manifest_invalid")
+    return manifest, sha256_bytes(manifest_raw)
+
+
+def host_ssh_trust_current(
+    trust_root: Path = HOST_SSH_TRUST_ROOT, expected_uid: int = 0, *,
+    allow_absent: bool = False, allow_unselected: bool = False,
+    allow_recoverable_prefix: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    _host_ssh_trust_parent(trust_root, expected_uid)
+    if not os.path.lexists(trust_root):
+        if allow_absent:
+            return None
+        raise ReleaseFailure("host_ssh_trust_missing")
+    if (allow_recoverable_prefix
+            and _host_ssh_trust_recoverable_prefix(
+                trust_root, expected_uid,
+            )):
+        return None
+    verify_acl_free_directory(
+        trust_root, expected_uid, 0o755, "host_ssh_trust_root_untrusted",
+    )
+    generations = trust_root / "generations"
+    if not os.path.lexists(generations) and allow_unselected:
+        # A crash after durably publishing the root but before creating its
+        # first child leaves one recoverable pre-publication state.  Admit
+        # only an exactly empty, stable root to fresh-authority callers.
+        # Compatibility callers do not set allow_unselected and therefore
+        # continue to fail closed on the same incomplete store.
+        before = trust_root.lstat()
+        inventory = os.listdir(trust_root)
+        after = trust_root.lstat()
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_uid, item.st_gid,
+            item.st_mode, item.st_nlink, item.st_size,
+            item.st_mtime_ns, item.st_ctime_ns,
+        )
+        if inventory or identity(before) != identity(after):
+            raise ReleaseFailure("host_ssh_trust_generations_untrusted")
+        return None
+    verify_acl_free_directory(
+        generations, expected_uid, 0o755,
+        "host_ssh_trust_generations_untrusted",
+    )
+    current = trust_root / "current"
+    if not os.path.lexists(current):
+        if allow_unselected:
+            return None
+        raise ReleaseFailure("host_ssh_trust_selector_missing")
+    before = current.lstat()
+    if (not stat.S_ISLNK(before.st_mode) or before.st_uid != expected_uid
+            or before.st_nlink != 1):
+        raise ReleaseFailure("host_ssh_trust_selector_untrusted")
+    target = os.readlink(current)
+    match = re.fullmatch(r"generations/([0-9a-f]{64})", target)
+    after = current.lstat()
+    if (match is None
+            or (before.st_dev, before.st_ino, before.st_uid, before.st_gid,
+                before.st_mtime_ns, before.st_ctime_ns)
+               != (after.st_dev, after.st_ino, after.st_uid, after.st_gid,
+                   after.st_mtime_ns, after.st_ctime_ns)):
+        raise ReleaseFailure("host_ssh_trust_selector_untrusted")
+    trust_id = match.group(1)
+    return _host_ssh_trust_manifest(
+        generations / trust_id, trust_id, expected_uid,
+    )
+
+
+def make_host_ssh_trust_plan(
+    repo: Path, operator_uid: int, *,
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    trust_root: Path = HOST_SSH_TRUST_ROOT,
+    now: int | None = None,
+    machine_identity_reader: Callable[[], str] = host_machine_identity,
+    host_binding_reader: Callable[[Path, int], tuple[str, str]] = host_ssh_trust_host_binding,
+    source_reader: Callable[..., tuple[dict[str, dict[str, Any]], dict[str, bytes]]] = host_ssh_trust_sources,
+    expected_install_uid: int = 0,
+) -> dict[str, Any]:
+    current = int(time.time()) if now is None else now
+    if os.geteuid() != operator_uid or operator_uid <= 0:
+        raise ReleaseFailure("host_ssh_trust_operator_context_required")
+    host_release_id, ssh_config_sha256 = host_binding_reader(
+        install_root, expected_install_uid,
+    )
+    machine_identity_sha256 = machine_identity_reader()
+    if (SHA256.fullmatch(host_release_id) is None
+            or SHA256.fullmatch(ssh_config_sha256) is None
+            or SHA256.fullmatch(machine_identity_sha256) is None):
+        raise ReleaseFailure("host_ssh_trust_host_binding_invalid")
+    existing = host_ssh_trust_current(
+        trust_root, expected_install_uid, allow_absent=True,
+        allow_unselected=True, allow_recoverable_prefix=True,
+    )
+    previous_trust_id = None if existing is None else existing[0]["trust_id"]
+    sources, _projected = source_reader(repo, operator_uid)
+    plan: dict[str, Any] = {
+        "schema": HOST_SSH_TRUST_PLAN_SCHEMA,
+        "plan_id": str(uuid.uuid4()),
+        "created_at": current,
+        "expires_at": current + HOST_SSH_TRUST_MAX_LIFETIME,
+        "operator_uid": operator_uid,
+        "machine_identity_sha256": machine_identity_sha256,
+        "host_release_id": host_release_id,
+        "ssh_config_sha256": ssh_config_sha256,
+        "previous_trust_id": previous_trust_id,
+        "sources": sources,
+    }
+    plan["trust_id"] = _host_ssh_trust_digest(host_ssh_trust_material(plan))
+    plan["plan_sha256"] = _host_ssh_trust_digest(plan)
+    return validate_host_ssh_trust_plan(plan, now=current)
+
+
+def _open_host_ssh_trust_directory_at(
+    parent_descriptor: int, name: str, expected_uid: int, expected_gid: int,
+    allowed_modes: set[int], failure: str,
+) -> tuple[int, os.stat_result]:
+    """Open and bind one fixed-name directory beneath a held parent fd."""
+    if (not isinstance(name, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,200}", name) is None
+            or name in {".", ".."}):
+        raise ReleaseFailure(failure)
+    try:
+        before = os.stat(
+            name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        raise ReleaseFailure(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, failure)
+        after_open = os.fstat(descriptor)
+        after_named = os.stat(
+            name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        if (not stat.S_ISDIR(opened.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or opened.st_uid != expected_uid
+                or opened.st_gid != expected_gid
+                or stat.S_IMODE(opened.st_mode) not in allowed_modes
+                or _host_ssh_trust_directory_identity(before)
+                   != _host_ssh_trust_directory_identity(opened)
+                or _host_ssh_trust_directory_identity(opened)
+                   != _host_ssh_trust_directory_identity(after_open)
+                or _host_ssh_trust_directory_identity(after_open)
+                   != _host_ssh_trust_directory_identity(after_named)):
+            raise ReleaseFailure(failure)
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _create_host_ssh_trust_directory_at(
+    parent_descriptor: int, name: str, expected_uid: int, expected_gid: int,
+    final_mode: int, failure: str,
+) -> tuple[int, os.stat_result]:
+    """Create, normalize, fsync, and bind one directory without path races."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+        created = os.stat(
+            name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        raise ReleaseFailure(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(created.st_mode)
+                or (created.st_dev, created.st_ino)
+                   != (opened.st_dev, opened.st_ino)):
+            raise ReleaseFailure(failure)
+        os.fchown(descriptor, expected_uid, expected_gid)
+        os.fchmod(descriptor, final_mode)
+        reject_extended_acl(descriptor, failure)
+        os.fsync(descriptor)
+        normalized = os.fstat(descriptor)
+        named = os.stat(
+            name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        if (not stat.S_ISDIR(normalized.st_mode)
+                or normalized.st_uid != expected_uid
+                or normalized.st_gid != expected_gid
+                or stat.S_IMODE(normalized.st_mode) != final_mode
+                or _host_ssh_trust_directory_identity(normalized)
+                   != _host_ssh_trust_directory_identity(named)):
+            raise ReleaseFailure(failure)
+        return descriptor, normalized
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _prepare_host_ssh_trust_root(
+    trust_root: Path, expected_uid: int,
+) -> Path:
+    """Publish a complete root or normalize only an exact empty prefix."""
+    parent = trust_root.parent
+    parent_info = _host_ssh_trust_parent(trust_root, expected_uid)
+    try:
+        parent_descriptor = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("host_ssh_trust_parent_untrusted") from error
+    root_descriptor = -1
+    generations_descriptor = -1
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        if (_host_ssh_trust_directory_identity(opened_parent)
+                != _host_ssh_trust_directory_identity(parent_info)):
+            raise ReleaseFailure("host_ssh_trust_parent_untrusted")
+        if not os.path.lexists(trust_root):
+            staging_name = f".{trust_root.name}.staging-{uuid.uuid4()}"
+            root_descriptor, root_info = (
+                _create_host_ssh_trust_directory_at(
+                    parent_descriptor, staging_name, expected_uid,
+                    parent_info.st_gid, 0o755,
+                    "host_ssh_trust_root_untrusted",
+                )
+            )
+            generations_descriptor, _generations_info = (
+                _create_host_ssh_trust_directory_at(
+                    root_descriptor, "generations", expected_uid,
+                    parent_info.st_gid, 0o755,
+                    "host_ssh_trust_generations_untrusted",
+                )
+            )
+            if os.listdir(root_descriptor) != ["generations"]:
+                raise ReleaseFailure("host_ssh_trust_root_untrusted")
+            os.fsync(generations_descriptor)
+            os.fsync(root_descriptor)
+            os.rename(
+                staging_name, trust_root.name,
+                src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+            )
+            os.fsync(parent_descriptor)
+            published = os.stat(
+                trust_root.name, dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if ((published.st_dev, published.st_ino)
+                    != (root_info.st_dev, root_info.st_ino)):
+                raise ReleaseFailure("host_ssh_trust_root_untrusted")
+        else:
+            root_descriptor, root_info = _open_host_ssh_trust_directory_at(
+                parent_descriptor, trust_root.name, expected_uid,
+                parent_info.st_gid, {0o700, 0o755},
+                "host_ssh_trust_root_untrusted",
+            )
+            inventory = os.listdir(root_descriptor)
+            recovering_root = stat.S_IMODE(root_info.st_mode) == 0o700
+            if (recovering_root
+                    and inventory not in ([], ["generations"])):
+                raise ReleaseFailure("host_ssh_trust_root_untrusted")
+            if "generations" in inventory:
+                generations_descriptor, generations_info = (
+                    _open_host_ssh_trust_directory_at(
+                        root_descriptor, "generations", expected_uid,
+                        parent_info.st_gid, {0o700, 0o755},
+                        "host_ssh_trust_generations_untrusted",
+                    )
+                )
+                recovering_generations = (
+                    stat.S_IMODE(generations_info.st_mode) == 0o700
+                )
+                if ((recovering_root or recovering_generations)
+                        and (inventory != ["generations"]
+                             or os.listdir(generations_descriptor))):
+                    raise ReleaseFailure(
+                        "host_ssh_trust_generations_untrusted"
+                    )
+            elif inventory:
+                raise ReleaseFailure("host_ssh_trust_generations_untrusted")
+            if recovering_root:
+                os.fchmod(root_descriptor, 0o755)
+                os.fsync(root_descriptor)
+            if generations_descriptor < 0:
+                generations_descriptor, _generations_info = (
+                    _create_host_ssh_trust_directory_at(
+                        root_descriptor, "generations", expected_uid,
+                        parent_info.st_gid, 0o755,
+                        "host_ssh_trust_generations_untrusted",
+                    )
+                )
+            elif stat.S_IMODE(generations_info.st_mode) == 0o700:
+                os.fchmod(generations_descriptor, 0o755)
+                os.fsync(generations_descriptor)
+            os.fsync(root_descriptor)
+            os.fsync(parent_descriptor)
+    finally:
+        if generations_descriptor >= 0:
+            os.close(generations_descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        os.close(parent_descriptor)
+    verify_acl_free_directory(
+        trust_root, expected_uid, 0o755, "host_ssh_trust_root_untrusted",
+    )
+    generations = trust_root / "generations"
+    verify_acl_free_directory(
+        generations, expected_uid, 0o755,
+        "host_ssh_trust_generations_untrusted",
+    )
+    return generations
+
+
+def _write_host_ssh_trust_file(
+    path: Path, raw: bytes, expected_uid: int, gid: int,
+) -> None:
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        | os.O_CLOEXEC, 0o444,
+    )
+    try:
+        os.fchown(descriptor, expected_uid, gid)
+        write_all(descriptor, raw, "host_ssh_trust_generation")
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+        reject_extended_acl(descriptor, "host_ssh_trust_generation_untrusted")
+    finally:
+        os.close(descriptor)
+
+
+def _retain_unselected_host_ssh_generation(
+    generations: Path, generation: Path, trust_id: str, expected_uid: int,
+) -> Path:
+    """Retain a complete unselected generation before fresh re-publication."""
+    _manifest, manifest_file_sha256 = _host_ssh_trust_manifest(
+        generation, trust_id, expected_uid,
+    )
+    retained = generations / (
+        f".unselected-{trust_id}-{manifest_file_sha256}-{uuid.uuid4()}"
+    )
+    if os.path.lexists(retained):
+        raise ReleaseFailure("host_ssh_trust_retained_generation_conflict")
+    os.rename(generation, retained)
+    fsync_directory(generations)
+    _retained_manifest, retained_sha256 = _host_ssh_trust_manifest(
+        retained, trust_id, expected_uid,
+    )
+    if retained_sha256 != manifest_file_sha256:
+        raise ReleaseFailure("host_ssh_trust_retained_generation_changed")
+    return retained
+
+
+def enroll_host_ssh_trust(
+    repo: Path, operator_uid: int, plan_value: object,
+    authorization_value: object, *,
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    trust_root: Path = HOST_SSH_TRUST_ROOT,
+    expected_uid: int = 0, now: int | None = None,
+    time_reader: Callable[[], int] | None = None,
+    machine_identity_reader: Callable[[], str] = host_machine_identity,
+    host_binding_reader: Callable[[Path, int], tuple[str, str]] = host_ssh_trust_host_binding,
+    source_reader: Callable[..., tuple[dict[str, dict[str, Any]], dict[str, bytes]]] = host_ssh_trust_sources,
+) -> dict[str, Any]:
+    def enrollment_time() -> int:
+        if time_reader is not None:
+            return time_reader()
+        return int(time.time()) if now is None else now
+
+    current_time = enrollment_time()
+    if os.geteuid() != expected_uid:
+        raise ReleaseFailure("host_ssh_trust_root_context_required")
+    # Parse and cryptographically bind the complete records before deciding
+    # whether this is a new enrollment or an exact replay.  Freshness is
+    # enforced below for every state-changing enrollment; an already-selected
+    # byte-for-byte generation remains replayable after an ambiguous caller
+    # timeout without granting an expired authorization any transition power.
+    plan = validate_host_ssh_trust_plan(
+        plan_value, now=current_time, require_fresh=False,
+    )
+    authorization = validate_host_ssh_trust_authorization(
+        authorization_value, plan, now=current_time, require_fresh=False,
+    )
+    if operator_uid != plan["operator_uid"]:
+        raise ReleaseFailure("host_ssh_trust_operator_mismatch")
+    observed_release, observed_config = host_binding_reader(
+        install_root, expected_uid,
+    )
+    if (observed_release != plan["host_release_id"]
+            or observed_config != plan["ssh_config_sha256"]
+            or machine_identity_reader() != plan["machine_identity_sha256"]):
+        raise ReleaseFailure("host_ssh_trust_host_binding_changed")
+    sources, projected = source_reader(repo, operator_uid)
+    if sources != plan["sources"]:
+        raise ReleaseFailure("host_ssh_trust_sources_changed")
+    existing = host_ssh_trust_current(
+        trust_root, expected_uid, allow_absent=True,
+        allow_unselected=True, allow_recoverable_prefix=True,
+    )
+    observed_previous = None if existing is None else existing[0]["trust_id"]
+    manifest: dict[str, Any] = {
+        "schema": HOST_SSH_TRUST_MANIFEST_SCHEMA,
+        "trust_id": plan["trust_id"],
+        "operator_uid": operator_uid,
+        "machine_identity_sha256": plan["machine_identity_sha256"],
+        "enrolled_release_id": plan["host_release_id"],
+        "ssh_config_sha256": plan["ssh_config_sha256"],
+        "provisioning_public_key_sha256": sources["provisioning_key"]["projected_sha256"],
+        "provisioning_public_key_fingerprint": sources["provisioning_key"]["fingerprint"],
+        "control_public_key_sha256": sources["control_key"]["projected_sha256"],
+        "control_public_key_fingerprint": sources["control_key"]["fingerprint"],
+        "known_hosts_sha256": sources["known_hosts"]["projected_sha256"],
+        "known_host_fingerprints": sources["known_hosts"]["host_fingerprints"],
+        "plan_sha256": plan["plan_sha256"],
+        "enrolled_at": authorization["authorized_at"],
+    }
+    manifest["manifest_sha256"] = _host_ssh_trust_digest(manifest)
+    exact_selected_replay = existing is not None and existing[0] == manifest
+    selected_same_material = (
+        existing is not None and observed_previous == plan["trust_id"]
+    )
+    if (observed_previous != plan["previous_trust_id"]
+            and not exact_selected_replay):
+        raise ReleaseFailure("host_ssh_trust_previous_changed")
+    if not exact_selected_replay:
+        fresh_time = enrollment_time()
+        validate_host_ssh_trust_plan(plan, now=fresh_time)
+        validate_host_ssh_trust_authorization(
+            authorization, plan, now=fresh_time,
+        )
+    if selected_same_material:
+        selected = host_ssh_trust_current(trust_root, expected_uid)
+        if selected != existing:
+            raise ReleaseFailure("host_ssh_trust_selector_changed")
+        selected_manifest = selected[0]
+        return {
+            "schema": HOST_SSH_TRUST_RESULT_SCHEMA,
+            "status": "already-enrolled",
+            "trust_id": plan["trust_id"],
+            "previous_trust_id": plan["previous_trust_id"],
+            "manifest_sha256": selected_manifest["manifest_sha256"],
+            "plan_sha256": plan["plan_sha256"],
+            "authorization_sha256": authorization["authorization_sha256"],
+            "operator_uid": operator_uid,
+            "machine_identity_sha256": plan["machine_identity_sha256"],
+            "ssh_config_sha256": plan["ssh_config_sha256"],
+            "enrolled_release_id": selected_manifest[
+                "enrolled_release_id"
+            ],
+        }
+    publication_baseline = host_ssh_trust_current(
+        trust_root, expected_uid, allow_absent=True,
+        allow_unselected=True, allow_recoverable_prefix=True,
+    )
+    if publication_baseline != existing:
+        raise ReleaseFailure("host_ssh_trust_previous_changed")
+    fresh_time = enrollment_time()
+    validate_host_ssh_trust_plan(plan, now=fresh_time)
+    validate_host_ssh_trust_authorization(
+        authorization, plan, now=fresh_time,
+    )
+    generations = _prepare_host_ssh_trust_root(trust_root, expected_uid)
+    fresh_time = enrollment_time()
+    validate_host_ssh_trust_plan(plan, now=fresh_time)
+    validate_host_ssh_trust_authorization(
+        authorization, plan, now=fresh_time,
+    )
+    final = generations / plan["trust_id"]
+    created = False
+    if os.path.lexists(final):
+        observed_manifest, _observed_sha = _host_ssh_trust_manifest(
+            final, plan["trust_id"], expected_uid,
+        )
+        if observed_manifest != manifest:
+            _retain_unselected_host_ssh_generation(
+                generations, final, plan["trust_id"], expected_uid,
+            )
+    if not os.path.lexists(final):
+        staging = generations / f".staging-{uuid.uuid4()}"
+        os.mkdir(staging, 0o700)
+        root_info = trust_root.lstat()
+        os.chown(staging, expected_uid, root_info.st_gid)
+        try:
+            _write_host_ssh_trust_file(
+                staging / "provisioning_key.pub", projected["provisioning_key"],
+                expected_uid, root_info.st_gid,
+            )
+            _write_host_ssh_trust_file(
+                staging / "control_key.pub", projected["control_key"],
+                expected_uid, root_info.st_gid,
+            )
+            _write_host_ssh_trust_file(
+                staging / "known_hosts", projected["known_hosts"],
+                expected_uid, root_info.st_gid,
+            )
+            _write_host_ssh_trust_file(
+                staging / "manifest.json", canonical_state_record(manifest),
+                expected_uid, root_info.st_gid,
+            )
+            os.chmod(staging, 0o555)
+            fsync_directory(staging)
+            os.rename(staging, final)
+            fsync_directory(generations)
+            created = True
+        except BaseException:
+            # Retain any partial generation as evidence; never reuse it.
+            raise
+    _host_ssh_trust_manifest(final, plan["trust_id"], expected_uid)
+    fresh_time = enrollment_time()
+    validate_host_ssh_trust_plan(plan, now=fresh_time)
+    validate_host_ssh_trust_authorization(
+        authorization, plan, now=fresh_time,
+    )
+    current = trust_root / "current"
+    if os.path.lexists(current):
+        selected = host_ssh_trust_current(trust_root, expected_uid)
+        if selected is not None and selected[0]["trust_id"] == plan["trust_id"]:
+            status = "enrolled" if created else "already-enrolled"
+        else:
+            temporary = trust_root / f".current-{uuid.uuid4()}"
+            temporary.symlink_to(f"generations/{plan['trust_id']}")
+            temporary_info = temporary.lstat()
+            if (temporary_info.st_uid != expected_uid
+                    or not stat.S_ISLNK(temporary_info.st_mode)):
+                raise ReleaseFailure("host_ssh_trust_selector_untrusted")
+            os.replace(temporary, current)
+            fsync_directory(trust_root)
+            status = "enrolled"
+    else:
+        temporary = trust_root / f".current-{uuid.uuid4()}"
+        temporary.symlink_to(f"generations/{plan['trust_id']}")
+        temporary_info = temporary.lstat()
+        if temporary_info.st_uid != expected_uid:
+            raise ReleaseFailure("host_ssh_trust_selector_untrusted")
+        os.replace(temporary, current)
+        fsync_directory(trust_root)
+        status = "enrolled"
+    selected = host_ssh_trust_current(trust_root, expected_uid)
+    if selected is None or selected[0] != manifest:
+        raise ReleaseFailure("host_ssh_trust_readback_failed")
+    return {
+        "schema": HOST_SSH_TRUST_RESULT_SCHEMA,
+        "status": status,
+        "trust_id": plan["trust_id"],
+        "previous_trust_id": plan["previous_trust_id"],
+        "manifest_sha256": manifest["manifest_sha256"],
+        "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "operator_uid": operator_uid,
+        "machine_identity_sha256": plan["machine_identity_sha256"],
+        "ssh_config_sha256": plan["ssh_config_sha256"],
+        "enrolled_release_id": plan["host_release_id"],
+    }
+
+
+def enforce_host_ssh_trust_release_compatibility(
+    payloads: Mapping[str, str], *, trust_root: Path = HOST_SSH_TRUST_ROOT,
+    expected_uid: int = 0,
+) -> None:
+    current = host_ssh_trust_current(
+        trust_root, expected_uid, allow_absent=True,
+    )
+    if current is None:
+        return
+    if (not isinstance(payloads, Mapping)
+            or payloads.get("ssh_config") != current[0]["ssh_config_sha256"]):
+        raise ReleaseFailure("host_ssh_trust_release_incompatible")
+
+
+def host_ssh_trust_status(
+    operator_uid: int, *, install_root: Path = DEFAULT_INSTALL_ROOT,
+    trust_root: Path = HOST_SSH_TRUST_ROOT, expected_uid: int = 0,
+    machine_identity_reader: Callable[[], str] = host_machine_identity,
+    host_binding_reader: Callable[[Path, int], tuple[str, str]] = host_ssh_trust_host_binding,
+) -> dict[str, Any]:
+    selected = host_ssh_trust_current(trust_root, expected_uid)
+    if selected is None:
+        raise ReleaseFailure("host_ssh_trust_missing")
+    manifest, manifest_raw_sha256 = selected
+    _release_id, config_sha256 = host_binding_reader(
+        install_root, expected_uid,
+    )
+    if (manifest["operator_uid"] != operator_uid
+            or manifest["machine_identity_sha256"] != machine_identity_reader()
+            or manifest["ssh_config_sha256"] != config_sha256):
+        raise ReleaseFailure("host_ssh_trust_status_mismatch")
+    return {
+        "schema": "secure-sandbox-host-ssh-trust-status-v1",
+        "status": "verified",
+        "trust_id": manifest["trust_id"],
+        "manifest_sha256": manifest["manifest_sha256"],
+        "manifest_file_sha256": manifest_raw_sha256,
+        "operator_uid": manifest["operator_uid"],
+        "machine_identity_sha256": manifest["machine_identity_sha256"],
+        "ssh_config_sha256": manifest["ssh_config_sha256"],
+        "enrolled_release_id": manifest["enrolled_release_id"],
+        "plan_sha256": manifest["plan_sha256"],
+    }
+
+
 def open_trusted_absolute_directory(
     path: Path, expected_uid: int, *, final_mode: int = 0o755,
 ) -> int:
@@ -9824,6 +11144,62 @@ def host_release_mutation(
 
         return wrapped
     return decorate
+
+
+def serialize_host_ssh_trust(
+    *, expected_uid_argument: str, exclusive: bool,
+):
+    """Coordinate trust snapshots/mutations with the Host install flock."""
+    def decorate(function):
+        signature = inspect.signature(function)
+
+        @functools.wraps(function)
+        def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            install_root = Path(bound.arguments["install_root"])
+            expected_uid = bound.arguments[expected_uid_argument]
+            held = _HOST_MUTATION_LOCK.get()
+            if held is not None:
+                if install_root != held[0] or expected_uid != held[1]:
+                    raise ReleaseFailure("host_release_lock_context_mismatch")
+                return function(*args, **kwargs)
+            descriptor = open_trusted_absolute_directory(
+                install_root, expected_uid,
+            )
+            token = None
+            try:
+                fcntl.flock(
+                    descriptor,
+                    fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+                )
+                if exclusive:
+                    token = _HOST_MUTATION_LOCK.set(
+                        (install_root, expected_uid, descriptor)
+                    )
+                return function(*args, **kwargs)
+            finally:
+                if token is not None:
+                    _HOST_MUTATION_LOCK.reset(token)
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+        return wrapped
+    return decorate
+
+
+# These operations are defined before the common Host lock implementation so
+# the enrollment data model remains next to its validators.  Wrap them here,
+# after the lock primitive exists, and before any command dispatch can run.
+make_host_ssh_trust_plan = serialize_host_ssh_trust(
+    expected_uid_argument="expected_install_uid", exclusive=False,
+)(make_host_ssh_trust_plan)
+host_ssh_trust_status = serialize_host_ssh_trust(
+    expected_uid_argument="expected_uid", exclusive=False,
+)(host_ssh_trust_status)
+enroll_host_ssh_trust = serialize_host_ssh_trust(
+    expected_uid_argument="expected_uid", exclusive=True,
+)(enroll_host_ssh_trust)
 
 
 def read_state_record_at(
@@ -15678,6 +17054,10 @@ def install(
                 or hashes != {name: sha256_bytes(value) for name, value in values.items()}
                 or release_id != release_identity(hashes)):
             raise ReleaseFailure("payload_override_invalid")
+    enforce_host_ssh_trust_release_compatibility(
+        hashes, trust_root=host_ssh_trust_root_for_install(install_root),
+        expected_uid=expected_uid,
+    )
     contract_raw = values["native_stack_coordination_contract"]
     contract = validate_native_stack_coordination_contract(contract_raw)
     coordination_floor = native_stack_coordination_floor(
@@ -16822,6 +18202,11 @@ def rollback(
             target_link.unlink()
     if target_path == current_path:
         raise ReleaseFailure("rollback_target_already_current")
+    enforce_host_ssh_trust_release_compatibility(
+        target_manifest["payloads"],
+        trust_root=host_ssh_trust_root_for_install(install_root),
+        expected_uid=expected_uid,
+    )
     enforce_release_native_stack_coordination_compatible(
         target_path, target_manifest, install_root, expected_uid,
     )
@@ -19345,6 +20730,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "command",
         choices=("prepare-native-host-release-preimage",
+                 "plan-host-ssh-trust", "enroll-host-ssh-trust",
+                 "status-host-ssh-trust",
                  "install", "recover-runtime-metadata-install",
                  "verify", "rollback", "migrate-launcher",
                  "recover-host-pair-transition",
@@ -19402,6 +20789,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-target-launcher-sha256")
     result.add_argument("--expected-previous-release-id")
     result.add_argument("--expected-plan-sha256")
+    result.add_argument("--operator-uid", type=int)
+    result.add_argument("--plan-json")
+    result.add_argument("--authorization-json")
     result.add_argument("--op-binary", type=Path, default=DEFAULT_OP_BINARY)
     result.add_argument("--gpgv-binary", type=Path, default=DEFAULT_GPGV_BINARY)
     result.add_argument("--json", action="store_true")
@@ -19416,8 +20806,48 @@ def main() -> int:
     else:
         state_root = args.state_root
     expected_uid = 0 if default_layout else os.geteuid()
+    host_ssh_trust_root = host_ssh_trust_root_for_install(args.install_root)
     try:
-        if args.command == "prepare-native-host-release-preimage":
+        if args.command == "plan-host-ssh-trust":
+            if args.operator_uid is None or args.operator_uid <= 0:
+                raise ReleaseFailure("host_ssh_trust_operator_required")
+            result = make_host_ssh_trust_plan(
+                args.repo.resolve(), args.operator_uid,
+                install_root=args.install_root,
+                trust_root=host_ssh_trust_root,
+                expected_install_uid=expected_uid,
+            )
+        elif args.command == "status-host-ssh-trust":
+            if args.operator_uid is None or args.operator_uid <= 0:
+                raise ReleaseFailure("host_ssh_trust_operator_required")
+            result = host_ssh_trust_status(
+                args.operator_uid, install_root=args.install_root,
+                trust_root=host_ssh_trust_root,
+                expected_uid=expected_uid,
+            )
+        elif args.command == "enroll-host-ssh-trust":
+            ensure_root(default_layout)
+            if (args.operator_uid is None or args.operator_uid <= 0
+                    or args.plan_json is None
+                    or args.authorization_json is None):
+                raise ReleaseFailure(
+                    "host_ssh_trust_enrollment_binding_required"
+                )
+            try:
+                plan_value = json.loads(args.plan_json)
+                authorization_value = json.loads(args.authorization_json)
+            except json.JSONDecodeError as error:
+                raise ReleaseFailure(
+                    "host_ssh_trust_enrollment_binding_invalid"
+                ) from error
+            result = enroll_host_ssh_trust(
+                args.repo.resolve(), args.operator_uid,
+                plan_value, authorization_value,
+                install_root=args.install_root,
+                trust_root=host_ssh_trust_root,
+                expected_uid=expected_uid,
+            )
+        elif args.command == "prepare-native-host-release-preimage":
             if (args.source_archive is None or args.output is None
                     or SHA256.fullmatch(str(
                         args.expected_source_archive_sha256 or ""
@@ -19902,7 +21332,17 @@ def main() -> int:
                 args.expected_launcher_sha256, args.expected_replacement_sha256,
                 args.op_binary, args.gpgv_binary,
             )
-        print(json.dumps(result, indent=2 if args.json else None, sort_keys=True))
+        if (args.command in {
+                "plan-host-ssh-trust", "enroll-host-ssh-trust",
+                "status-host-ssh-trust",
+        } and not args.json):
+            # The unprivileged trust client rejects any non-canonical manager
+            # reply before forwarding a plan or accepting a root result.
+            sys.stdout.buffer.write(canonical_state_record(result))
+        else:
+            print(json.dumps(
+                result, indent=2 if args.json else None, sort_keys=True,
+            ))
         if (args.command == "finalize-install-transition"
                 and result.get("status") not in {
                     "deployed_verified", "failed_rolled_back",

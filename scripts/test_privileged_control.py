@@ -4,7 +4,9 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
+import stat
 import subprocess
 import struct
 import sys
@@ -32,7 +34,613 @@ OPERATION = importlib.util.module_from_spec(OPERATION_SPEC)
 OPERATION_SPEC.loader.exec_module(OPERATION)
 
 
+class HostSSHTrustTests(unittest.TestCase):
+    MACHINE = "8" * 64
+
+    @staticmethod
+    def public_key(seed: int) -> tuple[bytes, str, bytes]:
+        algorithm = b"ssh-ed25519"
+        key = bytes([seed]) * 32
+        blob = (struct.pack(">I", len(algorithm)) + algorithm
+                + struct.pack(">I", len(key)) + key)
+        encoded = __import__("base64").b64encode(blob).decode("ascii").rstrip("=")
+        raw = f"ssh-ed25519 {encoded}\n".encode("ascii")
+        fingerprint = "SHA256:" + __import__("base64").b64encode(
+            hashlib.sha256(blob).digest(),
+        ).decode("ascii").rstrip("=")
+        return raw, fingerprint, blob
+
+    def setUp(self):
+        self.temporary = Path(tempfile.mkdtemp(prefix="sst.", dir="/tmp"))
+        self.uid = os.geteuid()
+        self.config = self.temporary / "release" / "ssh_config"
+        self.config.parent.mkdir(mode=0o755)
+        self.config.write_bytes((ROOT / "config/ssh_config.example").read_bytes())
+        self.config.chmod(0o444)
+        self.root = self.temporary / "host-ssh-trust"
+        generations = self.root / "generations"
+        generations.mkdir(mode=0o755, parents=True)
+        self.gid = self.root.lstat().st_gid
+        self.provisioning, provisioning_fingerprint, _ = self.public_key(1)
+        self.control, control_fingerprint, _ = self.public_key(2)
+        host_lines = []
+        host_fingerprints = {}
+        for alias, seed in zip(CONTROL.HOST_KEY_ALIASES, (3, 4, 5)):
+            raw, fingerprint, _blob = self.public_key(seed)
+            host_lines.append(f"{alias} {raw.decode('ascii').strip()}")
+            host_fingerprints[alias] = fingerprint
+        self.known_hosts = ("\n".join(host_lines) + "\n").encode("ascii")
+        material = {
+            "schema": CONTROL.HOST_SSH_TRUST_MATERIAL_SCHEMA,
+            "operator_uid": self.uid,
+            "machine_identity_sha256": self.MACHINE,
+            "ssh_config_sha256": hashlib.sha256(
+                self.config.read_bytes(),
+            ).hexdigest(),
+            "provisioning_public_key_sha256": hashlib.sha256(
+                self.provisioning,
+            ).hexdigest(),
+            "provisioning_public_key_fingerprint": provisioning_fingerprint,
+            "control_public_key_sha256": hashlib.sha256(
+                self.control,
+            ).hexdigest(),
+            "control_public_key_fingerprint": control_fingerprint,
+            "known_hosts_sha256": hashlib.sha256(self.known_hosts).hexdigest(),
+            "known_host_fingerprints": host_fingerprints,
+        }
+        self.trust_id = CONTROL.host_ssh_trust_digest(material)
+        self.generation = generations / self.trust_id
+        self.generation.mkdir(mode=0o755)
+        for name, raw in (
+            ("provisioning_key.pub", self.provisioning),
+            ("control_key.pub", self.control),
+            ("known_hosts", self.known_hosts),
+        ):
+            path = self.generation / name
+            path.write_bytes(raw); path.chmod(0o444)
+        manifest = {
+            "schema": CONTROL.HOST_SSH_TRUST_SCHEMA,
+            "trust_id": self.trust_id,
+            "operator_uid": self.uid,
+            "machine_identity_sha256": self.MACHINE,
+            "enrolled_release_id": "7" * 64,
+            "ssh_config_sha256": material["ssh_config_sha256"],
+            "provisioning_public_key_sha256":
+                material["provisioning_public_key_sha256"],
+            "provisioning_public_key_fingerprint": provisioning_fingerprint,
+            "control_public_key_sha256": material["control_public_key_sha256"],
+            "control_public_key_fingerprint": control_fingerprint,
+            "known_hosts_sha256": material["known_hosts_sha256"],
+            "known_host_fingerprints": host_fingerprints,
+            "plan_sha256": "9" * 64,
+            "enrolled_at": 2_000_000_000,
+        }
+        manifest["manifest_sha256"] = CONTROL.host_ssh_trust_digest(manifest)
+        self.manifest = manifest
+        manifest_path = self.generation / "manifest.json"
+        manifest_path.write_bytes(CONTROL.canonical_json(manifest) + b"\n")
+        manifest_path.chmod(0o444)
+        self.generation.chmod(0o555)
+        (self.root / "current").symlink_to(f"generations/{self.trust_id}")
+        self.provisioning_socket = self.temporary / "provisioning.sock"
+        self.control_socket = self.temporary / "control.sock"
+        self.socket_stats = {
+            path: SimpleNamespace(
+                st_dev=1, st_ino=index, st_mode=stat.S_IFSOCK | 0o600,
+                st_uid=self.uid, st_gid=self.gid, st_nlink=1,
+                st_mtime_ns=1, st_ctime_ns=1,
+            )
+            for index, path in enumerate(
+                (self.provisioning_socket, self.control_socket), 1,
+            )
+        }
+
+    def tearDown(self):
+        if self.generation.exists():
+            self.generation.chmod(0o755)
+        shutil.rmtree(self.temporary)
+
+    def agent_runner(self, _command, **kwargs):
+        sock = kwargs["env"]["SSH_AUTH_SOCK"]
+        raw = (self.provisioning if sock == str(self.provisioning_socket)
+               else self.control)
+        return subprocess.CompletedProcess(
+            ["ssh-add", "-L"], 0, raw.rstrip(b"\n") + b" fixture\n", b"",
+        )
+
+    def validate(self, **changes):
+        arguments = {
+            "expected_ssh_config": self.config,
+            "trust_root": self.root,
+            "trusted_uid": self.uid,
+            "trusted_gid": self.gid,
+            "effective_uid": self.uid,
+            "machine_identity_reader": lambda: self.MACHINE,
+            "agent_runner": self.agent_runner,
+            "provisioning_agent_socket": self.provisioning_socket,
+            "control_agent_socket": self.control_socket,
+            "socket_stat_reader": lambda path: self.socket_stats[path],
+        }
+        arguments.update(changes)
+        return CONTROL.validate_client_ssh_trust(self.config, **arguments)
+
+    def rewrite_manifest(self, update):
+        self.generation.chmod(0o755)
+        path = self.generation / "manifest.json"
+        path.chmod(0o644)
+        manifest = dict(self.manifest); update(manifest)
+        manifest["manifest_sha256"] = CONTROL.host_ssh_trust_digest({
+            key: value for key, value in manifest.items()
+            if key != "manifest_sha256"
+        })
+        path.write_bytes(CONTROL.canonical_json(manifest) + b"\n")
+        path.chmod(0o444); self.generation.chmod(0o555)
+
+    def test_complete_projection_allows_enrolled_operator_and_root(self):
+        value = self.validate()
+        self.assertEqual(value["trust_id"], self.trust_id)
+        value = self.validate(effective_uid=0)
+        self.assertEqual(value["operator_uid"], self.uid)
+
+    def test_wrong_config_path_rejected_before_agent_access(self):
+        called = mock.Mock(side_effect=self.agent_runner)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "host_ssh_config_path_invalid"):
+            CONTROL.validate_client_ssh_trust(
+                self.config, expected_ssh_config=self.config.with_name("other"),
+                agent_runner=called,
+            )
+        called.assert_not_called()
+
+    def test_user_writable_fallback_config_is_rejected(self):
+        self.config.chmod(0o644)
+        text = self.config.read_text().replace(
+            CONTROL.HOST_SSH_TRUST_CONFIG_PATHS[0],
+            "%d/SecureSandbox/runs/provisioning_key.pub",
+        )
+        self.config.write_text(text); self.config.chmod(0o444)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "host_ssh_config_contract_invalid"):
+            self.validate()
+
+    def test_direct_root_incompatible_gateway_proxy_is_rejected(self):
+        self.config.chmod(0o644)
+        self.config.write_text(self.config.read_text().replace(
+            CONTROL.HOST_GATEWAY_PROXY_COMMAND,
+            ("/usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/"
+             "current/vm_maintenance proxy-gateway --port %p"),
+        ))
+        self.config.chmod(0o444)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "host_ssh_config_contract_invalid"):
+            self.validate()
+
+    def test_writable_config_and_unexpected_generation_member_are_rejected(self):
+        self.config.chmod(0o644)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "host_ssh_config_untrusted"):
+            self.validate()
+        self.config.chmod(0o444)
+        self.generation.chmod(0o755)
+        extra = self.generation / "fallback-key.pub"
+        extra.write_bytes(self.provisioning); extra.chmod(0o444)
+        self.generation.chmod(0o555)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "generation_untrusted"):
+            self.validate()
+
+    def test_selector_and_generation_metadata_are_enforced(self):
+        self.generation.chmod(0o755)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "generation_untrusted"):
+            self.validate()
+        self.generation.chmod(0o555)
+        selector = self.root / "current"; selector.unlink()
+        selector.symlink_to(f"../{self.trust_id}")
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "selector_untrusted"):
+            self.validate()
+
+    def test_trust_parent_acl_boundary_is_enforced(self):
+        original = CONTROL._trusted_directory
+
+        def inspect(path, *args, **kwargs):
+            if Path(path) == self.root.parent:
+                raise CONTROL.ControlFailure(
+                    "host_ssh_trust_parent_untrusted",
+                )
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(
+            CONTROL, "_trusted_directory", side_effect=inspect,
+        ), self.assertRaisesRegex(
+            CONTROL.ControlFailure, "host_ssh_trust_parent_untrusted",
+        ):
+            self.validate()
+
+    def test_manifest_machine_and_operator_are_enforced(self):
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "machine_changed"):
+            self.validate(machine_identity_reader=lambda: "6" * 64)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "operator_mismatch"):
+            self.validate(effective_uid=self.uid + 1000)
+
+    def test_key_content_and_known_host_aliases_are_enforced(self):
+        self.generation.chmod(0o755)
+        path = self.generation / "control_key.pub"; path.chmod(0o644)
+        path.write_bytes(self.provisioning); path.chmod(0o444)
+        self.generation.chmod(0o555)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "key_separation|content_changed"):
+            self.validate()
+
+    def test_agent_must_be_single_exact_identity(self):
+        def wrong_agent(_command, **kwargs):
+            raw, _fingerprint, _blob = self.public_key(6)
+            return subprocess.CompletedProcess(
+                ["ssh-add", "-L"], 0, raw, b"",
+            )
+        with self.assertRaisesRegex(CONTROL.ControlFailure, "agent_invalid"):
+            self.validate(agent_runner=wrong_agent)
+
+    def test_noncanonical_manifest_is_rejected(self):
+        self.generation.chmod(0o755)
+        manifest = self.generation / "manifest.json"; manifest.chmod(0o644)
+        manifest.write_bytes(json.dumps(self.manifest, indent=2).encode() + b"\n")
+        manifest.chmod(0o444); self.generation.chmod(0o555)
+        with self.assertRaisesRegex(CONTROL.ControlFailure, "manifest_invalid"):
+            self.validate()
+
+    def test_hardlinked_key_and_wrong_agent_socket_owner_are_rejected(self):
+        os.link(
+            self.generation / "provisioning_key.pub",
+            self.temporary / "unexpected-hardlink",
+        )
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "provisioning_key_untrusted"):
+            self.validate()
+        (self.temporary / "unexpected-hardlink").unlink()
+        socket_info = self.socket_stats[self.provisioning_socket]
+        self.socket_stats[self.provisioning_socket] = SimpleNamespace(
+            **{
+                name: getattr(socket_info, name)
+                for name in (
+                    "st_dev", "st_ino", "st_mode", "st_gid", "st_nlink",
+                    "st_mtime_ns", "st_ctime_ns",
+                )
+            },
+            st_uid=self.uid + 1,
+        )
+        with self.assertRaisesRegex(CONTROL.ControlFailure, "agent_invalid"):
+            self.validate()
+
+    def test_trust_digests_include_the_canonical_record_newline(self):
+        unsigned = {
+            key: value for key, value in self.manifest.items()
+            if key != "manifest_sha256"
+        }
+        expected = hashlib.sha256(
+            CONTROL.canonical_json(unsigned) + b"\n",
+        ).hexdigest()
+        without_newline = hashlib.sha256(
+            CONTROL.canonical_json(unsigned),
+        ).hexdigest()
+        self.assertEqual(CONTROL.host_ssh_trust_digest(unsigned), expected)
+        self.assertEqual(self.manifest["manifest_sha256"], expected)
+        self.assertNotEqual(expected, without_newline)
+
+    def test_config_declares_only_fixed_projection_paths(self):
+        text = (ROOT / "config/ssh_config.example").read_text()
+        self.assertNotIn("%d/SecureSandbox", text)
+        self.assertEqual(text.count(CONTROL.HOST_SSH_TRUST_CONFIG_PATHS[0]), 4)
+        self.assertEqual(text.count(CONTROL.HOST_SSH_TRUST_CONFIG_PATHS[1]), 3)
+        self.assertEqual(text.count(CONTROL.HOST_SSH_TRUST_CONFIG_PATHS[2]), 7)
+        self.assertEqual(text.count("StrictHostKeyChecking yes"), 7)
+        self.assertEqual(text.count("IdentitiesOnly yes"), 7)
+        self.assertEqual(
+            text.count(f"ProxyCommand {CONTROL.HOST_GATEWAY_PROXY_COMMAND}"),
+            2,
+        )
+        self.assertNotIn("current/vm_maintenance proxy-gateway", text)
+
+
+class ClientSSHIdentityTests(unittest.TestCase):
+    def setUp(self):
+        if os.geteuid() == 0:
+            self.skipTest("operator identity fixture requires a non-root owner")
+        self.temporary = Path(tempfile.mkdtemp(
+            prefix="ssop.", dir="/private/tmp",
+        ))
+        self.home = self.temporary / "operator-home"
+        self.bundle = (
+            self.home / CONTROL.HOST_OPERATOR_REPOSITORY_NAME
+            / CONTROL.HOST_GATEWAY_BUNDLE_RELATIVE
+        )
+        self.bundle.mkdir(mode=0o700, parents=True)
+        (self.home / CONTROL.HOST_OPERATOR_REPOSITORY_NAME).chmod(0o755)
+        (self.home / CONTROL.HOST_OPERATOR_REPOSITORY_NAME / "vms").chmod(
+            0o700,
+        )
+        self.home.chmod(0o750)
+        self.uid = os.geteuid()
+        self.gid = os.getgid()
+        for path in (
+            self.home,
+            self.home / CONTROL.HOST_OPERATOR_REPOSITORY_NAME,
+            self.home / CONTROL.HOST_OPERATOR_REPOSITORY_NAME / "vms",
+            self.bundle,
+        ):
+            os.chown(path, -1, self.gid)
+        self.account = SimpleNamespace(
+            pw_uid=self.uid, pw_gid=self.gid, pw_name="fixtureoperator",
+            pw_dir=str(self.home),
+        )
+        self.manifest = {"operator_uid": self.uid}
+        self.provisioning_socket = self.temporary / "provisioning.sock"
+        self.socket_stats = {
+            self.provisioning_socket: SimpleNamespace(
+                st_dev=1, st_ino=1, st_mode=stat.S_IFSOCK | 0o600,
+                st_uid=self.uid, st_gid=self.gid, st_nlink=1,
+                st_mtime_ns=1, st_ctime_ns=1,
+            ),
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.temporary)
+
+    def expected_process_options(self):
+        return {
+            "user": self.uid,
+            "group": self.gid,
+            "extra_groups": [],
+            "cwd": str(self.home),
+            "env": {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "HOME": str(self.home),
+                "USER": "fixtureoperator",
+                "LOGNAME": "fixtureoperator",
+                "LANG": "C",
+                "LC_ALL": "C",
+            },
+        }
+
+    def root_options(self):
+        return CONTROL.client_ssh_process_options(
+            self.manifest, effective_uid=0,
+            account_reader=lambda _uid: self.account,
+        )
+
+    def arguments(self, command="run"):
+        return SimpleNamespace(
+            request_id="11111111-1111-4111-8111-111111111111",
+            command=command, arguments=[], name="control-status",
+            ssh_config="/trusted/config", host="sandbox-gateway-control",
+            timeout_seconds=2, stdin_file=None, files=[],
+        )
+
+    def test_root_options_validate_account_repo_and_gateway_bundle(self):
+        self.assertEqual(self.root_options(), self.expected_process_options())
+        self.assertEqual(
+            CONTROL.client_ssh_process_options(
+                self.manifest, effective_uid=self.uid,
+                account_reader=lambda _uid: self.account,
+            ),
+            {},
+        )
+        self.bundle.chmod(0o770)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "gateway_bundle_untrusted"):
+            self.root_options()
+
+    def test_root_options_reject_writable_or_acl_granted_path_component(self):
+        vms = self.bundle.parent
+        vms.chmod(0o770)
+        with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "repository_untrusted"):
+            self.root_options()
+        vms.chmod(0o700)
+        with mock.patch.object(
+                CONTROL, "_reject_extended_acl",
+                side_effect=CONTROL.ControlFailure(
+                    "host_ssh_operator_repository_untrusted",
+                )):
+            with self.assertRaisesRegex(
+                    CONTROL.ControlFailure, "repository_untrusted"):
+                self.root_options()
+
+    def test_root_options_admit_only_deny_acl_on_operator_home(self):
+        with (mock.patch.object(
+                  CONTROL, "_reject_allowing_acl",
+              ) as home_acl, mock.patch.object(
+                  CONTROL, "_reject_extended_acl",
+              ) as strict_acl):
+            self.root_options()
+        home_acl.assert_called_once()
+        self.assertEqual(strict_acl.call_count, 3)
+        with mock.patch.object(
+                CONTROL, "_reject_allowing_acl",
+                side_effect=CONTROL.ControlFailure(
+                    "host_ssh_operator_home_untrusted",
+                )):
+            with self.assertRaisesRegex(
+                    CONTROL.ControlFailure, "home_untrusted"):
+                self.root_options()
+
+    def test_root_agent_query_drops_to_enrolled_operator(self):
+        raw, fingerprint, blob = HostSSHTrustTests.public_key(7)
+        socket_path = self.provisioning_socket
+        observed = {}
+
+        def runner(_command, **kwargs):
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(
+                ["ssh-add", "-L"], 0,
+                raw.rstrip(b"\n") + b" fixture\n", b"",
+            )
+
+        with (mock.patch.object(CONTROL.os, "geteuid", return_value=0),
+              mock.patch.object(
+                  CONTROL.pwd, "getpwuid", return_value=self.account,
+              )):
+            CONTROL._agent_identity(
+                socket_path, self.uid, blob, fingerprint, runner,
+                lambda path: self.socket_stats[path],
+            )
+        self.assertEqual(observed["user"], self.uid)
+        self.assertEqual(observed["group"], self.gid)
+        self.assertEqual(observed["extra_groups"], [])
+
+    def test_root_direct_ssh_proxy_runs_resolver_as_enrolled_operator(self):
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            ["vm_maintenance", "proxy-gateway"], 0, b"", b"",
+        ))
+        with (mock.patch.object(
+                  CONTROL, "validate_client_ssh_trust",
+                  return_value=self.manifest,
+              ) as trust, mock.patch.object(
+                  CONTROL.os, "geteuid", return_value=0,
+              ), mock.patch.object(
+                  CONTROL.pwd, "getpwuid", return_value=self.account,
+              )):
+            status = CONTROL.proxy_gateway_main(
+                SimpleNamespace(port="22"), runner=runner,
+            )
+        self.assertEqual(status, 0)
+        trust.assert_called_once_with(CONTROL.HOST_SSH_CONFIG)
+        command = runner.call_args.args[0]
+        self.assertEqual(command, [
+            "/usr/bin/python3", "-I", str(CONTROL.HOST_VM_MAINTENANCE),
+            "proxy-gateway", "--port", "22",
+        ])
+        self.assertFalse(runner.call_args.kwargs["check"])
+        for name, value in self.expected_process_options().items():
+            self.assertEqual(runner.call_args.kwargs[name], value)
+
+    def test_operator_direct_ssh_proxy_preserves_operator_identity(self):
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            ["vm_maintenance", "proxy-gateway"], 19, b"", b"",
+        ))
+        with (mock.patch.object(
+                  CONTROL, "validate_client_ssh_trust",
+                  return_value=self.manifest,
+              ), mock.patch.object(
+                  CONTROL.os, "geteuid", return_value=self.uid,
+              ), mock.patch.object(
+                  CONTROL.pwd, "getpwuid", return_value=self.account,
+              )):
+            status = CONTROL.proxy_gateway_main(
+                SimpleNamespace(port="22"), runner=runner,
+            )
+        self.assertEqual(status, 19)
+        self.assertEqual(runner.call_args.kwargs, {"check": False})
+
+    def test_proxy_rejects_noncanonical_port_before_trust_access(self):
+        for port in (22, "022", "+22", "23", "22;id", ""):
+            with (self.subTest(port=port), mock.patch.object(
+                      CONTROL, "validate_client_ssh_trust",
+                  ) as trust, self.assertRaisesRegex(
+                      CONTROL.ControlFailure, "gateway_proxy_port_invalid",
+                  )):
+                CONTROL.proxy_gateway_main(
+                    SimpleNamespace(port=port), runner=mock.Mock(),
+                )
+            trust.assert_not_called()
+
+    def test_invalid_trust_prevents_every_ssh_spawn(self):
+        failure = CONTROL.ControlFailure("host_ssh_trust_manifest_invalid")
+        with (mock.patch.object(
+                  CONTROL, "validate_client_ssh_trust", side_effect=failure,
+              ), mock.patch.object(
+                  CONTROL, "client_ssh_process_options",
+              ) as process_options, mock.patch.object(
+                  CONTROL.subprocess, "Popen",
+              ) as popen, self.assertRaisesRegex(
+                  CONTROL.ControlFailure, "host_ssh_trust_manifest_invalid",
+              )):
+            CONTROL.client_main(self.arguments())
+        process_options.assert_not_called()
+        popen.assert_not_called()
+
+    def test_root_ordinary_client_drops_every_ssh_process_to_operator(self):
+        class Sink:
+            def __init__(self):
+                self.closed = False
+
+            def write(self, data):
+                return len(data)
+
+            def close(self):
+                self.closed = True
+
+        process = SimpleNamespace(
+            pid=12345, stdin=Sink(), returncode=0,
+            wait=lambda timeout=None: 0, poll=lambda: 0,
+        )
+        with (mock.patch.object(
+                  CONTROL, "validate_client_ssh_trust",
+                  return_value=self.manifest,
+              ), mock.patch.object(CONTROL.os, "geteuid", return_value=0),
+              mock.patch.object(
+                  CONTROL.pwd, "getpwuid", return_value=self.account,
+              ), mock.patch.object(
+                  CONTROL.subprocess, "Popen", return_value=process,
+              ) as popen, mock.patch.object(
+                  CONTROL, "process_group_exists", return_value=False,
+              )):
+            self.assertEqual(CONTROL.client_main(self.arguments()), 0)
+        kwargs = popen.call_args.kwargs
+        for name, value in self.expected_process_options().items():
+            self.assertEqual(kwargs[name], value)
+
+    def test_root_stream_client_drops_every_ssh_process_to_operator(self):
+        real_popen = subprocess.Popen
+        observed = {}
+
+        def launch(_command, **kwargs):
+            observed.update(kwargs)
+            return real_popen(
+                [sys.executable, "-c", "import os;os.write(1,b'SSSTRM1\\n')"],
+                stdin=kwargs["stdin"], stdout=kwargs["stdout"],
+                start_new_session=kwargs["start_new_session"],
+                bufsize=kwargs.get("bufsize", -1),
+            )
+
+        with (open(os.devnull, "rb", buffering=0) as stdin,
+              tempfile.TemporaryFile("w+b", buffering=0) as stdout,
+              mock.patch.object(
+                  CONTROL, "validate_client_ssh_trust",
+                  return_value=self.manifest,
+              ), mock.patch.object(CONTROL.os, "geteuid", return_value=0),
+              mock.patch.object(
+                  CONTROL.pwd, "getpwuid", return_value=self.account,
+              ), mock.patch.object(
+                  CONTROL.subprocess, "Popen", side_effect=launch,
+              ), mock.patch.object(CONTROL.sys, "stdin", stdin),
+              mock.patch.object(CONTROL.sys, "stdout", stdout)):
+            self.assertEqual(CONTROL.client_main(self.arguments("stream")), 0)
+        for name, value in self.expected_process_options().items():
+            self.assertEqual(observed[name], value)
+
+
 class RequestTests(unittest.TestCase):
+    def setUp(self):
+        self.trust_validator = mock.patch.object(
+            CONTROL, "validate_client_ssh_trust",
+        )
+        self.trust_validator_mock = self.trust_validator.start()
+        self.trust_validator_mock.return_value = {
+            "operator_uid": max(1, os.geteuid()),
+        }
+        self.process_options = mock.patch.object(
+            CONTROL, "client_ssh_process_options", return_value={},
+        )
+        self.process_options.start()
+
+    def tearDown(self):
+        self.process_options.stop()
+        self.trust_validator.stop()
+
     @staticmethod
     def _stream_arguments(timeout_seconds=2):
         return SimpleNamespace(

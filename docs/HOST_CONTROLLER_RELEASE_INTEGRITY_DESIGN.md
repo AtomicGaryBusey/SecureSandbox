@@ -42,6 +42,59 @@ Short-lived production operator workflows invoke the same root-owned active
 `control_client` and `ssh_config` payloads directly. Their mutable repository
 copies are only release-build and expected-byte inputs; they are never the
 executed production client or SSH configuration.
+
+### Machine SSH trust generation
+
+The signed SSH configuration names only fixed files beneath
+`/usr/local/var/lib/secure-sandbox/host-ssh-trust/current`. A separate
+Touch-ID-only `host-ssh-trust-enroll` operation admits the operator-owned
+mode-0600 public-key and known-host source files only after binding their inode
+metadata and canonical bytes, the two single-identity ephemeral agents, the
+operator UID, physical Mac identity, current Host release, exact SSH
+configuration digest, prior trust generation, requesting agent/session, and a
+short-lived plan. It has no administrator-password or direct-sudo fallback.
+
+Root publishes only canonical public keys, exactly three Ed25519 HostKeyAlias
+records with three distinct host-key fingerprints, and a self-digested manifest
+into a content-addressed mode-0555 generation with mode-0444 files. The
+mode-bit-only, ACL-free parent is revalidated by both publisher and consumer.
+Plan and status snapshots take the Host install-root flock shared; enrollment
+takes it exclusive from its first host/trust read through selector fsync and
+independent readback. Install and rollback use that same exclusive flock, so a
+trust ceremony cannot race a Host configuration transition or another
+enrollment. Authorization freshness is sampled only after lock acquisition and
+is revalidated immediately before generation mutation and selector publication.
+An atomic relative `current` selector chooses the generation after directory
+fsync and independent readback. Private keys never enter the release or trust
+store. Exact replay of the already-selected byte-identical generation can
+resolve an ambiguous timeout. A fresh no-op ceremony over the same selected
+material preserves the selected generation's original audit manifest while
+recording the new authorization result. A complete generation interrupted
+before selector publication is retained as immutable evidence and may be
+re-published under the same stable trust ID only through a fresh plan and fresh
+Touch ID authorization; expired authority cannot select a new generation.
+
+After enrollment, install and rollback reject any target whose `ssh_config`
+payload digest differs from the enrolled digest. The enrollment is therefore
+release-ID independent but configuration-monotonic. The active control client
+validates the complete projection, machine, agent sockets, loaded identities,
+and signed configuration before every SSH spawn. A root client runs OpenSSH as
+the enrolled operator's UID and primary GID with an empty supplementary-group
+set. The signed Gateway ProxyCommand enters the same validator and only then
+runs the Parallels resolver as that operator, which preserves the resolver's
+root-rejection invariant even for immutable campaign drivers that invoke
+OpenSSH directly as root.
+An existing trust root without a valid `current` selector is an incomplete
+transaction, not clean absence. It fences install and rollback until an
+authorized enrollment recovery publishes and reads back a valid selector. A
+durable but exactly empty, independently trusted root created before its first
+`generations` directory is recoverable only by the fresh-authority enrollment
+path; any unexpected entry fails closed, and compatibility never admits the
+empty-root state. Descriptor-relative creation publishes a fully normalized
+root plus `generations` directory together. Fresh authority may also normalize
+only a proven ACL-free, empty mode-0700 root or `generations` prefix retained
+from an interrupted older creator; nonempty prefixes remain immutable evidence
+and fail closed.
 The release ID is a SHA-256 digest over the named payload hashes. Installed
 payloads and manifests are root-owned and not group- or world-writable.
 Once `host-release-launcher-pair-fence-v1` is active, the stable launcher is one

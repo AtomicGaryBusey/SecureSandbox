@@ -94,6 +94,38 @@ class ScenarioSupervisorTests(unittest.TestCase):
                     acceptance.COLLECTOR_PRIMARY_AUTHORITY[collector],
                 )
 
+    def test_root_research_ssh_uses_operator_dropping_gateway_proxy(self):
+        campaign = self.campaign()
+        fixture = {"schema": "scenario-result-fixture"}
+        command = mock.Mock(return_value=subprocess.CompletedProcess(
+            ["ssh"], 0, acceptance.canonical(fixture), b"",
+        ))
+        with (mock.patch.object(supervisor.COMMON, "command", command),
+              mock.patch.object(
+                  supervisor, "validate_result", return_value=fixture,
+              )):
+            self.assertEqual(
+                supervisor.run_research(
+                    campaign, "activate-future-session", "runtime", None,
+                    None,
+                ),
+                fixture,
+            )
+        argv = command.call_args.args[0]
+        self.assertEqual(argv[:4], [
+            str(supervisor.COMMON.SSH), "-F",
+            str(supervisor.COMMON.SSH_CONFIG),
+            supervisor.COMMON.RESEARCH_ADMIN,
+        ])
+        config = (ROOT / "config/ssh_config.example").read_text()
+        bridge = (
+            "ProxyCommand /usr/bin/python3 -I "
+            "/usr/local/libexec/secure-sandbox-host/current/control_client "
+            "proxy-gateway --port %p"
+        )
+        self.assertEqual(config.count(bridge), 2)
+        self.assertNotIn("current/vm_maintenance proxy-gateway", config)
+
     def test_production_scan_uses_complete_shared_provider_path_inventory(self):
         absent = lambda command, **_kwargs: subprocess.CompletedProcess(
             command, 44, b"", b"",

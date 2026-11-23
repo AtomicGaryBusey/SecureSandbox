@@ -7980,20 +7980,26 @@ raise SystemExit(child.wait())
 
 
 class NativeHostSourceProvenanceTests(unittest.TestCase):
-    def test_host_ssh_config_is_tracked_and_operator_portable(self):
+    def test_host_ssh_config_is_tracked_and_uses_root_trust_projection(self):
         self.assertEqual(
             MANAGER.PAYLOAD_SOURCES["ssh_config"],
             Path("config/ssh_config.example"),
         )
         self.assertNotIn("ssh_config", MANAGER.UNTRACKED_PAYLOAD_NAMES)
         text = (REPO / MANAGER.PAYLOAD_SOURCES["ssh_config"]).read_text(encoding="utf-8")
-        self.assertIn("IdentityFile %d/SecureSandbox/runs/control_key.pub", text)
-        self.assertIn("UserKnownHostsFile %d/SecureSandbox/runs/known_hosts", text)
+        trust = "/usr/local/var/lib/secure-sandbox/host-ssh-trust/current"
+        self.assertIn(f"IdentityFile {trust}/provisioning_key.pub", text)
+        self.assertIn(f"IdentityFile {trust}/control_key.pub", text)
+        self.assertIn(f"UserKnownHostsFile {trust}/known_hosts", text)
+        self.assertNotIn("%d/SecureSandbox/runs", text)
         self.assertNotIn("10.211.55.16", text)
         self.assertEqual(text.count("HostKeyAlias SecureSandbox-Gateway"), 2)
         self.assertEqual(text.count(
             "ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/"
-            "current/vm_maintenance proxy-gateway --port %p"), 2)
+            "current/control_client proxy-gateway --port %p"), 2)
+        self.assertNotIn(
+            "current/vm_maintenance proxy-gateway --port %p", text,
+        )
         self.assertEqual(text.count("HostKeyAlias SecureSandbox-Research"), 3)
         self.assertEqual(text.count("HostKeyAlias SecureSandbox-Target"), 2)
         self.assertNotIn("REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH", text)
@@ -9397,6 +9403,93 @@ class HostControllerReleaseTests(unittest.TestCase):
             verified_after_checkout_change["release_id"],
             deployed["release_id"],
         )
+
+    def test_host_ssh_trust_gates_real_install_and_rollback_before_mutation(self):
+        def durable_state():
+            entries = {}
+            if self.install_root.exists():
+                for path in sorted(
+                    self.install_root.rglob("*"),
+                    key=lambda item: item.relative_to(
+                        self.install_root,
+                    ).as_posix(),
+                ):
+                    relative = path.relative_to(self.install_root).as_posix()
+                    info = path.lstat()
+                    mode = stat.S_IMODE(info.st_mode)
+                    if path.is_symlink():
+                        entries[relative] = ("symlink", mode, os.readlink(path))
+                    elif path.is_file():
+                        entries[relative] = (
+                            "file", mode,
+                            hashlib.sha256(path.read_bytes()).hexdigest(),
+                        )
+                    else:
+                        entries[relative] = ("directory", mode)
+            launcher = (
+                hashlib.sha256(self.launcher.read_bytes()).hexdigest()
+                if self.launcher.exists() else None
+            )
+            return entries, launcher
+
+        first_candidate = self.native_host_candidate_binding()
+        with mock.patch.object(
+            MANAGER, "host_ssh_trust_current", return_value=None,
+        ) as absent:
+            first = self.install(first_candidate)["release_id"]
+        self.assertTrue(absent.called)
+
+        first_values, _first_hashes, _first_release = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=first_candidate[0],
+            expected_native_host_candidate=first_candidate[1],
+        )
+        trust = ({
+            "ssh_config_sha256": hashlib.sha256(
+                first_values["ssh_config"],
+            ).hexdigest(),
+        }, "f" * 64)
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": first_values["controller"]
+                + b"\n# host SSH trust integration target\n",
+        })
+        with mock.patch.object(
+            MANAGER, "host_ssh_trust_current", return_value=trust,
+        ):
+            second = self.install(second_candidate)["release_id"]
+        self.assertNotEqual(first, second)
+
+        incompatible = ({"ssh_config_sha256": "7" * 64}, "8" * 64)
+        before_rollback = durable_state()
+        with mock.patch.object(
+            MANAGER, "host_ssh_trust_current", return_value=incompatible,
+        ), mock.patch.object(
+            MANAGER, "execute_host_pair_transition",
+            side_effect=AssertionError("transition must remain fenced"),
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_ssh_trust_release_incompatible",
+        ):
+            self.authorized_rollback(first)
+        self.assertEqual(durable_state(), before_rollback)
+
+        with mock.patch.object(
+            MANAGER, "host_ssh_trust_current", return_value=trust,
+        ):
+            rolled_back = self.authorized_rollback(first)
+        self.assertEqual(rolled_back["status"], "rolled_back")
+        self.assertEqual((self.install_root / "current").resolve().name, first)
+
+        before_install = durable_state()
+        with mock.patch.object(
+            MANAGER, "host_ssh_trust_current", return_value=incompatible,
+        ), mock.patch.object(
+            MANAGER, "execute_host_pair_transition",
+            side_effect=AssertionError("transition must remain fenced"),
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_ssh_trust_release_incompatible",
+        ):
+            self.install(second_candidate)
+        self.assertEqual(durable_state(), before_install)
 
     def test_coordination_floor_blocks_pre_marker_selector_everywhere(self):
         deployed = self.install()

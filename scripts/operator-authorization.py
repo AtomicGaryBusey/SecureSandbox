@@ -70,12 +70,38 @@ HOST_RELEASE_TARGET_PLAN_SCHEMA = (
 HOST_RELEASE_ROLLBACK_PLAN_SCHEMA = (
     "secure-sandbox-host-release-rollback-plan-v1"
 )
+HOST_SSH_TRUST_OPERATION = "host-ssh-trust-enroll"
+HOST_SSH_TRUST_PLAN_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-enrollment-plan-v1"
+)
+HOST_SSH_TRUST_AUTHORIZATION_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-authorization-v1"
+)
+HOST_SSH_TRUST_RESULT_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-enrollment-result-v1"
+)
+HOST_SSH_TRUST_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust"
+)
+HOST_SSH_TRUST_ALIASES = (
+    "SecureSandbox-Gateway",
+    "SecureSandbox-Research",
+    "SecureSandbox-Target",
+)
+HOST_SSH_TRUST_SOURCE_PATHS = {
+    "provisioning_key": "runs/provisioning_key.pub",
+    "control_key": "runs/control_key.pub",
+    "known_hosts": "runs/known_hosts",
+}
 ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
+ACL_NEXT_ENTRY = -1
+ACL_EXTENDED_DENY = 2
 _ACL_LIBC = ctypes.CDLL(None, use_errno=True)
 _ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
 _ACL_GET_FILE = getattr(_ACL_LIBC, "acl_get_file", None)
 _ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_GET_TAG_TYPE = getattr(_ACL_LIBC, "acl_get_tag_type", None)
 _ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
 if _ACL_GET_FD_NP is not None:
     _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -88,6 +114,11 @@ if _ACL_GET_ENTRY is not None:
         ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
     ]
     _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_GET_TAG_TYPE is not None:
+    _ACL_GET_TAG_TYPE.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+    ]
+    _ACL_GET_TAG_TYPE.restype = ctypes.c_int
 if _ACL_FREE is not None:
     _ACL_FREE.argtypes = [ctypes.c_void_p]
     _ACL_FREE.restype = ctypes.c_int
@@ -418,6 +449,7 @@ OPERATION_RESOURCES = {
     "execution-approval-software-retire": "/usr/local/var/lib/secure-sandbox/execution-approval",
     "host-controller-install": "/usr/local/libexec/secure-sandbox-host",
     "host-controller-rollback": "/usr/local/libexec/secure-sandbox-host",
+    HOST_SSH_TRUST_OPERATION: str(HOST_SSH_TRUST_ROOT),
     "pki-anchor-begin": "/usr/local/var/lib/secure-sandbox/pki",
     "pki-anchor-commit": "/usr/local/var/lib/secure-sandbox/pki",
     "installer-promote-canonical": "/Library/Application Support/SecureSandbox/installers",
@@ -461,6 +493,7 @@ OPERATION_RESOURCES = {
 
 TOUCHID_ONLY_OPERATIONS = frozenset({
     "host-controller-install", "host-controller-rollback",
+    HOST_SSH_TRUST_OPERATION,
     "native-session-start", "native-session-stop",
     "execution-approval-key-init", "execution-approval-sign",
     "execution-approval-migration-activate",
@@ -1671,6 +1704,350 @@ def validate_host_release_authorized_target_plan(
     raise AuthorizationError("operation_parameters_invalid")
 
 
+def host_ssh_trust_machine_identity() -> str:
+    """Return the physical Mac identity used by the protected trust store."""
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=10,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                 "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AuthorizationError("host_ssh_trust_machine_identity_invalid") from error
+    platform_uuid = re.search(
+        rb'"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]{36})"', result.stdout,
+    )
+    serial = re.search(
+        rb'"IOPlatformSerialNumber"\s*=\s*"([^"\r\n]{1,128})"',
+        result.stdout,
+    )
+    model = re.search(
+        rb'"model"\s*=\s*<"([^"\r\n]{1,128})', result.stdout,
+    )
+    if (result.returncode != 0 or result.stderr or platform_uuid is None
+            or serial is None or model is None):
+        raise AuthorizationError("host_ssh_trust_machine_identity_invalid")
+    return hashlib.sha256(b"\0".join((
+        platform_uuid.group(1).lower(), serial.group(1), model.group(1),
+    ))).hexdigest()
+
+
+def _host_ssh_trust_fingerprint(blob: bytes) -> str:
+    return "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest(),
+    ).decode("ascii").rstrip("=")
+
+
+def _host_ssh_trust_key_blob(value: str) -> tuple[bytes, str]:
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise AuthorizationError("host_ssh_trust_public_key_invalid") from error
+    if base64.b64encode(raw).decode("ascii") != value or len(raw) != 51:
+        raise AuthorizationError("host_ssh_trust_public_key_invalid")
+    algorithm_size = struct.unpack("!I", raw[:4])[0]
+    key_offset = 4 + algorithm_size
+    if (algorithm_size != len(b"ssh-ed25519")
+            or raw[4:key_offset] != b"ssh-ed25519"
+            or len(raw) < key_offset + 4
+            or struct.unpack("!I", raw[key_offset:key_offset + 4])[0] != 32
+            or key_offset + 4 + 32 != len(raw)):
+        raise AuthorizationError("host_ssh_trust_public_key_invalid")
+    return raw, _host_ssh_trust_fingerprint(raw)
+
+
+def _host_ssh_trust_public_key(raw: bytes) -> tuple[bytes, str]:
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise AuthorizationError("host_ssh_trust_public_key_invalid") from error
+    if (not text.endswith("\n") or text.count("\n") != 1
+            or "\r" in text):
+        raise AuthorizationError("host_ssh_trust_public_key_invalid")
+    fields = text[:-1].split(" ", 2)
+    if (len(fields) not in {2, 3} or fields[0] != "ssh-ed25519"
+            or not fields[1]
+            or (len(fields) == 3
+                and (not fields[2]
+                     or any(ord(character) < 32 or ord(character) > 126
+                            for character in fields[2])))):
+        raise AuthorizationError("host_ssh_trust_public_key_invalid")
+    _decoded, fingerprint = _host_ssh_trust_key_blob(fields[1])
+    return f"ssh-ed25519 {fields[1]}\n".encode("ascii"), fingerprint
+
+
+def _host_ssh_trust_known_hosts(raw: bytes) -> tuple[bytes, dict[str, str]]:
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise AuthorizationError("host_ssh_trust_known_hosts_invalid") from error
+    lines = text.splitlines()
+    if (not text.endswith("\n")
+            or len(lines) != len(HOST_SSH_TRUST_ALIASES) or "\r" in text):
+        raise AuthorizationError("host_ssh_trust_known_hosts_invalid")
+    entries: dict[str, tuple[str, str]] = {}
+    for line in lines:
+        fields = line.split(" ")
+        if (len(fields) != 3 or fields[0] not in HOST_SSH_TRUST_ALIASES
+                or fields[0] in entries or fields[1] != "ssh-ed25519"):
+            raise AuthorizationError("host_ssh_trust_known_hosts_invalid")
+        _decoded, fingerprint = _host_ssh_trust_key_blob(fields[2])
+        entries[fields[0]] = (fields[2], fingerprint)
+    if (set(entries) != set(HOST_SSH_TRUST_ALIASES)
+            or len({fingerprint for _key, fingerprint in entries.values()})
+               != len(HOST_SSH_TRUST_ALIASES)):
+        raise AuthorizationError("host_ssh_trust_known_hosts_invalid")
+    projected = "".join(
+        f"{alias} ssh-ed25519 {entries[alias][0]}\n"
+        for alias in HOST_SSH_TRUST_ALIASES
+    ).encode("ascii")
+    return projected, {
+        alias: entries[alias][1] for alias in HOST_SSH_TRUST_ALIASES
+    }
+
+
+def _host_ssh_trust_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+        value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _host_ssh_trust_source(
+    repo: Path, name: str, expected: object, operator_uid: int,
+) -> tuple[bytes, str | dict[str, str]]:
+    relative = HOST_SSH_TRUST_SOURCE_PATHS[name]
+    if not isinstance(expected, dict):
+        raise AuthorizationError("host_ssh_trust_source_binding_invalid")
+    key_fields = {
+        "relative_path", "device", "inode", "mode", "uid", "gid",
+        "nlink", "size", "mtime_ns", "ctime_ns", "source_sha256",
+        "projected_sha256", "fingerprint",
+    }
+    known_fields = (key_fields - {"fingerprint"}) | {"host_fingerprints"}
+    if set(expected) != (known_fields if name == "known_hosts" else key_fields):
+        raise AuthorizationError("host_ssh_trust_source_binding_invalid")
+    numeric_fields = {
+        "device", "inode", "mode", "uid", "gid", "nlink", "size",
+        "mtime_ns", "ctime_ns",
+    }
+    if (expected.get("relative_path") != relative
+            or any(not isinstance(expected.get(field), int)
+                   or isinstance(expected.get(field), bool)
+                   or expected[field] < 0 for field in numeric_fields)
+            or expected.get("mode") != 0o600
+            or expected.get("uid") != operator_uid
+            or expected.get("nlink") != 1
+            or not 1 <= expected.get("size", 0) <= 64 * 1024
+            or any(SHA256.fullmatch(str(expected.get(field, ""))) is None
+                   for field in ("source_sha256", "projected_sha256"))):
+        raise AuthorizationError("host_ssh_trust_source_binding_invalid")
+    if name == "known_hosts":
+        fingerprints = expected.get("host_fingerprints")
+        if (not isinstance(fingerprints, dict)
+                or tuple(fingerprints) != HOST_SSH_TRUST_ALIASES
+                or any(not isinstance(item, str)
+                       or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", item)
+                           is None for item in fingerprints.values())
+                    or len(set(fingerprints.values()))
+                       != len(HOST_SSH_TRUST_ALIASES)):
+            raise AuthorizationError("host_ssh_trust_source_binding_invalid")
+    elif (not isinstance(expected.get("fingerprint"), str)
+          or re.fullmatch(
+              r"SHA256:[A-Za-z0-9+/]{43}", expected["fingerprint"],
+          ) is None):
+        raise AuthorizationError("host_ssh_trust_source_binding_invalid")
+    path = repo / relative
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError("host_ssh_trust_source_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "host_ssh_trust_source_untrusted")
+        data = bytearray()
+        while len(data) <= 64 * 1024:
+            block = os.read(descriptor, min(64 * 1024 + 1 - len(data), 65536))
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        named = path.lstat()
+    except OSError as error:
+        raise AuthorizationError("host_ssh_trust_source_untrusted") from error
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != operator_uid or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or not 1 <= opened.st_size <= 64 * 1024
+            or len(data) != opened.st_size
+            or _host_ssh_trust_identity(before)
+               != _host_ssh_trust_identity(opened)
+            or _host_ssh_trust_identity(opened)
+               != _host_ssh_trust_identity(after)
+            or _host_ssh_trust_identity(after)
+               != _host_ssh_trust_identity(named)):
+        raise AuthorizationError("host_ssh_trust_source_untrusted")
+    raw = bytes(data)
+    if name == "known_hosts":
+        projected, detail = _host_ssh_trust_known_hosts(raw)
+    else:
+        projected, detail = _host_ssh_trust_public_key(raw)
+    metadata = {
+        "relative_path": relative,
+        "device": opened.st_dev, "inode": opened.st_ino,
+        "mode": stat.S_IMODE(opened.st_mode), "uid": opened.st_uid,
+        "gid": opened.st_gid, "nlink": opened.st_nlink,
+        "size": opened.st_size, "mtime_ns": opened.st_mtime_ns,
+        "ctime_ns": opened.st_ctime_ns,
+        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "projected_sha256": hashlib.sha256(projected).hexdigest(),
+    }
+    metadata[
+        "host_fingerprints" if name == "known_hosts" else "fingerprint"
+    ] = detail
+    if expected != metadata:
+        raise AuthorizationError("host_ssh_trust_source_binding_changed")
+    return projected, detail
+
+
+def _host_ssh_trust_source_root(repo: Path, operator_uid: int) -> None:
+    if repo.name != "SecureSandbox":
+        raise AuthorizationError("host_ssh_trust_repository_invalid")
+    home = repo.parent
+    runs = repo / "runs"
+    descriptors: list[int] = []
+    try:
+        for path in (home, repo, runs):
+            descriptor = os.open(
+                path, os.O_RDONLY | os.O_DIRECTORY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            named = path.lstat()
+            if path == home:
+                reject_allowing_acl(
+                    descriptor,
+                    "host_ssh_trust_source_directory_untrusted",
+                )
+            else:
+                reject_extended_acl(
+                    descriptor,
+                    "host_ssh_trust_source_directory_untrusted",
+                )
+            expected_mode = 0o700 if path == runs else None
+            if (not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(named.st_mode)
+                    or opened.st_uid != operator_uid
+                    or _host_ssh_trust_identity(opened)
+                       != _host_ssh_trust_identity(named)
+                    or (expected_mode is None
+                        and stat.S_IMODE(opened.st_mode) & 0o022)
+                    or (expected_mode is not None
+                        and stat.S_IMODE(opened.st_mode) != expected_mode)):
+                raise AuthorizationError(
+                    "host_ssh_trust_source_directory_untrusted",
+                )
+    except OSError as error:
+        raise AuthorizationError(
+            "host_ssh_trust_source_directory_untrusted",
+        ) from error
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def validate_host_ssh_trust_plan(
+    plan: object, repo: Path, operator_uid: int, *, now: int | None = None,
+    machine_identity: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "plan_id", "created_at", "expires_at", "operator_uid",
+        "machine_identity_sha256", "host_release_id", "ssh_config_sha256",
+        "previous_trust_id", "sources", "trust_id", "plan_sha256",
+    }
+    if not isinstance(plan, dict) or set(plan) != fields:
+        raise AuthorizationError("host_ssh_trust_plan_invalid")
+    current_time = int(time.time()) if now is None else now
+    previous = plan.get("previous_trust_id")
+    if (plan.get("schema") != HOST_SSH_TRUST_PLAN_SCHEMA
+            or UUID4.fullmatch(str(plan.get("plan_id", ""))) is None
+            or not isinstance(plan.get("created_at"), int)
+            or isinstance(plan.get("created_at"), bool)
+            or not isinstance(plan.get("expires_at"), int)
+            or isinstance(plan.get("expires_at"), bool)
+            or not plan["created_at"] <= current_time < plan["expires_at"]
+            or plan["expires_at"] - plan["created_at"] > 300
+            or not isinstance(plan.get("operator_uid"), int)
+            or isinstance(plan.get("operator_uid"), bool)
+            or plan.get("operator_uid") != operator_uid
+            or any(SHA256.fullmatch(str(plan.get(name, ""))) is None for name in (
+                "machine_identity_sha256", "host_release_id",
+                "ssh_config_sha256", "trust_id", "plan_sha256",
+            ))
+            or (previous is not None
+                and (not isinstance(previous, str)
+                     or SHA256.fullmatch(previous) is None))
+            or plan["plan_sha256"] != hashlib.sha256(canonical({
+                name: item for name, item in plan.items()
+                if name != "plan_sha256"
+            })).hexdigest()):
+        raise AuthorizationError("host_ssh_trust_plan_invalid")
+    observed_machine = (
+        host_ssh_trust_machine_identity()
+        if machine_identity is None else machine_identity
+    )
+    if plan["machine_identity_sha256"] != observed_machine:
+        raise AuthorizationError("host_ssh_trust_machine_identity_changed")
+    _host_ssh_trust_source_root(repo, operator_uid)
+    sources = plan.get("sources")
+    if (not isinstance(sources, dict)
+            or set(sources) != set(HOST_SSH_TRUST_SOURCE_PATHS)):
+        raise AuthorizationError("host_ssh_trust_plan_invalid")
+    provisioning, provisioning_fingerprint = _host_ssh_trust_source(
+        repo, "provisioning_key", sources["provisioning_key"], operator_uid,
+    )
+    control, control_fingerprint = _host_ssh_trust_source(
+        repo, "control_key", sources["control_key"], operator_uid,
+    )
+    known_hosts, host_fingerprints = _host_ssh_trust_source(
+        repo, "known_hosts", sources["known_hosts"], operator_uid,
+    )
+    if (not isinstance(provisioning_fingerprint, str)
+            or not isinstance(control_fingerprint, str)
+            or not isinstance(host_fingerprints, dict)
+            or provisioning == control):
+        raise AuthorizationError("host_ssh_trust_plan_invalid")
+    material = {
+        "schema": "secure-sandbox-host-ssh-trust-material-v1",
+        "operator_uid": operator_uid,
+        "machine_identity_sha256": observed_machine,
+        "ssh_config_sha256": plan["ssh_config_sha256"],
+        "provisioning_public_key_sha256": hashlib.sha256(
+            provisioning
+        ).hexdigest(),
+        "provisioning_public_key_fingerprint": provisioning_fingerprint,
+        "control_public_key_sha256": hashlib.sha256(control).hexdigest(),
+        "control_public_key_fingerprint": control_fingerprint,
+        "known_hosts_sha256": hashlib.sha256(known_hosts).hexdigest(),
+        "known_host_fingerprints": host_fingerprints,
+    }
+    if plan["trust_id"] != hashlib.sha256(canonical(material)).hexdigest():
+        raise AuthorizationError("host_ssh_trust_id_invalid")
+    return plan
+
+
 def validate_host_pair_manager_result(
     value: object, operation: str, parameters: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1730,6 +2107,40 @@ def validate_host_pair_manager_result(
                 is None):
         raise AuthorizationError("host_pair_transition_result_invalid")
     valid_uuid4(value["transition_id"], "transition_id")
+    return value
+
+
+def validate_host_ssh_trust_result(
+    value: object, plan: dict[str, Any], authorization: dict[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "trust_id", "previous_trust_id",
+        "manifest_sha256", "plan_sha256", "authorization_sha256",
+        "operator_uid", "machine_identity_sha256", "ssh_config_sha256",
+        "enrolled_release_id",
+    }
+    status = value.get("status") if isinstance(value, dict) else None
+    enrolled_release_id = (
+        value.get("enrolled_release_id") if isinstance(value, dict) else None
+    )
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != HOST_SSH_TRUST_RESULT_SCHEMA
+            or status not in {"enrolled", "already-enrolled"}
+            or value.get("trust_id") != plan["trust_id"]
+            or value.get("previous_trust_id") != plan["previous_trust_id"]
+            or value.get("plan_sha256") != plan["plan_sha256"]
+            or value.get("authorization_sha256")
+               != authorization["authorization_sha256"]
+            or value.get("operator_uid") != plan["operator_uid"]
+            or value.get("machine_identity_sha256")
+               != plan["machine_identity_sha256"]
+            or value.get("ssh_config_sha256") != plan["ssh_config_sha256"]
+            or (status == "enrolled"
+                and enrolled_release_id != plan["host_release_id"])
+            or (status == "already-enrolled"
+                and SHA256.fullmatch(str(enrolled_release_id or "")) is None)
+            or SHA256.fullmatch(str(value.get("manifest_sha256", ""))) is None):
+        raise AuthorizationError("host_ssh_trust_result_invalid")
     return value
 
 
@@ -2140,6 +2551,32 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         image = parameters["runtime_image_id"]
         if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
             raise AuthorizationError("runtime_image_id_invalid")
+        return
+    if operation == HOST_SSH_TRUST_OPERATION:
+        if set(parameters) != {"repo", "plan"}:
+            raise AuthorizationError("operation_parameters_invalid")
+        if not isinstance(parameters["repo"], str):
+            raise AuthorizationError("host_ssh_trust_repository_invalid")
+        repo = Path(parameters["repo"])
+        try:
+            home_info = home.lstat()
+            repo_info = repo.lstat()
+            resolved_home = home.resolve(strict=True)
+            resolved_repo = repo.resolve(strict=True)
+        except OSError as error:
+            raise AuthorizationError("host_ssh_trust_repository_invalid") from error
+        if (not repo.is_absolute() or repo == Path("/")
+                or stat.S_ISLNK(repo_info.st_mode)
+                or not stat.S_ISDIR(repo_info.st_mode)
+                or str(repo) != str(resolved_repo)
+                or resolved_repo != resolved_home / "SecureSandbox"
+                or not stat.S_ISDIR(home_info.st_mode)
+                or stat.S_ISLNK(home_info.st_mode)
+                or home_info.st_uid <= 0):
+            raise AuthorizationError("host_ssh_trust_repository_invalid")
+        validate_host_ssh_trust_plan(
+            parameters["plan"], resolved_repo, home_info.st_uid,
+        )
         return
     if operation in {"host-controller-install", "host-controller-rollback"}:
         common = {"repo", "state_root"}
@@ -2683,6 +3120,39 @@ def reject_extended_acl(descriptor: int, failure: str) -> None:
             raise AuthorizationError("extended_acl_release_failed")
 
 
+def reject_allowing_acl(descriptor: int, failure: str) -> None:
+    """Admit the standard deny-only macOS home ACL, never an ACL grant."""
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_GET_TAG_TYPE is None or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise AuthorizationError("extended_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise AuthorizationError(failure)
+    try:
+        entry = ctypes.c_void_p()
+        entry_id = ACL_FIRST_ENTRY
+        while True:
+            ctypes.set_errno(0)
+            result = _ACL_GET_ENTRY(acl, entry_id, ctypes.byref(entry))
+            if result != 0:
+                if ctypes.get_errno() in {errno.ENOENT, errno.EINVAL}:
+                    break
+                raise AuthorizationError(failure)
+            tag = ctypes.c_int()
+            if (_ACL_GET_TAG_TYPE(entry, ctypes.byref(tag)) != 0
+                    or tag.value != ACL_EXTENDED_DENY):
+                raise AuthorizationError(failure)
+            entry_id = ACL_NEXT_ENTRY
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise AuthorizationError("extended_acl_release_failed")
+
+
 def reject_path_extended_acl(path: Path, failure: str) -> None:
     """Reject a named inode's extended ACL without opening private content.
 
@@ -2725,7 +3195,8 @@ def acl_stat_identity(item: os.stat_result) -> tuple[int, ...]:
 
 
 def verify_acl_free_directory(
-    path: Path, expected_uid: int, expected_mode: int, failure: str,
+    path: Path, expected_uid: int, expected_mode: int, failure: str, *,
+    allow_deny_only_acl: bool = False,
 ) -> os.stat_result:
     try:
         before = path.lstat()
@@ -2738,7 +3209,10 @@ def verify_acl_free_directory(
         raise AuthorizationError(failure) from error
     try:
         opened = os.fstat(descriptor)
-        reject_extended_acl(descriptor, failure)
+        if allow_deny_only_acl:
+            reject_allowing_acl(descriptor, failure)
+        else:
+            reject_extended_acl(descriptor, failure)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
@@ -3430,6 +3904,20 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--plan-json", canonical_v2(plan).decode("ascii"),
             "--authorization-json", canonical_v2(authorization).decode("ascii"),
             "--operator-uid", str(operator_uid),
+        ]
+    if operation == HOST_SSH_TRUST_OPERATION:
+        if operator_uid is None or authorization is None:
+            raise AuthorizationError("host_ssh_trust_authorization_missing")
+        plan = parameters["plan"]
+        if plan.get("operator_uid") != operator_uid:
+            raise AuthorizationError("host_ssh_trust_operator_uid_mismatch")
+        return [
+            "/usr/bin/python3", "-I", str(release / "release_manager"),
+            "enroll-host-ssh-trust", "--repo", parameters["repo"],
+            "--operator-uid", str(operator_uid),
+            "--plan-json", canonical(plan).decode("ascii").strip(),
+            "--authorization-json",
+            canonical(authorization).decode("ascii").strip(),
         ]
     if operation.startswith("harness-generation-"):
         action = operation.removeprefix("harness-generation-")
@@ -5241,6 +5729,19 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         raise AuthorizationError("touchid_required")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
                                           expected_root_uid)
+    if value["operation"] == HOST_SSH_TRUST_OPERATION:
+        plan = value["parameters"]["plan"]
+        try:
+            ssh_config = (release / "ssh_config").read_bytes()
+        except OSError as error:
+            raise AuthorizationError(
+                "host_ssh_trust_release_binding_invalid",
+            ) from error
+        if (plan["operator_uid"] != uid
+                or plan["host_release_id"] != release.name
+                or plan["ssh_config_sha256"]
+                   != hashlib.sha256(ssh_config).hexdigest()):
+            raise AuthorizationError("host_ssh_trust_release_binding_changed")
     if (
         value["operation"] == native_stack_catalog_promotion.OPERATION
         and value["parameters"]["plan"]["host_release_id"] != release.name
@@ -5287,6 +5788,20 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending["host_pair_authorized_target_plan_sha256"] = value[
             "parameters"
         ]["authorized_target_plan_sha256"]
+    if value["operation"] == HOST_SSH_TRUST_OPERATION:
+        plan = value["parameters"]["plan"]
+        pending.update({
+            "host_release_id": release.name,
+            "host_ssh_trust_id": plan["trust_id"],
+            "host_ssh_trust_plan_id": plan["plan_id"],
+            "host_ssh_trust_plan_sha256": plan["plan_sha256"],
+            "host_ssh_trust_ssh_config_sha256": plan["ssh_config_sha256"],
+            "host_ssh_trust_machine_identity_sha256": plan[
+                "machine_identity_sha256"
+            ],
+            "host_ssh_trust_operator_uid": plan["operator_uid"],
+            "host_ssh_trust_previous_id": plan["previous_trust_id"],
+        })
     if value["operation"] == "harness-acceptance-authorize":
         plan = value["parameters"]["plan"]
         pending.update({
@@ -5420,7 +5935,38 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 canonical(harness_authorization)
             ).hexdigest()
     native_authorization = None
-    if value["operation"] in native_deployment.OPERATIONS:
+    if value["operation"] == HOST_SSH_TRUST_OPERATION:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": HOST_SSH_TRUST_AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+            "plan_id": plan["plan_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "trust_id": plan["trust_id"],
+            "operator_uid": uid,
+            "method": "touch-id",
+            "password_fallback": False,
+            "authorized_at": started,
+            "expires_at": min(
+                value["expires_at"], plan["expires_at"], started + 120,
+            ),
+            "host_release_id": release.name,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+            "status": "authorized",
+        }
+        native_authorization["authorization_sha256"] = hashlib.sha256(
+            canonical(native_authorization)
+        ).hexdigest()
+    elif value["operation"] in native_deployment.OPERATIONS:
         if value["operation"] == native_deployment.APPLY_OPERATION:
             deployment_plan = value["parameters"]["plan"]["plan"]
             recovery_action = "apply"
@@ -5758,6 +6304,19 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             deployment_terminal, maximum=4 * 1024 * 1024
         ):
             raise AuthorizationError("native_deployment_result_invalid")
+    if value["operation"] == HOST_SSH_TRUST_OPERATION and result.returncode == 0:
+        if (native_authorization is None or result.stderr
+                or not 2 <= len(result.stdout) <= 1024 * 1024):
+            raise AuthorizationError("host_ssh_trust_result_invalid")
+        try:
+            host_ssh_trust_result = validate_host_ssh_trust_result(
+                json.loads(result.stdout), value["parameters"]["plan"],
+                native_authorization,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AuthorizationError("host_ssh_trust_result_invalid") from error
+        if result.stdout != canonical(host_ssh_trust_result):
+            raise AuthorizationError("host_ssh_trust_result_invalid")
     if completed_at is None:
         completed_at = int(time.time()) if now is None else now
     completed = dict(pending)
@@ -5768,6 +6327,11 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
         "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
     })
+    if (value["operation"] == HOST_SSH_TRUST_OPERATION
+            and native_authorization is not None):
+        completed["host_ssh_trust_authorization_sha256"] = (
+            native_authorization["authorization_sha256"]
+        )
     if deployment_terminal is not None:
         completed.update({
             "native_deployment_terminal_phase": deployment_terminal["phase"],
@@ -8440,6 +9004,19 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
             "acceptance_plan_sha256":plan["plan_sha256"],
             "acceptance_source_commit":plan["source_commit"],
         })
+    if value["operation"] == HOST_SSH_TRUST_OPERATION:
+        plan = value["parameters"]["plan"]
+        receipt.update({
+            "host_ssh_trust_id": plan["trust_id"],
+            "host_ssh_trust_plan_id": plan["plan_id"],
+            "host_ssh_trust_plan_sha256": plan["plan_sha256"],
+            "host_ssh_trust_ssh_config_sha256": plan["ssh_config_sha256"],
+            "host_ssh_trust_machine_identity_sha256": plan[
+                "machine_identity_sha256"
+            ],
+            "host_ssh_trust_operator_uid": plan["operator_uid"],
+            "host_ssh_trust_previous_id": plan["previous_trust_id"],
+        })
     if value["operation"] == "execution-approval-sign":
         receipt["approval_id"] = value["parameters"]["approval_id"]
         if challenge.get("mode") == "secure-enclave-sign":
@@ -8501,6 +9078,16 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
                 "acceptance_campaign_sha256", "acceptance_case_id",
                 "acceptance_generation_id", "acceptance_operator_uid",
                 "acceptance_plan_sha256", "acceptance_source_commit",
+            )
+        })
+    if value["operation"] == HOST_SSH_TRUST_OPERATION:
+        public_receipt.update({
+            name:receipt[name] for name in (
+                "host_ssh_trust_id", "host_ssh_trust_plan_id",
+                "host_ssh_trust_plan_sha256",
+                "host_ssh_trust_ssh_config_sha256",
+                "host_ssh_trust_machine_identity_sha256",
+                "host_ssh_trust_operator_uid", "host_ssh_trust_previous_id",
             )
         })
     atomic_public_record(
@@ -10196,6 +10783,43 @@ def operation_details(value: dict[str, Any]) -> list[str]:
     parameters = value["parameters"]
     if operation == "authorization-probe":
         return [f"Acceptance challenge: {parameters['challenge']}"]
+    if operation == HOST_SSH_TRUST_OPERATION:
+        plan = parameters["plan"]
+        sources = plan["sources"]
+        hosts = sources["known_hosts"]["host_fingerprints"]
+        return [
+            f"Repository: {parameters['repo']}",
+            f"Trust ID: {plan['trust_id']}",
+            f"Plan ID: {plan['plan_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Physical Mac identity SHA-256: {plan['machine_identity_sha256']}",
+            f"Operator UID: {plan['operator_uid']}",
+            f"Host release: {plan['host_release_id']}",
+            f"SSH configuration SHA-256: {plan['ssh_config_sha256']}",
+            f"Previous trust ID: {plan['previous_trust_id'] or 'none'}",
+            "Provisioning source SHA-256: "
+                f"{sources['provisioning_key']['source_sha256']}",
+            "Provisioning public-key SHA-256: "
+                f"{sources['provisioning_key']['projected_sha256']}",
+            "Provisioning key fingerprint: "
+                f"{sources['provisioning_key']['fingerprint']}",
+            "Control source SHA-256: "
+                f"{sources['control_key']['source_sha256']}",
+            "Control public-key SHA-256: "
+                f"{sources['control_key']['projected_sha256']}",
+            f"Control key fingerprint: {sources['control_key']['fingerprint']}",
+            "Known-hosts source SHA-256: "
+                f"{sources['known_hosts']['source_sha256']}",
+            "Known-hosts projection SHA-256: "
+                f"{sources['known_hosts']['projected_sha256']}",
+            *(
+                f"{alias} host-key fingerprint: {hosts[alias]}"
+                for alias in HOST_SSH_TRUST_ALIASES
+            ),
+            f"Plan expires (Unix): {plan['expires_at']}",
+            "Action: publish only these public SSH identities into the root-owned machine trust store",
+            "Private keys remain solely in the ephemeral operator SSH agents",
+        ]
     if operation == "model-profile-activate":
         plan = parameters["plan"]
         broker = plan["broker"]

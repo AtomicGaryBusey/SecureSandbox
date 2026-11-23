@@ -361,7 +361,11 @@ review, attachment, and final readback.
 Physical boot also proved that the Gateway's Parallels Shared address is a
 dynamic transport fact, not a portable release constant. The signed Host SSH
 configuration must therefore discover that address without treating discovery
-as identity: the installed immutable resolver accepts only the exact running
+as identity. Its protected ProxyCommand bridge first validates the active
+signed configuration, root-owned machine trust generation, physical Mac, and
+both enrolled operator SSH agents, then drops the resolver to the enrolled
+operator with no supplementary groups. The installed immutable resolver
+accepts only the exact running
 Gateway bundle, canonical NIC/MAC topology, no enabled installer media, and one
 IPv4 address inside a stable, root-owned Shared DHCP configuration. Parallels
 reports addresses from all enabled guest NICs in one inventory after Tools has
@@ -369,8 +373,18 @@ fully initialized, so the resolver filters against that validated Shared subnet
 before requiring exactly one in-scope address; the legitimate static private-
 plane address is never a Shared transport candidate. Complete address duplicate
 and declared-type checks remain fail closed. OpenSSH
-continues to authenticate a stable Gateway HostKeyAlias through the strict
-known-hosts file. A DHCP address alone can never nominate a trusted guest.
+continues to authenticate a stable Gateway HostKeyAlias through the immutable
+root-owned generation containing exactly the Gateway, Research, and Target
+Ed25519 records. A DHCP address alone can never nominate a trusted guest.
+
+The 40-of-91 physical checkpoint exposed why the projection and proxy bridge
+are mandatory. The exact root acceptance driver resolved `%d` as `/var/root`;
+the direct Gateway proxy then correctly rejected root before a case plan,
+authorization request, Touch ID prompt, or case state existed. The repair does
+not alter the protected campaign. A predecessor-compatible signed Host release
+installs the fixed paths and bridge, a separate Touch-ID-only ceremony enrolls
+the public trust material, and an independent root Research-status readback is
+required before case 41 is prepared again.
 
 The first network-bound request on macOS 27.2 exposed a separate
 cross-language canonicalization defect before any authorization window or VM

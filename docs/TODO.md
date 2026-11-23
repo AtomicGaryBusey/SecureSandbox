@@ -591,6 +591,26 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
+  The current exact-source Neo campaign has 40/91 cases complete and 198
+  validated root-owned observations. It preserves the original three VM
+  identities after the independently verified `e1000` migration and is parked
+  at `touchid-approve-exact-plan` with Gateway and Research running, Target
+  stopped, and Gateway Shared disconnected. The first authorization prepare
+  failed before case state, plan, request, or Touch ID creation because the
+  root Host control path cannot use the login user's `%d` SSH trust paths and
+  `vm_maintenance` correctly rejects a root Gateway proxy. Do not retry the
+  case or create ad-hoc `/var/root` trust material. Complete the compatible
+  signed Host repair, enroll one exact root-owned machine SSH trust generation
+  through a separate Touch ID-only request, independently prove root Research
+  readback, then resume case 41. Both ordinary control-client SSH and the
+  signed Gateway ProxyCommand validate that projection; the latter drops only
+  its fixed Parallels resolver to the enrolled operator so protected root
+  drivers cannot run `vm_maintenance` as root. Private keys remain only in the ephemeral
+  operator agents; the projection contains canonical public identities and
+  exact Gateway/Research/Target host-key aliases. Preserve the existing
+  campaign and all retained predecessors without deletion.
+
+  Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case
   password loop for consecutive provenance/archive/qualification fixtures
   without a root shell, sudo-cache manipulation, driver authority, or retry

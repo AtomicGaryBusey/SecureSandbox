@@ -1,12 +1,55 @@
 # Disposable-Mac Harness Lifecycle Acceptance Evidence
 
 Status: every superseded exact-commit campaign on the disposable Neo remains
-retained without deletion. The current live campaign is abbreviated
-`40f0aebf...`, bound to public source abbreviated `0abefb4...`. It has 31
-completed cases and
-36 root-owned, mode-0444 observations. The second qualification control request
-failed closed before Research created its case directory. No complete
-acceptance verdict has been issued.
+retained without deletion. The current live campaign is bound to exact public
+source `1965de0...`; it has 40 of 91 cases complete and 198 validated
+root-owned observations. The first Touch ID case has not been prepared or
+authorized. No complete acceptance verdict has been issued.
+
+## Current physical checkpoint — 2026-11-23
+
+The Neo's three original VM identities were preserved while all five virtual
+network adapters were migrated to the supported `e1000` backend. Independent
+readback proved the exact MAC/topology bindings, private non-NAT networks,
+disconnected Gateway Shared adapter, absent migration journal, and unchanged
+VM bundle identities. The acceptance-only bootstrap then reached its required
+steady state: Gateway and Research running and reachable, Target stopped and
+unreachable, Gateway Shared disconnected, and no production model or provider
+material present.
+
+The exact protected `1965de0...` release completed both bootstrap cases, all
+sixteen provenance cases, all twelve archive cases, and all ten Research
+qualification cases. Production ordering independently reports 40/91 complete
+with `touchid-approve-exact-plan` next. The campaign and all existing raw and
+projected evidence remain unchanged.
+
+The first protected authorization preparation failed closed before it created
+a case directory, plan, broker request, or Touch ID authorization. The same
+read-only `harness-generation-status` call succeeds as the admitted login user,
+but the root execution path fails at the Gateway proxy with
+`gateway_proxy_rejected` and SSH status 255. Source review confirmed a
+fresh-Mac integration defect: the signed Host SSH configuration gives the
+login user mutable `%d` trust paths, while the root authorization daemon invokes
+the same client without an enrolled machine-trust projection or a privilege
+drop to the admitted operator. The VM and Research service are healthy; this is
+not a guest reachability failure.
+
+Do not work around the defect by copying or symlinking mutable user files into
+`/var/root`, weakening `vm_maintenance`, changing the campaign source, or
+retrying the Touch ID case. The campaign-preserving repair is a compatible
+signed Host release followed by a separate exact Touch ID-only machine SSH
+trust enrollment. The enrolled store contains only canonical public keys and
+exact HostKeyAlias records in immutable root-owned generations; private keys
+remain solely in the ephemeral operator-owned agents. The repaired control
+client validates the fixed signed configuration, machine/operator binding,
+trust generation, public-key fingerprints, host-key aliases, and agent-socket
+ownership before it drops ordinary SSH children to the enrolled operator UID.
+The signed Gateway ProxyCommand enters the same validator and drops its fixed
+Parallels resolver to that operator, so immutable campaign drivers that invoke
+OpenSSH directly as root cannot bypass the projection and never run
+`vm_maintenance` as root.
+Publication, notarized Host installation, trust enrollment, independent root
+Research readback, and resumption of case 41 remain pending.
 
 ## Current physical checkpoint — 2026-11-19
 

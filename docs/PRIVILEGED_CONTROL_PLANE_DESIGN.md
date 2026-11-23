@@ -42,16 +42,24 @@ The existing `labadmin` aliases remain available for manual break-glass work and
 
 The Gateway's Parallels Shared-network address is deliberately not a release
 constant. The signed Host SSH payload invokes the installed immutable
-`vm_maintenance proxy-gateway` helper with only OpenSSH's numeric port token.
-That unprivileged helper accepts port 22 only; validates the root-owned,
+`control_client proxy-gateway` bridge with only OpenSSH's numeric port token.
+The bridge validates the active signed SSH configuration, the complete
+root-owned machine trust generation, the physical Mac, and both exact
+operator-owned agent sockets and loaded identities. It then executes
+`vm_maintenance proxy-gateway` as the enrolled operator's UID and primary GID
+with no supplementary groups and a fixed environment. That unprivileged helper
+accepts port 22 only; validates the root-owned,
 ACL-free, stable Parallels network configuration; resolves exactly one running
 `SecureSandbox-Gateway` beneath the admitted operator's repository; requires
 the canonical shared/control NIC keys, types, interface, and MACs; rejects any
 enabled installer media; and accepts exactly one IPv4 address inside the
 validated Shared DHCP range, excluding the network, broadcast, Mac-host, and
 DHCP-service addresses. OpenSSH then authenticates the stable
-`SecureSandbox-Gateway` host-key alias from the operator's strict known-hosts
-file. Address discovery therefore supplies transport routing, never identity.
+`SecureSandbox-Gateway` host-key alias from the immutable machine trust
+generation. Address discovery therefore supplies transport routing, never
+identity. This ProxyCommand boundary also covers immutable acceptance drivers
+that invoke OpenSSH directly as root; they cannot bypass trust validation or
+cause the Parallels resolver itself to run as root.
 
 ## Protocol and runtime operations
 
@@ -93,10 +101,21 @@ Installing this boundary through an already-compromised `labadmin` channel canno
 3. Put the control installer, dispatcher, entry point, SSH policy, sudoers policy, public key, and exact role netplan into the fresh NoCloud seed. Bounded base64 payloads are reconstructed beneath `/target/root` by validated autoinstall `late-commands`, installed before the first boot, and removed after successful installation; no unsupported `write_files` key is placed in the autoinstall mapping. The seed performs no network package acquisition. `verify-autoinstall-seed.py` independently checks the ISO inventory, role metadata, password-hash form, absence of private-key material, exact embedded payload and netplan bytes and modes, control public key, installation order, and cleanup before `create-vms.sh` can attach the seed.
 4. Run `configure-guest.sh` with `SECURE_SANDBOX_CONTROL_PUBLIC_KEY_FILE` set. Configuration refuses to complete without it.
 5. Load both keys with `labctl key-load`.
-6. Use the tracked canonical `config/ssh_config.example` as the signed Host payload. Its `%d/SecureSandbox/...` paths expand against the admitted operator's home on every Mac; each `*-control` alias uses the separate control agent socket and the existing administrative route only as a ProxyJump. An ignored machine-specific `config/ssh_config` is never release authority.
-7. Run `verify-privileged-control-live.py`, then the full containment suite. The live verifier checks all three roles first-person: forced-command enforcement, exact installed hashes and root ownership, effective sshd restrictions, sudoers syntax, role denial, malformed framing, at-most-once replay rejection, audit creation, local `labadmin` passwordless-sudo denial, and rejection of a well-framed deployment whose declared content digest is false. The allowlisted `control-self-check` operation performs the guest-local portion as root, fails on any ownership, mode, hard-link, account, effective-sshd, sudoers-syntax, or passwordless-`labadmin` discrepancy, and returns only hashes and policy metadata for host comparison.
-8. Rotate the old `labadmin` passwords. No automated runtime path may know or read them.
-9. Take a coordinated cold checkpoint only after all three guests and the immutable host controller pass.
+6. Use the tracked canonical `config/ssh_config.example` as the signed Host
+   payload. Every identity and known-host path points only at the current
+   root-owned Host SSH trust generation; each `*-control` alias uses the
+   separate control agent socket and the existing administrative route only as
+   a ProxyJump. An ignored machine-specific `config/ssh_config` is never
+   release authority.
+7. With the private keys loaded only in the two ephemeral operator agents,
+   authorize `host-ssh-trust-enroll` through Touch ID. The plan binds the
+   physical Mac, operator UID, signed SSH configuration digest, exact public
+   keys, three exact Ed25519 HostKeyAlias records, agent identities, and prior
+   trust generation. The projection contains no private key. Enrollment and
+   readback fail closed; there is no password or sudo fallback.
+8. Run `verify-privileged-control-live.py`, then the full containment suite. The live verifier checks all three roles first-person: forced-command enforcement, exact installed hashes and root ownership, effective sshd restrictions, sudoers syntax, role denial, malformed framing, at-most-once replay rejection, audit creation, local `labadmin` passwordless-sudo denial, and rejection of a well-framed deployment whose declared content digest is false. The allowlisted `control-self-check` operation performs the guest-local portion as root, fails on any ownership, mode, hard-link, account, effective-sshd, sudoers-syntax, or passwordless-`labadmin` discrepancy, and returns only hashes and policy metadata for host comparison.
+9. Rotate the old `labadmin` passwords. No automated runtime path may know or read them.
+10. Take a coordinated cold checkpoint only after all three guests and the immutable host controller pass.
 
 For an already bootstrapped v1 lab,
 `python3 scripts/privileged-control-operation.py deploy` performs the reviewed

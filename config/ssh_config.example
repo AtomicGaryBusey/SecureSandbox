@@ -1,30 +1,30 @@
-# Canonical portable Host SSH configuration. OpenSSH expands %d to the local
-# operator's home directory on each admitted Mac.
+# Canonical Host SSH configuration. Public client identities and pinned guest
+# host keys are selected only through the root-owned machine trust projection.
 Host sandbox-gateway
     HostName gateway.securesandbox.invalid
     HostKeyAlias SecureSandbox-Gateway
     CheckHostIP no
-    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/vm_maintenance proxy-gateway --port %p
+    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/control_client proxy-gateway --port %p
     User labadmin
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/provisioning_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/provisioning_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-gateway-control
     HostName gateway.securesandbox.invalid
     HostKeyAlias SecureSandbox-Gateway
     CheckHostIP no
-    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/vm_maintenance proxy-gateway --port %p
+    ProxyCommand /usr/bin/python3 -I /usr/local/libexec/secure-sandbox-host/current/control_client proxy-gateway --port %p
     User securectl
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/control_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/control_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-research-admin
     HostName 172.30.10.2
@@ -33,11 +33,11 @@ Host sandbox-research-admin
     User labadmin
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/provisioning_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/provisioning_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-research
     HostName 172.30.10.2
@@ -46,11 +46,11 @@ Host sandbox-research
     User agent
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/provisioning_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/provisioning_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-research-control
     HostName 172.30.10.2
@@ -59,11 +59,11 @@ Host sandbox-research-control
     User securectl
     ProxyJump sandbox-gateway
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/control_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/control_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-target-admin
     HostName 172.30.20.2
@@ -72,11 +72,11 @@ Host sandbox-target-admin
     User labadmin
     ProxyJump sandbox-gateway,sandbox-research-admin
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/provisioning_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/provisioning_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts
 
 Host sandbox-target-control
     HostName 172.30.20.2
@@ -85,8 +85,8 @@ Host sandbox-target-control
     User securectl
     ProxyJump sandbox-gateway,sandbox-research-admin
     IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
-    IdentityFile %d/SecureSandbox/runs/control_key.pub
+    IdentityFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/control_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes
-    UserKnownHostsFile %d/SecureSandbox/runs/known_hosts
+    UserKnownHostsFile /usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts

@@ -9,13 +9,17 @@ command and executes this module as root through one exact sudoers rule.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import ctypes
+import errno
 import fcntl
 import hashlib
 import io
 import json
 import os
+import platform
 import pwd
 import re
 import selectors
@@ -56,6 +60,87 @@ EPOCH = re.compile(r"^[0-9]{10}$")
 COMPLETION_STAGE = re.compile(
     r"^\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json)\.complete$"
 )
+
+HOST_SSH_TRUST_SCHEMA = "secure-sandbox-host-ssh-trust-v1"
+HOST_SSH_TRUST_MATERIAL_SCHEMA = (
+    "secure-sandbox-host-ssh-trust-material-v1"
+)
+HOST_SSH_TRUST_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust"
+)
+HOST_SSH_CONFIG = Path(
+    "/usr/local/libexec/secure-sandbox-host/current/ssh_config"
+)
+HOST_VM_MAINTENANCE = Path(
+    "/usr/local/libexec/secure-sandbox-host/current/vm_maintenance"
+)
+PROVISIONING_AGENT_SOCKET = Path(
+    "/tmp/secure-sandbox-ssh-agent.sock"
+)
+CONTROL_AGENT_SOCKET = Path(
+    "/tmp/secure-sandbox-control-ssh-agent.sock"
+)
+HOST_OPERATOR_REPOSITORY_NAME = "SecureSandbox"
+HOST_GATEWAY_BUNDLE_RELATIVE = Path(
+    "vms/SecureSandbox-Gateway.pvm"
+)
+HOST_SSH_TRUST_FILENAMES = {
+    "provisioning": "provisioning_key.pub",
+    "control": "control_key.pub",
+    "known_hosts": "known_hosts",
+    "manifest": "manifest.json",
+}
+HOST_KEY_ALIASES = (
+    "SecureSandbox-Gateway",
+    "SecureSandbox-Research",
+    "SecureSandbox-Target",
+)
+HOST_SSH_TRUST_CONFIG_PATHS = (
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust/current/"
+    "provisioning_key.pub",
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust/current/"
+    "control_key.pub",
+    "/usr/local/var/lib/secure-sandbox/host-ssh-trust/current/known_hosts",
+)
+HOST_GATEWAY_PROXY_COMMAND = (
+    "/usr/bin/python3 -I "
+    "/usr/local/libexec/secure-sandbox-host/current/control_client "
+    "proxy-gateway --port %p"
+)
+SSH_ED25519_WIRE_NAME = b"ssh-ed25519"
+SSH_TRUST_MAX_FILE = 64 * 1024
+UUID_LINE = re.compile(rb'"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]{36})"')
+SERIAL_LINE = re.compile(
+    rb'"IOPlatformSerialNumber"\s*=\s*"([^"\r\n]{1,128})"'
+)
+MODEL_LINE = re.compile(rb'"model"\s*=\s*<"([^"\r\n]{1,128})')
+
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_FIRST_ENTRY = 0
+ACL_NEXT_ENTRY = -1
+ACL_EXTENDED_ALLOW = 1
+ACL_EXTENDED_DENY = 2
+_ACL_LIBC = ctypes.CDLL(None, use_errno=True)
+_ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
+_ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_GET_TAG_TYPE = getattr(_ACL_LIBC, "acl_get_tag_type", None)
+_ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
+if _ACL_GET_FD_NP is not None:
+    _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
+    _ACL_GET_FD_NP.restype = ctypes.c_void_p
+if _ACL_GET_ENTRY is not None:
+    _ACL_GET_ENTRY.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_GET_TAG_TYPE is not None:
+    _ACL_GET_TAG_TYPE.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+    ]
+    _ACL_GET_TAG_TYPE.restype = ctypes.c_int
+if _ACL_FREE is not None:
+    _ACL_FREE.argtypes = [ctypes.c_void_p]
+    _ACL_FREE.restype = ctypes.c_int
 
 
 class ControlFailure(RuntimeError):
@@ -316,6 +401,741 @@ STREAM_READY = b"SSSTRM1\n"
 
 def canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def host_ssh_trust_digest(value: object) -> str:
+    """Hash one compact, sorted, ASCII trust record including its newline."""
+    return hashlib.sha256(canonical_json(value) + b"\n").hexdigest()
+
+
+def _reject_extended_acl(descriptor: int, failure: str) -> None:
+    """Require mode bits to be the complete authority for one trusted inode."""
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise ControlFailure("host_ssh_trust_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise ControlFailure(failure)
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result = _ACL_GET_ENTRY(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if result == 0:
+            raise ControlFailure(failure)
+        if ctypes.get_errno() not in {errno.ENOENT, errno.EINVAL}:
+            raise ControlFailure(failure)
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise ControlFailure("host_ssh_trust_acl_release_failed")
+
+
+def _reject_allowing_acl(descriptor: int, failure: str) -> None:
+    """Allow Darwin's standard deny-only home ACL, never an ACL grant.
+
+    New macOS login homes normally carry ``group:everyone deny delete``.
+    Rejecting every extended ACL would make the physical operator account
+    unusable.  A deny entry can only remove mode-bit authority; an allow entry
+    can add authority and is therefore forbidden on this parent boundary.
+    """
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_GET_TAG_TYPE is None or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise ControlFailure("host_ssh_trust_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise ControlFailure(failure)
+    try:
+        entry = ctypes.c_void_p()
+        entry_id = ACL_FIRST_ENTRY
+        while True:
+            ctypes.set_errno(0)
+            result = _ACL_GET_ENTRY(
+                acl, entry_id, ctypes.byref(entry),
+            )
+            if result != 0:
+                if ctypes.get_errno() in {errno.ENOENT, errno.EINVAL}:
+                    break
+                raise ControlFailure(failure)
+            tag = ctypes.c_int()
+            if (_ACL_GET_TAG_TYPE(entry, ctypes.byref(tag)) != 0
+                    or tag.value != ACL_EXTENDED_DENY):
+                raise ControlFailure(failure)
+            entry_id = ACL_NEXT_ENTRY
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise ControlFailure("host_ssh_trust_acl_release_failed")
+
+
+def _trusted_directory(
+    path: Path, expected_uid: int, expected_gid: int, expected_mode: int,
+    failure: str,
+) -> os.stat_result:
+    descriptor = -1
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        after = path.lstat()
+        _reject_extended_acl(descriptor, failure)
+    except OSError as error:
+        raise ControlFailure(failure) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(after.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or stat.S_IMODE(opened.st_mode) != expected_mode):
+        raise ControlFailure(failure)
+    return opened
+
+
+def _trusted_regular_bytes(
+    path: Path, expected_uid: int, expected_gid: int, expected_mode: int,
+    failure: str, *, maximum: int = SSH_TRUST_MAX_FILE,
+) -> tuple[bytes, os.stat_result]:
+    descriptor = -1
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        _reject_extended_acl(descriptor, failure)
+        if (not stat.S_ISREG(opened.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or (before.st_dev, before.st_ino)
+                    != (opened.st_dev, opened.st_ino)
+                or opened.st_uid != expected_uid
+                or opened.st_gid != expected_gid
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != expected_mode
+                or not 1 <= opened.st_size <= maximum):
+            raise ControlFailure(failure)
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after_open = os.fstat(descriptor)
+        after_named = path.lstat()
+    except OSError as error:
+        raise ControlFailure(failure) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (len(data) != opened.st_size or len(data) > maximum
+            or stat.S_ISLNK(after_named.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after_open)
+            or identity(after_open) != identity(after_named)):
+        raise ControlFailure(failure)
+    return bytes(data), opened
+
+
+def _decode_ssh_ed25519_blob(encoded: str, failure: str) -> bytes:
+    if (not isinstance(encoded, str) or not encoded
+            or re.fullmatch(r"[A-Za-z0-9+/]+", encoded) is None):
+        raise ControlFailure(failure)
+    try:
+        blob = base64.b64decode(
+            encoded + "=" * ((4 - len(encoded) % 4) % 4), validate=True,
+        )
+    except (ValueError, binascii.Error) as error:
+        raise ControlFailure(failure) from error
+    if base64.b64encode(blob).decode("ascii").rstrip("=") != encoded:
+        raise ControlFailure(failure)
+
+    def ssh_string(offset: int) -> tuple[bytes, int]:
+        if offset + 4 > len(blob):
+            raise ControlFailure(failure)
+        length = struct.unpack(">I", blob[offset:offset + 4])[0]
+        start = offset + 4; end = start + length
+        if end > len(blob):
+            raise ControlFailure(failure)
+        return blob[start:end], end
+
+    algorithm, offset = ssh_string(0)
+    key, offset = ssh_string(offset)
+    if (algorithm != SSH_ED25519_WIRE_NAME or len(key) != 32
+            or offset != len(blob)):
+        raise ControlFailure(failure)
+    return blob
+
+
+def _public_key(
+    raw: bytes, failure: str, *, allow_comment: bool,
+) -> tuple[bytes, str]:
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ControlFailure(failure) from error
+    if "\r" in text or "\x00" in text:
+        raise ControlFailure(failure)
+    fields = text.strip().split()
+    if (len(fields) < 2 or fields[0] != "ssh-ed25519"
+            or (not allow_comment and len(fields) != 2)):
+        raise ControlFailure(failure)
+    blob = _decode_ssh_ed25519_blob(fields[1], failure)
+    canonical = f"ssh-ed25519 {fields[1]}\n".encode("ascii")
+    if not allow_comment and raw != canonical:
+        raise ControlFailure(failure)
+    fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest(),
+    ).decode("ascii").rstrip("=")
+    return blob, fingerprint
+
+
+def _known_hosts(raw: bytes) -> tuple[bytes, dict[str, str]]:
+    failure = "host_ssh_trust_known_hosts_invalid"
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ControlFailure(failure) from error
+    if "\r" in text or "\x00" in text or not text.endswith("\n"):
+        raise ControlFailure(failure)
+    lines = text.splitlines()
+    if len(lines) != len(HOST_KEY_ALIASES):
+        raise ControlFailure(failure)
+    fingerprints: dict[str, str] = {}
+    canonical_lines: list[str] = []
+    for expected, line in zip(HOST_KEY_ALIASES, lines):
+        fields = line.split()
+        if (len(fields) != 3 or fields[0] != expected
+                or fields[1] != "ssh-ed25519"
+                or any(item in fields[0] for item in (",", "*", "?", "|", "@"))):
+            raise ControlFailure(failure)
+        blob = _decode_ssh_ed25519_blob(fields[2], failure)
+        fingerprint = "SHA256:" + base64.b64encode(
+            hashlib.sha256(blob).digest(),
+        ).decode("ascii").rstrip("=")
+        if fingerprint in fingerprints.values():
+            raise ControlFailure(failure)
+        fingerprints[expected] = fingerprint
+        canonical_lines.append(f"{expected} ssh-ed25519 {fields[2]}")
+    canonical = ("\n".join(canonical_lines) + "\n").encode("ascii")
+    if raw != canonical:
+        raise ControlFailure(failure)
+    return canonical, fingerprints
+
+
+def current_host_machine_identity(
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> str:
+    if platform.system() != "Darwin" or platform.machine() not in {
+        "arm64", "x86_64",
+    }:
+        raise ControlFailure("host_ssh_trust_machine_invalid")
+    try:
+        result = runner(
+            ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=5,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                 "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ControlFailure("host_ssh_trust_machine_invalid") from error
+    if (result.returncode != 0 or len(result.stdout) > 1024 * 1024
+            or len(result.stderr) > 64 * 1024):
+        raise ControlFailure("host_ssh_trust_machine_invalid")
+    platform_uuid = UUID_LINE.search(result.stdout)
+    serial = SERIAL_LINE.search(result.stdout)
+    model = MODEL_LINE.search(result.stdout)
+    if platform_uuid is None or serial is None or model is None:
+        raise ControlFailure("host_ssh_trust_machine_invalid")
+    material = b"\0".join(
+        (platform_uuid.group(1).lower(), serial.group(1), model.group(1)),
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
+def _path_lstat(path: Path) -> os.stat_result:
+    return path.lstat()
+
+
+def _agent_identity(
+    socket_path: Path, operator_uid: int, expected_blob: bytes,
+    expected_fingerprint: str, agent_runner: Callable[..., subprocess.CompletedProcess[bytes]],
+    socket_stat_reader: Callable[[Path], os.stat_result],
+) -> None:
+    failure = "host_ssh_trust_agent_invalid"
+    try:
+        before = socket_stat_reader(socket_path)
+    except OSError as error:
+        raise ControlFailure(failure) from error
+    if (not stat.S_ISSOCK(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != operator_uid or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600):
+        raise ControlFailure(failure)
+    process_options: dict[str, object] = {}
+    if os.geteuid() == 0:
+        try:
+            account = pwd.getpwuid(operator_uid)
+        except (KeyError, AttributeError, TypeError, ValueError) as error:
+            raise ControlFailure(failure) from error
+        if (account.pw_uid != operator_uid
+                or not isinstance(account.pw_gid, int)
+                or isinstance(account.pw_gid, bool)
+                or not 1 <= account.pw_gid < 2 ** 31):
+            raise ControlFailure(failure)
+        # Query an operator-owned agent as that operator.  This keeps the
+        # agent peer identity exact on implementations that authenticate Unix
+        # socket clients, and prevents a root client from becoming a second
+        # agent principal.
+        process_options = {
+            "user": operator_uid,
+            "group": account.pw_gid,
+            "extra_groups": [],
+        }
+    try:
+        result = agent_runner(
+            ["/usr/bin/ssh-add", "-L"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                 "SSH_AUTH_SOCK": str(socket_path)},
+            **process_options,
+        )
+        after = socket_stat_reader(socket_path)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ControlFailure(failure) from error
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (identity(before) != identity(after) or result.returncode != 0
+            or not 1 <= len(result.stdout) <= 16 * 1024
+            or len(result.stderr) > 16 * 1024):
+        raise ControlFailure(failure)
+    lines = [line for line in result.stdout.splitlines() if line]
+    if len(lines) != 1:
+        raise ControlFailure(failure)
+    blob, fingerprint = _public_key(
+        lines[0] + b"\n", failure, allow_comment=True,
+    )
+    if blob != expected_blob or fingerprint != expected_fingerprint:
+        raise ControlFailure(failure)
+
+
+def validate_client_ssh_trust(
+    ssh_config: str | Path, *,
+    expected_ssh_config: Path = HOST_SSH_CONFIG,
+    trust_root: Path = HOST_SSH_TRUST_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    effective_uid: int | None = None,
+    machine_identity_reader: Callable[[], str] = current_host_machine_identity,
+    agent_runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    provisioning_agent_socket: Path = PROVISIONING_AGENT_SOCKET,
+    control_agent_socket: Path = CONTROL_AGENT_SOCKET,
+    socket_stat_reader: Callable[[Path], os.stat_result] = _path_lstat,
+) -> dict[str, object]:
+    """Verify the complete machine trust projection before spawning OpenSSH."""
+    supplied_config = Path(ssh_config)
+    if supplied_config != expected_ssh_config:
+        raise ControlFailure("host_ssh_config_path_invalid")
+    config_raw, _config_info = _trusted_regular_bytes(
+        supplied_config, trusted_uid, trusted_gid, 0o444,
+        "host_ssh_config_untrusted", maximum=1024 * 1024,
+    )
+    try:
+        config_text = config_raw.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ControlFailure("host_ssh_config_untrusted") from error
+    identity_files = [
+        line.split(None, 1)[1]
+        for line in config_text.splitlines()
+        if line.strip().startswith("IdentityFile ")
+    ]
+    known_host_files = [
+        line.split(None, 1)[1]
+        for line in config_text.splitlines()
+        if line.strip().startswith("UserKnownHostsFile ")
+    ]
+    proxy_commands = [
+        line.strip().split(None, 1)[1]
+        for line in config_text.splitlines()
+        if line.strip().startswith("ProxyCommand ")
+    ]
+    if ("%d/" in config_text
+            or identity_files.count(HOST_SSH_TRUST_CONFIG_PATHS[0]) != 4
+            or identity_files.count(HOST_SSH_TRUST_CONFIG_PATHS[1]) != 3
+            or len(identity_files) != 7
+            or known_host_files != [HOST_SSH_TRUST_CONFIG_PATHS[2]] * 7
+            or proxy_commands != [HOST_GATEWAY_PROXY_COMMAND] * 2):
+        raise ControlFailure("host_ssh_config_contract_invalid")
+
+    trust_parent = trust_root.parent
+    try:
+        trust_parent_named = trust_parent.lstat()
+    except OSError as error:
+        raise ControlFailure("host_ssh_trust_parent_untrusted") from error
+    trust_parent_mode = stat.S_IMODE(trust_parent_named.st_mode)
+    if trust_parent_mode not in {0o700, 0o755}:
+        raise ControlFailure("host_ssh_trust_parent_untrusted")
+    parent_before = _trusted_directory(
+        trust_parent, trusted_uid, trusted_gid, trust_parent_mode,
+        "host_ssh_trust_parent_untrusted",
+    )
+    root_before = _trusted_directory(
+        trust_root, trusted_uid, trusted_gid, 0o755,
+        "host_ssh_trust_root_untrusted",
+    )
+    generations = trust_root / "generations"
+    _trusted_directory(
+        generations, trusted_uid, trusted_gid, 0o755,
+        "host_ssh_trust_generations_untrusted",
+    )
+    selector = trust_root / "current"
+    try:
+        selector_before = selector.lstat()
+        selector_target = os.readlink(selector)
+    except OSError as error:
+        raise ControlFailure("host_ssh_trust_selector_untrusted") from error
+    if (not stat.S_ISLNK(selector_before.st_mode)
+            or selector_before.st_uid != trusted_uid
+            or selector_before.st_gid != trusted_gid
+            or selector_before.st_nlink != 1
+            or re.fullmatch(r"generations/[0-9a-f]{64}", selector_target) is None):
+        raise ControlFailure("host_ssh_trust_selector_untrusted")
+    trust_id = selector_target.rsplit("/", 1)[1]
+    generation = trust_root / selector_target
+    generation_before = _trusted_directory(
+        generation, trusted_uid, trusted_gid, 0o555,
+        "host_ssh_trust_generation_untrusted",
+    )
+    try:
+        with os.scandir(generation) as entries:
+            generation_names = {entry.name for entry in entries}
+    except OSError as error:
+        raise ControlFailure("host_ssh_trust_generation_untrusted") from error
+    if generation_names != set(HOST_SSH_TRUST_FILENAMES.values()):
+        raise ControlFailure("host_ssh_trust_generation_untrusted")
+    manifest_raw, _ = _trusted_regular_bytes(
+        generation / HOST_SSH_TRUST_FILENAMES["manifest"],
+        trusted_uid, trusted_gid, 0o444, "host_ssh_trust_manifest_untrusted",
+    )
+    try:
+        manifest = json.loads(manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlFailure("host_ssh_trust_manifest_invalid") from error
+    expected_manifest_fields = {
+        "schema", "trust_id", "operator_uid", "machine_identity_sha256",
+        "enrolled_release_id", "ssh_config_sha256",
+        "provisioning_public_key_sha256",
+        "provisioning_public_key_fingerprint", "control_public_key_sha256",
+        "control_public_key_fingerprint", "known_hosts_sha256",
+        "known_host_fingerprints", "plan_sha256", "enrolled_at",
+        "manifest_sha256",
+    }
+    if (not isinstance(manifest, dict) or set(manifest) != expected_manifest_fields
+            or manifest.get("schema") != HOST_SSH_TRUST_SCHEMA
+            or manifest.get("trust_id") != trust_id
+            or not isinstance(manifest.get("operator_uid"), int)
+            or isinstance(manifest.get("operator_uid"), bool)
+            or not 1 <= manifest["operator_uid"] < 2 ** 31
+            or any(not isinstance(manifest.get(name), str)
+                   or SHA256.fullmatch(manifest[name]) is None
+                   for name in (
+                       "machine_identity_sha256", "enrolled_release_id",
+                       "ssh_config_sha256", "provisioning_public_key_sha256",
+                       "control_public_key_sha256", "known_hosts_sha256",
+                       "plan_sha256", "manifest_sha256",
+                   ))
+            or any(not isinstance(manifest.get(name), str)
+                   or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", manifest[name])
+                      is None
+                   for name in (
+                       "provisioning_public_key_fingerprint",
+                       "control_public_key_fingerprint",
+                   ))
+            or not isinstance(manifest.get("enrolled_at"), int)
+            or isinstance(manifest.get("enrolled_at"), bool)
+            or manifest["enrolled_at"] <= 0
+            or not isinstance(manifest.get("known_host_fingerprints"), dict)
+            or tuple(manifest["known_host_fingerprints"]) != HOST_KEY_ALIASES
+            or any(not isinstance(value, str)
+                   or re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", value) is None
+                   for value in manifest["known_host_fingerprints"].values())):
+        raise ControlFailure("host_ssh_trust_manifest_invalid")
+    unsigned = {name: item for name, item in manifest.items()
+                if name != "manifest_sha256"}
+    if (manifest_raw != canonical_json(manifest) + b"\n"
+            or manifest["manifest_sha256"]
+               != host_ssh_trust_digest(unsigned)):
+        raise ControlFailure("host_ssh_trust_manifest_invalid")
+    material = {
+        "schema": HOST_SSH_TRUST_MATERIAL_SCHEMA,
+        "operator_uid": manifest["operator_uid"],
+        "machine_identity_sha256": manifest["machine_identity_sha256"],
+        "ssh_config_sha256": manifest["ssh_config_sha256"],
+        "provisioning_public_key_sha256":
+            manifest["provisioning_public_key_sha256"],
+        "provisioning_public_key_fingerprint":
+            manifest["provisioning_public_key_fingerprint"],
+        "control_public_key_sha256": manifest["control_public_key_sha256"],
+        "control_public_key_fingerprint":
+            manifest["control_public_key_fingerprint"],
+        "known_hosts_sha256": manifest["known_hosts_sha256"],
+        "known_host_fingerprints": manifest["known_host_fingerprints"],
+    }
+    if trust_id != host_ssh_trust_digest(material):
+        raise ControlFailure("host_ssh_trust_id_invalid")
+    if manifest["ssh_config_sha256"] != hashlib.sha256(config_raw).hexdigest():
+        raise ControlFailure("host_ssh_trust_config_changed")
+    machine_identity = machine_identity_reader()
+    if (not isinstance(machine_identity, str)
+            or SHA256.fullmatch(machine_identity) is None
+            or machine_identity != manifest["machine_identity_sha256"]):
+        raise ControlFailure("host_ssh_trust_machine_changed")
+    observed_uid = os.geteuid() if effective_uid is None else effective_uid
+    operator_uid = manifest["operator_uid"]
+    if observed_uid not in {0, operator_uid}:
+        raise ControlFailure("host_ssh_trust_operator_mismatch")
+
+    provisioning_raw, _ = _trusted_regular_bytes(
+        generation / HOST_SSH_TRUST_FILENAMES["provisioning"],
+        trusted_uid, trusted_gid, 0o444,
+        "host_ssh_trust_provisioning_key_untrusted",
+    )
+    control_raw, _ = _trusted_regular_bytes(
+        generation / HOST_SSH_TRUST_FILENAMES["control"],
+        trusted_uid, trusted_gid, 0o444,
+        "host_ssh_trust_control_key_untrusted",
+    )
+    known_hosts_raw, _ = _trusted_regular_bytes(
+        generation / HOST_SSH_TRUST_FILENAMES["known_hosts"],
+        trusted_uid, trusted_gid, 0o444,
+        "host_ssh_trust_known_hosts_untrusted",
+    )
+    provisioning_blob, provisioning_fingerprint = _public_key(
+        provisioning_raw, "host_ssh_trust_provisioning_key_invalid",
+        allow_comment=False,
+    )
+    control_blob, control_fingerprint = _public_key(
+        control_raw, "host_ssh_trust_control_key_invalid", allow_comment=False,
+    )
+    if provisioning_blob == control_blob:
+        raise ControlFailure("host_ssh_trust_key_separation_invalid")
+    _canonical_hosts, host_fingerprints = _known_hosts(known_hosts_raw)
+    if (hashlib.sha256(provisioning_raw).hexdigest()
+            != manifest["provisioning_public_key_sha256"]
+            or provisioning_fingerprint
+            != manifest["provisioning_public_key_fingerprint"]
+            or hashlib.sha256(control_raw).hexdigest()
+            != manifest["control_public_key_sha256"]
+            or control_fingerprint != manifest["control_public_key_fingerprint"]
+            or hashlib.sha256(known_hosts_raw).hexdigest()
+            != manifest["known_hosts_sha256"]
+            or host_fingerprints != manifest["known_host_fingerprints"]):
+        raise ControlFailure("host_ssh_trust_content_changed")
+
+    _agent_identity(
+        provisioning_agent_socket, operator_uid, provisioning_blob,
+        provisioning_fingerprint, agent_runner, socket_stat_reader,
+    )
+    _agent_identity(
+        control_agent_socket, operator_uid, control_blob,
+        control_fingerprint, agent_runner, socket_stat_reader,
+    )
+    try:
+        selector_after = selector.lstat()
+        selector_target_after = os.readlink(selector)
+        generation_after = generation.lstat()
+        root_after = trust_root.lstat()
+        parent_after = trust_parent.lstat()
+    except OSError as error:
+        raise ControlFailure("host_ssh_trust_changed") from error
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (identity(parent_before) != identity(parent_after)
+            or identity(root_before) != identity(root_after)
+            or identity(selector_before) != identity(selector_after)
+            or selector_target_after != selector_target
+            or identity(generation_before) != identity(generation_after)):
+        raise ControlFailure("host_ssh_trust_changed")
+    return manifest
+
+
+def _operator_owned_directory(
+    path: Path, operator_uid: int, operator_gid: int, failure: str, *,
+    allow_deny_only_acl: bool = False,
+) -> os.stat_result:
+    """Validate one canonical operator-owned directory without following it."""
+    descriptor = -1
+    try:
+        if not path.is_absolute() or path != path.resolve(strict=True):
+            raise ControlFailure(failure)
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if allow_deny_only_acl:
+            _reject_allowing_acl(descriptor, failure)
+        else:
+            _reject_extended_acl(descriptor, failure)
+        after = path.lstat()
+    except ControlFailure:
+        raise
+    except OSError as error:
+        raise ControlFailure(failure) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(after.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or opened.st_uid != operator_uid
+            or opened.st_gid != operator_gid
+            or stat.S_IMODE(opened.st_mode) & 0o022):
+        raise ControlFailure(failure)
+    return opened
+
+
+def client_ssh_process_options(
+    manifest: dict[str, object], *, effective_uid: int | None = None,
+    account_reader: Callable[[int], object] | None = None,
+    repository_name: str = HOST_OPERATOR_REPOSITORY_NAME,
+    gateway_bundle_relative: Path = HOST_GATEWAY_BUNDLE_RELATIVE,
+) -> dict[str, object]:
+    """Return the fail-closed identity drop required for a root client.
+
+    OpenSSH's Gateway ProxyCommand deliberately refuses root.  A client
+    admitted through the root-owned trust projection must therefore execute
+    OpenSSH as the enrolled local operator, with no supplementary groups.
+    """
+    operator_uid = manifest.get("operator_uid")
+    if (not isinstance(operator_uid, int) or isinstance(operator_uid, bool)
+            or not 1 <= operator_uid < 2 ** 31):
+        raise ControlFailure("host_ssh_operator_account_invalid")
+    observed_uid = os.geteuid() if effective_uid is None else effective_uid
+    if observed_uid not in {0, operator_uid}:
+        raise ControlFailure("host_ssh_operator_account_invalid")
+    reader = pwd.getpwuid if account_reader is None else account_reader
+    try:
+        account = reader(operator_uid)
+        account_uid = account.pw_uid
+        account_gid = account.pw_gid
+        account_name = account.pw_name
+        home_value = account.pw_dir
+    except (KeyError, AttributeError, TypeError, ValueError) as error:
+        raise ControlFailure("host_ssh_operator_account_invalid") from error
+    if (account_uid != operator_uid
+            or not isinstance(account_gid, int)
+            or isinstance(account_gid, bool)
+            or not 1 <= account_gid < 2 ** 31
+            or not isinstance(account_name, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]{0,127}", account_name)
+               is None
+            or not isinstance(home_value, str) or not home_value):
+        raise ControlFailure("host_ssh_operator_account_invalid")
+    home = Path(home_value)
+    _operator_owned_directory(
+        home, operator_uid, account_gid, "host_ssh_operator_home_untrusted",
+        allow_deny_only_acl=True,
+    )
+    if (not isinstance(repository_name, str)
+            or repository_name != HOST_OPERATOR_REPOSITORY_NAME
+            or gateway_bundle_relative != HOST_GATEWAY_BUNDLE_RELATIVE):
+        raise ControlFailure("host_ssh_operator_repository_untrusted")
+    repository = home / repository_name
+    _operator_owned_directory(
+        repository, operator_uid, account_gid,
+        "host_ssh_operator_repository_untrusted",
+    )
+    _operator_owned_directory(
+        repository / gateway_bundle_relative.parent,
+        operator_uid, account_gid,
+        "host_ssh_operator_repository_untrusted",
+    )
+    _operator_owned_directory(
+        repository / gateway_bundle_relative, operator_uid, account_gid,
+        "host_ssh_operator_gateway_bundle_untrusted",
+    )
+    if observed_uid == operator_uid:
+        return {}
+    return {
+        "user": operator_uid,
+        "group": account_gid,
+        "extra_groups": [],
+        "cwd": str(home),
+        "env": {
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(home),
+            "USER": account_name,
+            "LOGNAME": account_name,
+            "LANG": "C",
+            "LC_ALL": "C",
+        },
+    }
+
+
+def proxy_gateway_main(
+    arguments: argparse.Namespace, *,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
+) -> int:
+    """Run the fixed Gateway transport resolver as the enrolled operator.
+
+    Immutable acceptance drivers legitimately invoke OpenSSH while running as
+    root.  The Parallels resolver must nevertheless remain unprivileged, so
+    this signed ProxyCommand validates the complete machine trust projection
+    and drops only its fixed resolver child to the enrolled operator.
+    """
+    port = arguments.port
+    if (not isinstance(port, str) or re.fullmatch(r"[0-9]{1,5}", port) is None
+            or port != "22"):
+        raise ControlFailure("gateway_proxy_port_invalid")
+    trust_manifest = validate_client_ssh_trust(HOST_SSH_CONFIG)
+    process_options = client_ssh_process_options(trust_manifest)
+    command = [
+        "/usr/bin/python3", "-I", str(HOST_VM_MAINTENANCE),
+        "proxy-gateway", "--port", port,
+    ]
+    process_runner = subprocess.run if runner is None else runner
+    try:
+        result = process_runner(command, check=False, **process_options)
+    except OSError as error:
+        raise ControlFailure("gateway_proxy_launch_failed") from error
+    if (not isinstance(result.returncode, int)
+            or isinstance(result.returncode, bool)):
+        raise ControlFailure("gateway_proxy_status_invalid")
+    return result.returncode
 
 
 def read_exact(stream: BinaryIO, length: int) -> bytes:
@@ -1212,7 +2032,10 @@ def dispatch(role: str, stream: BinaryIO, state_root: Path) -> int:
         raise
 
 
-def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
+def stream_client_main(
+    arguments: argparse.Namespace, request_id: str, *,
+    ssh_process_options: dict[str, object] | None = None,
+) -> int:
     request: dict[str, object] = {
         "kind": "stream", "args": arguments.arguments,
         "request_id": request_id, "operation": arguments.name,
@@ -1220,6 +2043,9 @@ def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
     starts_owned_group = inherited_owned_process_group() is None
     deadline = time.monotonic() + arguments.timeout_seconds
     process: subprocess.Popen[bytes] | None = None
+    process_options = {} if ssh_process_options is None else dict(
+        ssh_process_options,
+    )
     with client_interrupt_cleanup():
         try:
             command = [
@@ -1245,6 +2071,7 @@ def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
                         command, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         start_new_session=starts_owned_group, bufsize=0,
+                        **process_options,
                     )
                     # Keep deferral active through the ownership assignment.
                     # A handler raised before this store would otherwise leave
@@ -1264,6 +2091,7 @@ def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
                     command, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     start_new_session=starts_owned_group, bufsize=0,
+                    **process_options,
                 )
             if process.stdin is None or process.stdout is None:
                 raise ControlFailure("client_stream_unavailable")
@@ -1356,11 +2184,16 @@ def client_main(arguments: argparse.Namespace) -> int:
 def _client_main(arguments: argparse.Namespace) -> int:
     if not 1 <= arguments.timeout_seconds <= 3600:
         raise ControlFailure("client_timeout_invalid")
+    trust_manifest = validate_client_ssh_trust(arguments.ssh_config)
+    ssh_process_options = client_ssh_process_options(trust_manifest)
     request_id = arguments.request_id or str(uuid.uuid4())
     if UUID.fullmatch(request_id) is None:
         raise ControlFailure("request_id_invalid")
     if arguments.command == "stream":
-        return stream_client_main(arguments, request_id)
+        return stream_client_main(
+            arguments, request_id,
+            ssh_process_options=ssh_process_options,
+        )
     request: dict[str, object] = {"kind": arguments.command, "args": arguments.arguments, "request_id": request_id}
     payload = b""
     if arguments.command == "run":
@@ -1448,6 +2281,7 @@ def _client_main(arguments: argparse.Namespace) -> int:
                 spawned = subprocess.Popen(
                     command, stdin=subprocess.PIPE,
                     start_new_session=starts_owned_group,
+                    **ssh_process_options,
                 )
                 # Keep deferral active through the ownership assignment.
                 process = spawned
@@ -1464,6 +2298,7 @@ def _client_main(arguments: argparse.Namespace) -> int:
             process = subprocess.Popen(
                 command, stdin=subprocess.PIPE,
                 start_new_session=starts_owned_group,
+                **ssh_process_options,
             )
         writer = threading.Thread(target=write_to_ssh, daemon=True)
         writer.start()
@@ -1502,6 +2337,8 @@ def _client_main(arguments: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
+    proxy_gateway = subparsers.add_parser("proxy-gateway")
+    proxy_gateway.add_argument("--port", required=True)
     client = subparsers.add_parser("client")
     client.add_argument("--ssh-config", required=True)
     client.add_argument("--timeout-seconds", type=int, default=600)
@@ -1530,6 +2367,8 @@ def main() -> int:
     internal.add_argument("arguments", nargs="*")
     arguments = parser.parse_args()
     try:
+        if arguments.mode == "proxy-gateway":
+            return proxy_gateway_main(arguments)
         if arguments.mode == "client":
             return client_main(arguments)
         if arguments.mode == "internal":

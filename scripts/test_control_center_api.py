@@ -2267,7 +2267,12 @@ class CatalogTests(unittest.TestCase):
     def test_bounded_command_rejects_output_before_process_completion(self):
         with patch.object(API, "MAX_OUTPUT", 1024):
             with self.assertRaisesRegex(ValueError, "size limit"):
-                API.bounded_command([sys.executable, "-c", "import sys; sys.stdout.write('x' * 2048)"], timeout=5)
+                API.bounded_command([
+                    sys.executable, "-c",
+                    "import sys,time; "
+                    "sys.stdout.write('x' * 2048); sys.stdout.flush(); "
+                    "time.sleep(5)",
+                ], timeout=5)
         result = API.bounded_command([sys.executable, "-c", "import sys; sys.stderr.write('e' * 5000); print('ok')"], timeout=5)
         self.assertEqual(result.stdout, b"ok\n")
         self.assertEqual(len(result.stderr), 4096)

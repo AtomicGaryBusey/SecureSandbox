@@ -63,6 +63,12 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.ceremony_burst = (
             ROOT / "scripts/harness-lifecycle-acceptance-ceremony-burst.py"
         ).read_text()
+        cls.host_release_manager = (
+            ROOT / "scripts/host-controller-release.py"
+        ).read_text()
+        cls.host_deployer = (
+            ROOT / "scripts/deploy-host-controller.py"
+        ).read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
         cls.authorization = (ROOT / "scripts/harness-lifecycle-acceptance-authorization.py").read_text()
@@ -745,6 +751,27 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("one visible operator TTY", self.design)
         self.assertIn("Qualification collection\nremains unprivileged", self.design)
         self.assertIn("never invokes `sudo -v`", self.operator_queue)
+
+    def test_console_user_recovery_batches_root_work_without_broad_authority(self):
+        for phrase in (
+            'CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS = 15 * 60',
+            'def supervise_console_user_broker_recovery(',
+            '"action"',
+            '"inspect-and-recover"',
+            'authorization_receipt_summary(',
+            'runtime_metadata_receipt_recovery_error_mismatch',
+        ):
+            self.assertIn(phrase, self.host_release_manager)
+        for phrase in (
+            '"supervise-console-user-broker-recovery"',
+            'start_console_user_recovery_supervisor(',
+            'finish_console_user_recovery_supervisor(',
+        ):
+            self.assertIn(phrase, self.host_deployer)
+        for forbidden in ("sudo -v", "sudo -s"):
+            self.assertNotIn(forbidden, self.host_deployer)
+        self.assertIn("one bounded privileged ceremony", self.design)
+        self.assertIn("must not produce a second password", self.operator_queue)
 
     def test_progressed_qualification_retention_preserves_current_rejection(self):
         for phrase in (

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import select
 import stat
 import subprocess
 import sys
@@ -1417,6 +1418,143 @@ def selector_recovery_required(
         and stat.S_ISLNK(selector_info.st_mode) and selector_info.st_uid == expected_uid
         and stat.S_IMODE(selector_info.st_mode) != 0o755
     )
+
+
+CONSOLE_USER_RECOVERY_BATCH_SCHEMA = (
+    "secure-sandbox-console-user-recovery-batch-v1"
+)
+CONSOLE_USER_RECOVERY_BATCH_OUTPUT_LIMIT = 1024 * 1024
+CONSOLE_USER_RECOVERY_PASSWORD_WAIT_SECONDS = 5 * 60
+
+
+def terminate_console_user_recovery_supervisor(
+    process: subprocess.Popen[bytes],
+) -> None:
+    """Bounded reap for a supervisor that did not reach its terminal record."""
+    try:
+        if process.poll() is not None:
+            process.wait()
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            process.wait()
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+
+
+def start_console_user_recovery_supervisor(
+    command: list[str], expected_release_id: str,
+    expected_target_plan_sha256: str, *,
+    popen: object = subprocess.Popen,
+) -> tuple[subprocess.Popen[bytes], dict[str, object]]:
+    """Start the one-password root supervisor and validate its staged line."""
+    process = popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=None, bufsize=0,
+    )
+    if process.stdin is None or process.stdout is None:
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError("console_user_recovery_batch_launch_failed")
+    readable, _, _ = select.select(
+        [process.stdout.fileno()], [], [],
+        CONSOLE_USER_RECOVERY_PASSWORD_WAIT_SECONDS,
+    )
+    if not readable:
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError("console_user_recovery_batch_password_timeout")
+    raw = process.stdout.readline(CONSOLE_USER_RECOVERY_BATCH_OUTPUT_LIMIT + 1)
+    if (not raw or len(raw) > CONSOLE_USER_RECOVERY_BATCH_OUTPUT_LIMIT
+            or not raw.endswith(b"\n")):
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError("console_user_recovery_batch_stage_invalid")
+    try:
+        staged = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError(
+            "console_user_recovery_batch_stage_invalid"
+        ) from error
+    fields = {
+        "authorized_target_plan_sha256", "expires_at", "release_id",
+        "schema", "started_at", "status",
+    }
+    if (not isinstance(staged, dict) or set(staged) != fields
+            or raw != MANAGER.canonical_state_record(staged)
+            or staged.get("schema") != CONSOLE_USER_RECOVERY_BATCH_SCHEMA
+            or staged.get("status") != "staged"
+            or staged.get("release_id") != expected_release_id
+            or staged.get("authorized_target_plan_sha256")
+                != expected_target_plan_sha256
+            or not isinstance(staged.get("started_at"), int)
+            or isinstance(staged.get("started_at"), bool)
+            or not isinstance(staged.get("expires_at"), int)
+            or isinstance(staged.get("expires_at"), bool)
+            or staged["expires_at"] - staged["started_at"] != 15 * 60):
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError("console_user_recovery_batch_stage_invalid")
+    return process, staged
+
+
+def finish_console_user_recovery_supervisor(
+    process: subprocess.Popen[bytes], expected_release_id: str,
+    expected_target_plan_sha256: str, *,
+    recovery_binding: tuple[str, str] | None,
+) -> dict[str, object]:
+    """Send the supervisor its sole fixed terminal message and reap it."""
+    if process.stdin is None:
+        raise RuntimeError("console_user_recovery_batch_process_invalid")
+    message: dict[str, object] = {
+        "action": (
+            "close" if recovery_binding is None else "inspect-and-recover"
+        ),
+        "authorized_target_plan_sha256": expected_target_plan_sha256,
+        "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+    }
+    if recovery_binding is not None:
+        message.update({
+            "authorization_request_id": recovery_binding[0],
+            "authorization_request_sha256": recovery_binding[1],
+        })
+    try:
+        process.stdin.write(MANAGER.canonical_state_record(message))
+        process.stdin.flush()
+        process.stdin.close()
+        process.stdin = None
+        stdout, _stderr = process.communicate(timeout=15 * 60 + 30)
+    except (BrokenPipeError, OSError, subprocess.TimeoutExpired) as error:
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError(
+            "console_user_recovery_batch_terminal_failed"
+        ) from error
+    finally:
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+    if (process.returncode != 0 or not stdout
+            or len(stdout) > CONSOLE_USER_RECOVERY_BATCH_OUTPUT_LIMIT
+            or not stdout.endswith(b"\n") or b"\n" in stdout[:-1]):
+        raise RuntimeError("console_user_recovery_batch_terminal_invalid")
+    try:
+        value = json.loads(stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            "console_user_recovery_batch_terminal_invalid"
+        ) from error
+    if (not isinstance(value, dict)
+            or value.get("schema") != CONSOLE_USER_RECOVERY_BATCH_SCHEMA
+            or value.get("release_id") != expected_release_id
+            or value.get("authorized_target_plan_sha256")
+                != expected_target_plan_sha256):
+        raise RuntimeError("console_user_recovery_batch_terminal_invalid")
+    return value
 
 
 def postactivation_current_release(
@@ -2922,6 +3060,9 @@ def main() -> int:
     state_root = LAUNCHER.STATE_ROOT
     selected_broker_path = BROKER_PATH
     lock: Path | None = LAUNCHER.acquire_lock(state_root, timeout=10.0)
+    console_user_supervisor: subprocess.Popen[bytes] | None = None
+    console_user_supervisor_release_id = ""
+    console_user_supervisor_plan_sha256 = ""
     try:
         live = MANAGER.active_markers(state_root)
         if live:
@@ -3147,10 +3288,10 @@ def main() -> int:
             owned_lock = lock
             lock = None
             LAUNCHER.release_lock(owned_lock)
-            completed = subprocess.run([
+            supervisor_command = [
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
-                "stage-console-user-broker-recovery",
+                "supervise-console-user-broker-recovery",
                 "--state-root", str(state_root),
                 "--expected-source-release-id", binding.release_id,
                 "--expected-current-release-id",
@@ -3160,53 +3301,23 @@ def main() -> int:
                 "--expected-replacement-sha256",
                 binding.replacement_launcher_sha256,
                 "--native-host-candidate-json", candidate_json,
-                "--json",
-            ], check=False, capture_output=True, text=True)
-            if completed.returncode != 0:
-                if completed.stdout:
-                    sys.stdout.write(completed.stdout)
-                if completed.stderr:
-                    sys.stderr.write(completed.stderr)
-                print(
-                    "console_user_broker_recovery_stage_failed:"
-                    f"{completed.returncode}",
-                    file=sys.stderr,
-                )
-                return completed.returncode
+                "--authorized-target-plan-sha256",
+                source.authorized_target_plan_sha256,
+            ]
             try:
-                staged = json.loads(completed.stdout)
-            except json.JSONDecodeError:
-                print(
-                    "console_user_broker_recovery_stage_result_invalid",
-                    file=sys.stderr,
+                console_user_supervisor, _staged = (
+                    start_console_user_recovery_supervisor(
+                        supervisor_command, binding.release_id,
+                        source.authorized_target_plan_sha256,
+                    )
                 )
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
                 return 1
-            expected_fields = {
-                "authorized_target_plan_sha256",
-                "authorization_broker_sha256",
-                "candidate_authority_sha256", "previous_release_id",
-                "release_id", "schema", "status",
-            }
-            if (not isinstance(staged, dict)
-                    or set(staged) != expected_fields
-                    or staged.get("schema") != MANAGER.SCHEMA
-                    or staged.get("status")
-                        != "console_user_broker_recovery_staged"
-                    or staged.get("release_id") != binding.release_id
-                    or staged.get("previous_release_id")
-                        != binding.schema_current_release_id
-                    or staged.get("authorization_broker_sha256")
-                        != binding.broker_sha256
-                    or staged.get("authorized_target_plan_sha256")
-                        != source.authorized_target_plan_sha256
-                    or MANAGER.SHA256.fullmatch(str(staged.get(
-                        "candidate_authority_sha256", ""
-                    ))) is None):
-                print(
-                    "console_user_broker_recovery_stage_result_invalid",
-                    file=sys.stderr,
-                )
-                return 1
+            console_user_supervisor_release_id = binding.release_id
+            console_user_supervisor_plan_sha256 = (
+                source.authorized_target_plan_sha256
+            )
             selected_broker_path = (
                 INSTALL_ROOT / "releases" / binding.release_id
                 / "authorization_broker"
@@ -3747,6 +3858,18 @@ def main() -> int:
                     print(str(error), file=sys.stderr)
                     return 1
                 if terminal is not None:
+                    if console_user_supervisor is not None:
+                        try:
+                            finish_console_user_recovery_supervisor(
+                                console_user_supervisor,
+                                console_user_supervisor_release_id,
+                                console_user_supervisor_plan_sha256,
+                                recovery_binding=None,
+                            )
+                        except RuntimeError as error:
+                            print(str(error), file=sys.stderr)
+                            return 1
+                        console_user_supervisor = None
                     if terminal["status"] != "target_committed":
                         print(
                             "host_pair_transition_failed:"
@@ -3758,50 +3881,97 @@ def main() -> int:
                         terminal, separators=(",", ":"), sort_keys=True,
                     ))
                     return 0
-                manager_sha256 = hashlib.sha256(
-                    MANAGER.read_regular(MANAGER_PATH)
-                ).hexdigest()
-                print(
-                    "The protected operation is ambiguous. The next "
-                    "administrator-password prompt runs the exact "
-                    "receipt-bound runtime-metadata recovery verifier.",
-                    file=sys.stderr,
-                )
-                completed = subprocess.run([
-                    "sudo", "/usr/bin/python3", "-I", "-c",
-                    BOOTSTRAP_LOADER, str(MANAGER_PATH), manager_sha256,
-                    "recover-runtime-metadata-install",
-                    "--state-root", str(state_root),
-                    "--expected-source-release-id", source.release_id,
-                    "--authorization-request-id", request_id,
-                    "--authorization-request-sha256", request_sha256,
-                    "--authorized-target-plan-sha256",
-                    source.authorized_target_plan_sha256,
-                    "--native-host-candidate-json",
-                    native_host_candidate_json(
-                        source.native_host_candidate
-                    ),
-                    "--json",
-                ], check=False, capture_output=True, text=True)
-                if completed.returncode == 0:
-                    pass
+                if console_user_supervisor is not None:
+                    try:
+                        batch = finish_console_user_recovery_supervisor(
+                            console_user_supervisor,
+                            console_user_supervisor_release_id,
+                            console_user_supervisor_plan_sha256,
+                            recovery_binding=(request_id, request_sha256),
+                        )
+                    except RuntimeError as error:
+                        print(str(error), file=sys.stderr)
+                        return 1
+                    finally:
+                        console_user_supervisor = None
+                    if batch.get("status") != "recovered":
+                        print(json.dumps(
+                            batch, separators=(",", ":"), sort_keys=True,
+                        ), file=sys.stderr)
+                        return 1
+                    completed = subprocess.CompletedProcess(
+                        command, 0,
+                        stdout=json.dumps(batch["result"], sort_keys=True),
+                        stderr="",
+                    )
                 else:
-                    if completed.stdout:
-                        sys.stdout.write(completed.stdout)
-                    if completed.stderr:
-                        sys.stderr.write(completed.stderr)
+                    manager_sha256 = hashlib.sha256(
+                        MANAGER.read_regular(MANAGER_PATH)
+                    ).hexdigest()
                     print(
-                        "runtime_metadata_recovery_failed:"
-                        f"{completed.returncode}",
+                        "The protected operation is ambiguous. The next "
+                        "administrator-password prompt runs the exact "
+                        "receipt-bound runtime-metadata recovery verifier.",
                         file=sys.stderr,
                     )
-                    return completed.returncode
+                    completed = subprocess.run([
+                        "sudo", "/usr/bin/python3", "-I", "-c",
+                        BOOTSTRAP_LOADER, str(MANAGER_PATH), manager_sha256,
+                        "recover-runtime-metadata-install",
+                        "--state-root", str(state_root),
+                        "--expected-source-release-id", source.release_id,
+                        "--authorization-request-id", request_id,
+                        "--authorization-request-sha256", request_sha256,
+                        "--authorized-target-plan-sha256",
+                        source.authorized_target_plan_sha256,
+                        "--native-host-candidate-json",
+                        native_host_candidate_json(
+                            source.native_host_candidate
+                        ),
+                        "--json",
+                    ], check=False, capture_output=True, text=True)
+                    if completed.returncode != 0:
+                        if completed.stdout:
+                            sys.stdout.write(completed.stdout)
+                        if completed.stderr:
+                            sys.stderr.write(completed.stderr)
+                        print(
+                            "runtime_metadata_recovery_failed:"
+                            f"{completed.returncode}",
+                            file=sys.stderr,
+                        )
+                        return completed.returncode
             else:
+                if console_user_supervisor is not None:
+                    try:
+                        finish_console_user_recovery_supervisor(
+                            console_user_supervisor,
+                            console_user_supervisor_release_id,
+                            console_user_supervisor_plan_sha256,
+                            recovery_binding=None,
+                        )
+                    except RuntimeError as error:
+                        print(str(error), file=sys.stderr)
+                    finally:
+                        console_user_supervisor = None
                 print(
                     f"protected_authorization_failed:{completed.returncode}",
                     file=sys.stderr,
                 )
                 return completed.returncode
+        if console_user_supervisor is not None:
+            try:
+                finish_console_user_recovery_supervisor(
+                    console_user_supervisor,
+                    console_user_supervisor_release_id,
+                    console_user_supervisor_plan_sha256,
+                    recovery_binding=None,
+                )
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+            finally:
+                console_user_supervisor = None
         try:
             result = json.loads(completed.stdout)
         except json.JSONDecodeError:
@@ -3854,6 +4024,16 @@ def main() -> int:
             sys.stderr.write(completed.stderr)
         return 0
     finally:
+        if console_user_supervisor is not None:
+            try:
+                finish_console_user_recovery_supervisor(
+                    console_user_supervisor,
+                    console_user_supervisor_release_id,
+                    console_user_supervisor_plan_sha256,
+                    recovery_binding=None,
+                )
+            except RuntimeError:
+                pass
         if lock is not None:
             LAUNCHER.release_lock(lock)
 

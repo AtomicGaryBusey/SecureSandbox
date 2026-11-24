@@ -1510,6 +1510,24 @@ transferred successor source returned the expected digest, stable UID 501/GID
 notarize that successor before another fresh request; never replay either spent
 request.
 
+The next physical replay exposed an operator-experience regression in the
+recovery wrapper rather than a reason to weaken any receipt check. Password
+staging exited before Touch ID; an ambiguous broker result then opened a second
+password recovery, and an unrecognized protected receipt required a third
+root-only inspector. The final inspector was cancelled without reading or
+changing the retained receipt. Source now replaces that sequence for this
+exact recovery with a single fifteen-minute, non-refreshable privileged
+supervisor. It emits a canonical staged record, waits on one inherited pipe
+across the login-user Touch ID broker, accepts only close or the exact
+request/digest/target-plan inspection-and-recovery message, and emits a bounded
+non-secret receipt summary even when the existing recovery allowlist rejects
+the error. It cannot accept a command or path and never opens a root shell or
+uses `sudo -v`. Focused tests prove exact receipt validation, plan binding,
+single staging, terminal rejection reporting, and closure of the successful
+broker path without a second `sudo` invocation. Publication and the next
+physical one-password replay remain pending; spent request `99051dc0...` must
+not be replayed.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

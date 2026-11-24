@@ -537,25 +537,31 @@ class DeployHostControllerTests(unittest.TestCase):
             "schema": DEPLOY.MANAGER.SCHEMA,
             "status": "console_user_broker_recovery_staged",
         }
+        target = (
+            install_root / "releases" / binding.release_id
+            / "authorization_broker"
+        )
+        target.parent.mkdir(parents=True)
+        target.write_bytes(fixed_broker)
+        target.chmod(0o755)
         calls = []
 
         def run(command, **_kwargs):
             calls.append(command)
-            if command[0] == "sudo":
-                target = (
-                    install_root / "releases" / binding.release_id
-                    / "authorization_broker"
-                )
-                target.parent.mkdir(parents=True)
-                target.write_bytes(fixed_broker)
-                target.chmod(0o755)
-                return SimpleNamespace(
-                    returncode=0, stdout=json.dumps(staged), stderr="",
-                )
             return SimpleNamespace(
                 returncode=0, stdout=json.dumps(self.manager_result()),
                 stderr="",
             )
+
+        supervisor = mock.Mock()
+        ready = {
+            "authorized_target_plan_sha256": self.target_plan_sha256,
+            "expires_at": 1900,
+            "release_id": binding.release_id,
+            "schema": DEPLOY.CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+            "started_at": 1000,
+            "status": "staged",
+        }
 
         with (
             mock.patch.object(
@@ -566,6 +572,19 @@ class DeployHostControllerTests(unittest.TestCase):
             ) as notice,
             mock.patch.object(DEPLOY, "INSTALL_ROOT", install_root),
             mock.patch.object(DEPLOY.subprocess, "run", side_effect=run),
+            mock.patch.object(
+                DEPLOY, "start_console_user_recovery_supervisor",
+                return_value=(supervisor, ready),
+            ) as start_supervisor,
+            mock.patch.object(
+                DEPLOY, "finish_console_user_recovery_supervisor",
+                return_value={
+                    "authorized_target_plan_sha256": self.target_plan_sha256,
+                    "release_id": binding.release_id,
+                    "schema": DEPLOY.CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+                    "status": "closed",
+                },
+            ) as finish_supervisor,
         ):
             result = self.run_main([
                 "recover-console-user-broker",
@@ -581,15 +600,66 @@ class DeployHostControllerTests(unittest.TestCase):
             "Codex", "Disposable-Mac-Harness-Lifecycle-Acceptance",
             binding, "recover-console-user-broker",
         )
-        self.assertEqual(calls[0][0], "sudo")
-        self.assertIn("stage-console-user-broker-recovery", calls[0])
+        supervisor_command = start_supervisor.call_args.args[0]
+        self.assertEqual(supervisor_command[0], "sudo")
+        self.assertIn("supervise-console-user-broker-recovery", supervisor_command)
         self.assertEqual(
-            calls[1][0],
+            calls[0][0],
             str(install_root / "releases" / binding.release_id
                 / "authorization_broker"),
         )
-        self.assertIn("request", calls[1])
-        self.assertNotIn("sudo", calls[1])
+        self.assertIn("request", calls[0])
+        self.assertNotIn("sudo", calls[0])
+        finish_supervisor.assert_called_once_with(
+            supervisor, binding.release_id, self.target_plan_sha256,
+            recovery_binding=None,
+        )
+
+    def test_console_user_recovery_supervisor_pipe_is_single_message(self):
+        release_id = "a" * 64
+        plan_sha256 = "b" * 64
+        script = (
+            "import json,sys\n"
+            f"schema={DEPLOY.CONSOLE_USER_RECOVERY_BATCH_SCHEMA!r}\n"
+            f"release={release_id!r}\n"
+            f"plan={plan_sha256!r}\n"
+            "ready={'authorized_target_plan_sha256':plan,'expires_at':1900,"
+            "'release_id':release,'schema':schema,'started_at':1000,"
+            "'status':'staged'}\n"
+            "sys.stdout.write(json.dumps(ready,separators=(',',':'),"
+            "sort_keys=True)+'\\n');sys.stdout.flush()\n"
+            "message=json.loads(sys.stdin.readline())\n"
+            "assert message=={'action':'close',"
+            "'authorized_target_plan_sha256':plan,'schema':schema}\n"
+            "result={'authorized_target_plan_sha256':plan,"
+            "'release_id':release,'schema':schema,'status':'closed'}\n"
+            "sys.stdout.write(json.dumps(result,sort_keys=True)+'\\n')\n"
+        )
+        process, ready = DEPLOY.start_console_user_recovery_supervisor(
+            [sys.executable, "-c", script], release_id, plan_sha256,
+        )
+        self.assertEqual(ready["status"], "staged")
+
+        result = DEPLOY.finish_console_user_recovery_supervisor(
+            process, release_id, plan_sha256, recovery_binding=None,
+        )
+
+        self.assertEqual(result["status"], "closed")
+        self.assertEqual(process.returncode, 0)
+
+    def test_console_user_recovery_password_wait_is_bounded_and_reaped(self):
+        with (
+            mock.patch.object(
+                DEPLOY, "CONSOLE_USER_RECOVERY_PASSWORD_WAIT_SECONDS", 0.01,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "console_user_recovery_batch_password_timeout",
+            ),
+        ):
+            DEPLOY.start_console_user_recovery_supervisor(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                "a" * 64, "b" * 64,
+            )
 
     def test_console_user_recovery_preflight_binds_broker_and_manager(self):
         release = (

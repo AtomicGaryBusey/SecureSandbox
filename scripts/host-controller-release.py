@@ -14141,6 +14141,237 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
     return pending, sha256_bytes(canonical_state_record(pending))
 
 
+CONSOLE_USER_RECOVERY_BATCH_SCHEMA = (
+    "secure-sandbox-console-user-recovery-batch-v1"
+)
+CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS = 15 * 60
+CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT = 4096
+
+
+def authorization_receipt_summary(
+    request_id: str, request_sha256: str,
+    authorized_target_plan_sha256: str, expected_uid: int, *,
+    receipt_root: Path | None = None,
+) -> dict[str, Any]:
+    """Return only bounded, non-secret fields from one exact Host receipt."""
+    _validated_uuid4(request_id, "authorization_request_id")
+    if (SHA256.fullmatch(request_sha256) is None
+            or SHA256.fullmatch(authorized_target_plan_sha256) is None):
+        raise ReleaseFailure("authorization_receipt_summary_binding_invalid")
+    receipt_root = (
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT
+        if receipt_root is None else receipt_root
+    )
+    directory = open_trusted_absolute_directory(
+        receipt_root, expected_uid, final_mode=0o700,
+    )
+    try:
+        receipt, raw, _ = read_state_record_at(
+            directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+    finally:
+        os.close(directory)
+    fields = {
+        "authorization_method", "ceremony", "completed_at",
+        "declared_agent", "declared_session", "exit_status",
+        "host_pair_authorized_target_plan_sha256", "identity_evidence",
+        "operation", "purpose", "request_id", "request_sha256",
+        "resource", "schema", "started_at", "status", "stderr_sha256",
+        "stdout_sha256",
+    }
+    if (raw != canonical_state_record(receipt)
+            or set(receipt) != fields
+            or receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != request_id
+            or receipt.get("request_sha256") != request_sha256
+            or receipt.get("operation") != "host-controller-install"
+            or receipt.get("host_pair_authorized_target_plan_sha256")
+                != authorized_target_plan_sha256
+            or receipt.get("authorization_method") != "touch-id"
+            or receipt.get("ceremony") != "approve"
+            or receipt.get("status") not in {"executing", "failed", "succeeded"}
+            or not isinstance(receipt.get("started_at"), int)
+            or isinstance(receipt.get("started_at"), bool)):
+        raise ReleaseFailure("authorization_receipt_summary_invalid")
+    if receipt["status"] == "executing":
+        if any(receipt.get(name) is not None for name in (
+                "completed_at", "exit_status", "stderr_sha256",
+                "stdout_sha256")):
+            raise ReleaseFailure("authorization_receipt_summary_invalid")
+    else:
+        if (not isinstance(receipt.get("completed_at"), int)
+                or isinstance(receipt.get("completed_at"), bool)
+                or receipt["completed_at"] < receipt["started_at"]
+                or not isinstance(receipt.get("exit_status"), int)
+                or isinstance(receipt.get("exit_status"), bool)
+                or SHA256.fullmatch(str(receipt.get("stdout_sha256", "")))
+                    is None
+                or SHA256.fullmatch(str(receipt.get("stderr_sha256", "")))
+                    is None
+                or (receipt["status"] == "succeeded"
+                    and receipt["exit_status"] != 0)
+                or (receipt["status"] == "failed"
+                    and receipt["exit_status"] == 0)):
+            raise ReleaseFailure("authorization_receipt_summary_invalid")
+    return {
+        "completed_at": receipt["completed_at"],
+        "exit_status": receipt["exit_status"],
+        "operation": receipt["operation"],
+        "receipt_sha256": sha256_bytes(raw),
+        "request_id": request_id,
+        "request_sha256": request_sha256,
+        "started_at": receipt["started_at"],
+        "status": receipt["status"],
+        "stderr_sha256": receipt["stderr_sha256"],
+        "stdout_sha256": receipt["stdout_sha256"],
+    }
+
+
+def _read_console_user_recovery_batch_message(
+    stream: Any, *, now: Callable[[], float] = time.monotonic,
+    deadline: float,
+) -> dict[str, Any]:
+    """Read one canonical line without extending the original batch deadline."""
+    descriptor = stream.fileno()
+    import select
+    chunks = bytearray()
+    while b"\n" not in chunks:
+        remaining = deadline - now()
+        if remaining <= 0:
+            raise ReleaseFailure("console_user_recovery_batch_expired")
+        readable, _, _ = select.select([descriptor], [], [], remaining)
+        if not readable:
+            raise ReleaseFailure("console_user_recovery_batch_expired")
+        chunk = os.read(
+            descriptor,
+            CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT + 1 - len(chunks),
+        )
+        if not chunk:
+            raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+        chunks.extend(chunk)
+        if len(chunks) > CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT:
+            raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+    raw = bytes(chunks)
+    if (not raw.endswith(b"\n") or b"\n" in raw[:-1]):
+        raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "console_user_recovery_batch_message_invalid"
+        ) from error
+    if (not isinstance(value, dict)
+            or raw != canonical_state_record(value)):
+        raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+    return value
+
+
+def supervise_console_user_broker_recovery(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    native_host_candidate: Mapping[str, object],
+    authorized_target_plan_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY, *,
+    input_stream: Any = None, output_stream: Any = None,
+    wall_time: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Hold one exact root authority across staging and Touch ID result.
+
+    The root process accepts exactly one canonical terminal message.  It can
+    close without further action or inspect and attempt the already-bound
+    runtime-metadata recovery.  It cannot run a caller-selected command or
+    path, and its deadline is never refreshed.
+    """
+    if input_stream is None:
+        input_stream = sys.stdin.buffer
+    if output_stream is None:
+        output_stream = sys.stdout.buffer
+    if SHA256.fullmatch(authorized_target_plan_sha256) is None:
+        raise ReleaseFailure("console_user_recovery_batch_binding_invalid")
+    started_at = int(wall_time())
+    deadline = monotonic() + CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS
+    staged = stage_console_user_broker_recovery(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        expected_source_release_id, expected_current_release_id,
+        expected_installed_sha256, expected_replacement_sha256,
+        native_host_candidate, op_binary, gpgv_binary,
+    )
+    if (staged.get("status") != "console_user_broker_recovery_staged"
+            or staged.get("authorized_target_plan_sha256")
+                != authorized_target_plan_sha256):
+        raise ReleaseFailure("console_user_recovery_batch_stage_invalid")
+    ready = {
+        "authorized_target_plan_sha256": authorized_target_plan_sha256,
+        "expires_at": started_at + CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS,
+        "release_id": expected_source_release_id,
+        "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+        "started_at": started_at,
+        "status": "staged",
+    }
+    output_stream.write(canonical_state_record(ready))
+    output_stream.flush()
+    message = _read_console_user_recovery_batch_message(
+        input_stream, now=monotonic, deadline=deadline,
+    )
+    if (message.get("schema") != CONSOLE_USER_RECOVERY_BATCH_SCHEMA
+            or message.get("authorized_target_plan_sha256")
+                != authorized_target_plan_sha256):
+        raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+    action = message.get("action")
+    if action == "close":
+        if set(message) != {
+                "action", "authorized_target_plan_sha256", "schema"}:
+            raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+        return {
+            "authorized_target_plan_sha256": authorized_target_plan_sha256,
+            "release_id": expected_source_release_id,
+            "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+            "status": "closed",
+        }
+    if (action != "inspect-and-recover"
+            or set(message) != {
+                "action", "authorization_request_id",
+                "authorization_request_sha256",
+                "authorized_target_plan_sha256", "schema"}):
+        raise ReleaseFailure("console_user_recovery_batch_message_invalid")
+    request_id = message["authorization_request_id"]
+    request_sha256 = message["authorization_request_sha256"]
+    summary = authorization_receipt_summary(
+        request_id, request_sha256, authorized_target_plan_sha256,
+        expected_uid,
+    )
+    try:
+        recovered = recover_runtime_metadata_authorized_install(
+            repo, install_root, launcher_path, state_root, expected_uid,
+            expected_source_release_id,
+            Path(native_host_candidate["generation_path"]),
+            native_host_candidate, request_id, request_sha256,
+            authorized_target_plan_sha256, op_binary, gpgv_binary,
+        )
+    except ReleaseFailure as error:
+        return {
+            "authorized_target_plan_sha256": authorized_target_plan_sha256,
+            "error": str(error),
+            "receipt": summary,
+            "release_id": expected_source_release_id,
+            "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+            "status": "recovery-rejected",
+        }
+    return {
+        "authorized_target_plan_sha256": authorized_target_plan_sha256,
+        "receipt": summary,
+        "release_id": expected_source_release_id,
+        "result": recovered,
+        "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+        "status": "recovered",
+    }
+
+
 def begin_host_pair_transition(
     install_root: Path, expected_uid: int, *, operation: str,
     source_stable: Mapping[str, Any] | None,
@@ -21103,6 +21334,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-authorization-icon-schema",
                  "stage-private-floor-broker-recovery",
                  "stage-console-user-broker-recovery",
+                 "supervise-console-user-broker-recovery",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
                  "archive-inactive-releases"),
@@ -21659,7 +21891,9 @@ def main() -> int:
                 args.expected_replacement_sha256, candidate,
                 args.op_binary, args.gpgv_binary,
             )
-        elif args.command == "stage-console-user-broker-recovery":
+        elif args.command in {
+                "stage-console-user-broker-recovery",
+                "supervise-console-user-broker-recovery"}:
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure(
@@ -21676,14 +21910,29 @@ def main() -> int:
                 raise ReleaseFailure(
                     "console_user_broker_recovery_binding_required"
                 )
-            result = stage_console_user_broker_recovery(
-                args.repo.resolve(), args.install_root, args.launcher,
-                state_root, expected_uid, args.expected_source_release_id,
-                args.expected_current_release_id,
-                args.expected_launcher_sha256,
-                args.expected_replacement_sha256, candidate,
-                args.op_binary, args.gpgv_binary,
-            )
+            if args.command == "stage-console-user-broker-recovery":
+                result = stage_console_user_broker_recovery(
+                    args.repo.resolve(), args.install_root, args.launcher,
+                    state_root, expected_uid, args.expected_source_release_id,
+                    args.expected_current_release_id,
+                    args.expected_launcher_sha256,
+                    args.expected_replacement_sha256, candidate,
+                    args.op_binary, args.gpgv_binary,
+                )
+            else:
+                if not args.authorized_target_plan_sha256:
+                    raise ReleaseFailure(
+                        "console_user_recovery_batch_binding_required"
+                    )
+                result = supervise_console_user_broker_recovery(
+                    args.repo.resolve(), args.install_root, args.launcher,
+                    state_root, expected_uid, args.expected_source_release_id,
+                    args.expected_current_release_id,
+                    args.expected_launcher_sha256,
+                    args.expected_replacement_sha256, candidate,
+                    args.authorized_target_plan_sha256,
+                    args.op_binary, args.gpgv_binary,
+                )
         elif args.command == "recover-operator-ceremony-broker":
             ensure_root(default_layout)
             if default_layout and args.state_root is None:

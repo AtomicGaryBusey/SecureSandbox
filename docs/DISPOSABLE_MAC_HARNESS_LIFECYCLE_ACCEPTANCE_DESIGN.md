@@ -160,6 +160,30 @@ the normal atomic Host-pair transition. Recovery cannot authorize selection,
 cannot accept a different predecessor, and becomes unavailable after the
 successor is selected.
 
+The console-user two-gate recovery is one bounded privileged ceremony, not a
+sequence of password prompts. One `sudo` invocation starts the exact-digest
+release manager, stages only the displayed successor, and keeps that root
+process alive for at most fifteen minutes while the ordinary login-user broker
+performs the separately required Touch ID ceremony. The two processes share a
+private inherited pipe, not a filesystem command queue. The privileged process
+accepts exactly one canonical terminal message: close without action, or
+inspect-and-recover the newly named request whose digest and target-plan digest
+match the already authorized batch. It accepts no executable, path, operation,
+or refreshed expiry from the caller.
+
+Before any recovery, the root process reads the exact mode-0600 authorization
+receipt through the trusted directory boundary and returns only its canonical
+status, timestamps, exit status, content hashes, request bindings, and receipt
+hash. Existing exact error allowlists remain authoritative. An unknown error is
+reported as `recovery-rejected` and the batch terminates; it is never converted
+to a retry. EOF, parent death, malformed input, extra input, plan drift, expiry,
+or a changed receipt fail closed. The process stores no password, opens no root
+shell, never calls `sudo -v`, never refreshes the platform credential cache,
+and cannot outlive its original deadline. This coalesces staging, protected
+receipt inspection, the already-authorized recovery branch, and final root
+readback under one password while preserving Touch ID as independent selection
+authority.
+
 The first recovery launch also failed closed before displaying its notice: its
 login-user preflight reused a full release verifier that attempted to read the
 root-private native-stack coordination floor. Recovery preflight now identifies

@@ -9578,6 +9578,126 @@ class HostControllerReleaseTests(unittest.TestCase):
                 install_root=self.install_root,
             )
 
+    def test_authorization_receipt_summary_is_exact_and_nonsecret(self):
+        request_id = str(uuid.uuid4())
+        request_sha256 = "6" * 64
+        plan_sha256 = "7" * 64
+        receipt = {
+            "authorization_method": "touch-id",
+            "ceremony": "approve",
+            "completed_at": 1001,
+            "declared_agent": "Codex",
+            "declared_session": "test-session",
+            "exit_status": 1,
+            "host_pair_authorized_target_plan_sha256": plan_sha256,
+            "identity_evidence": "operator-declared",
+            "operation": "host-controller-install",
+            "purpose": "test",
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "resource": str(self.install_root),
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "started_at": 1000,
+            "status": "failed",
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_sha256": "8" * 64,
+        }
+        raw = MANAGER.canonical_state_record(receipt)
+        path = self.authorization_receipts / f"{request_id}.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+
+        summary = MANAGER.authorization_receipt_summary(
+            request_id, request_sha256, plan_sha256, self.uid,
+            receipt_root=self.authorization_receipts,
+        )
+
+        self.assertEqual(summary["request_id"], request_id)
+        self.assertEqual(summary["stdout_sha256"], "8" * 64)
+        self.assertEqual(
+            summary["receipt_sha256"], hashlib.sha256(raw).hexdigest(),
+        )
+        self.assertNotIn("purpose", summary)
+        self.assertNotIn("resource", summary)
+
+    def test_console_user_recovery_batch_stages_once_and_reports_rejection(self):
+        request_id = str(uuid.uuid4())
+        request_sha256 = "9" * 64
+        plan_sha256 = "a" * 64
+        message = {
+            "action": "inspect-and-recover",
+            "authorization_request_id": request_id,
+            "authorization_request_sha256": request_sha256,
+            "authorized_target_plan_sha256": plan_sha256,
+            "schema": MANAGER.CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
+        }
+        input_stream = tempfile.TemporaryFile()
+        input_stream.write(MANAGER.canonical_state_record(message))
+        input_stream.seek(0)
+        output_stream = io.BytesIO()
+        staged = {
+            "authorized_target_plan_sha256": plan_sha256,
+            "status": "console_user_broker_recovery_staged",
+        }
+        summary = {
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "status": "failed",
+        }
+        candidate = {"generation_path": str(self.root / "generation")}
+        with (
+            mock.patch.object(
+                MANAGER, "stage_console_user_broker_recovery",
+                return_value=staged,
+            ) as stage,
+            mock.patch.object(
+                MANAGER, "authorization_receipt_summary",
+                return_value=summary,
+            ) as inspect_receipt,
+            mock.patch.object(
+                MANAGER, "recover_runtime_metadata_authorized_install",
+                side_effect=MANAGER.ReleaseFailure(
+                    "runtime_metadata_receipt_recovery_error_mismatch"
+                ),
+            ) as recover,
+        ):
+            result = MANAGER.supervise_console_user_broker_recovery(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+                candidate, plan_sha256,
+                input_stream=input_stream, output_stream=output_stream,
+                wall_time=lambda: 1000.0, monotonic=lambda: 10.0,
+            )
+        input_stream.close()
+
+        stage.assert_called_once()
+        inspect_receipt.assert_called_once_with(
+            request_id, request_sha256, plan_sha256, self.uid,
+        )
+        recover.assert_called_once()
+        ready = json.loads(output_stream.getvalue())
+        self.assertEqual(ready["status"], "staged")
+        self.assertEqual(ready["expires_at"], 1900)
+        self.assertEqual(result["status"], "recovery-rejected")
+        self.assertEqual(result["receipt"], summary)
+        self.assertEqual(
+            result["error"],
+            "runtime_metadata_receipt_recovery_error_mismatch",
+        )
+
+    def test_console_user_recovery_batch_message_deadline_never_refreshes(self):
+        stream = tempfile.TemporaryFile()
+        try:
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "console_user_recovery_batch_expired",
+            ):
+                MANAGER._read_console_user_recovery_batch_message(
+                    stream, now=lambda: 11.0, deadline=10.0,
+                )
+        finally:
+            stream.close()
+
     def authorized_rollback(self, target_id: str | None = None):
         pair = MANAGER.host_release_launcher_pair_public(
             self.install_root, self.uid,

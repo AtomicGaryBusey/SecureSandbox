@@ -1041,13 +1041,18 @@ run only `deploy-host-controller.py recover-console-user-broker` from the
 clean exact-tip Neo checkout with explicit agent, session, and purpose
 attribution. The graphical notice must name predecessor `a585d8f7...`,
 broker `4cfef1c0...`, and manager `909c32c1...`. The following local
-Terminal password phase may stage only the displayed successor and must leave
-`current`, `previous`, the stable launcher, and stable Host pair unchanged.
-Only after that staged result verifies may the same invocation launch a fresh
-Touch ID request through the staged successor broker. Cancel on any identity,
-plan, placement, or purpose mismatch. Independently verify the committed public
-terminal, selectors, services, candidate authority, release-tree identity, and
-absent private journal before resuming the 40/91 campaign at case 41.
+Terminal password phase starts one bounded privileged supervisor. It may stage
+only the displayed successor and must leave `current`, `previous`, the stable
+launcher, and stable Host pair unchanged. That same root process remains alive
+for no more than fifteen minutes while the ordinary login-user invocation
+launches a fresh Touch ID request through the staged successor broker. It then
+closes or inspects and attempts only the exact receipt-bound recovery already
+named by its original target plan. It must not produce a second password
+prompt. An unrecognized error is reported with its bounded receipt hashes and
+terminates the batch without retry. Cancel on any identity, plan, placement,
+or purpose mismatch. Independently verify the committed public terminal,
+selectors, services, candidate authority, release-tree identity, and absent
+private journal before resuming the 40/91 campaign at case 41.
 
 Do not reuse the `c228a02...` candidate. Its password phase safely rejected
 before staging because the first reviewed-function fingerprint used

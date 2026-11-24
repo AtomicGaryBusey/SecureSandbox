@@ -54,7 +54,13 @@ in ignored local records, not in this file.
   terminalize or expire fail-closed. Touch ID remains required wherever the
   underlying acceptance case requires biometric human authorization. Measure
   the reduction in prompts without weakening exact-release custody or evidence
-  ownership. This future goal does not replace the active disposable-Mac DDD.
+  ownership. The active disposable-Mac DDD now includes the first production
+  slice for console-user broker recovery: one bounded root supervisor spans
+  exact successor staging, the independent Touch ID result, protected receipt
+  inspection, and its already-allowlisted recovery/readback, eliminating the
+  second and third password prompts in that flow. The broader DDD remains for
+  the other privileged acceptance families and does not replace the active
+  disposable-Mac DDD.
 - Complete an Anthropic CVP Defense Individual Conformance DDD using
   Anthropic's “Cyber Verification Program Security Requirements” as the
   authoritative baseline:

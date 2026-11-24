@@ -1447,6 +1447,18 @@ the stable launcher, and Host-pair record unchanged. Only the staged successor
 broker may create the following fresh Touch ID request. Publication, a new
 signed candidate, and physical replay remain pending.
 
+The first exact two-gate candidate was published as commit `c228a02...`, built
+and notarized on the trusted release Mac, transferred into Neo-local custody,
+and accepted by the transfer verifier. Its password gate rejected before
+staging or Touch ID with `console_user_broker_recovery_successor_invalid`.
+Independent calculation proved the reviewed function bodies were identical,
+but the initial attribute-free `ast.dump` fingerprint differed between the
+release Mac's Python 3.13 and Apple's Python 3.9 on the Neo. Current, previous,
+the stable Host pair, and the public terminal remain unchanged with no PENDING
+record. Source now locates the same two unique top-level functions through the
+AST but hashes their exact original source slices; both Python versions produce
+the same digest. A fresh published and notarized candidate remains required.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

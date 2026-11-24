@@ -1030,3 +1030,11 @@ Touch ID request through the staged successor broker. Cancel on any identity,
 plan, placement, or purpose mismatch. Independently verify the committed public
 terminal, selectors, services, candidate authority, release-tree identity, and
 absent private journal before resuming the 40/91 campaign at case 41.
+
+Do not reuse the `c228a02...` candidate. Its password phase safely rejected
+before staging because the first reviewed-function fingerprint used
+Python-version-dependent `ast.dump` output. The selectors and stable pair did
+not change and no Touch ID request was created. Publish, notarize, transfer,
+and invoke only the successor whose unique top-level function source-slice
+digest is stable across the release Mac's Python 3.13 and the Neo's Apple
+Python 3.9.

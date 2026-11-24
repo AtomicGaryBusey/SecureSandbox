@@ -569,12 +569,13 @@ BROKEN_CONSOLE_USER_BROKER_SHA256 = (
 BROKEN_CONSOLE_USER_MANAGER_SHA256 = (
     "909c32c1e1e2b3fc6e1e25aa1f939eb47e160f7cf4f6a3d7d83f4f0fe4e20f91"
 )
-# Attribute-free AST digest of the reviewed `system_console_user_identity` and
-# `console_user_uid` functions, in that order.  Checking syntax-tree structure
-# prevents marker literals elsewhere in this manager from self-satisfying the
-# one-time successor gate.
-CONSOLE_USER_REPAIR_AST_SHA256 = (
-    "79a3495a75eca51c173f3e2f1664817f90be8f881daa61f1b7ee38ea5caf3293"
+# Exact source-slice digest of the reviewed `system_console_user_identity` and
+# `console_user_uid` top-level functions, in that order.  Locating unique
+# function nodes prevents marker literals elsewhere in this manager from
+# self-satisfying the one-time successor gate; hashing their original source
+# bytes avoids Python-version-dependent `ast.dump` representations.
+CONSOLE_USER_REPAIR_SOURCE_SHA256 = (
+    "25dfffa1655ab16fb57c7164b4482365b123d7da3239d2a81b1a160b41a520ef"
 )
 EXPECTED_MODES = {
     "authorization_broker": 0o755,
@@ -1066,8 +1067,8 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def console_user_repair_ast_sha256(manager: bytes) -> str:
-    """Digest the exact reviewed console-principal implementation."""
+def console_user_repair_source_sha256(manager: bytes) -> str:
+    """Digest exact source bytes for the reviewed console implementation."""
     try:
         tree = ast.parse(manager)
     except (SyntaxError, UnicodeDecodeError) as error:
@@ -1086,12 +1087,20 @@ def console_user_repair_ast_sha256(manager: bytes) -> str:
         raise ReleaseFailure(
             "console_user_broker_recovery_successor_invalid"
         )
-    payload = "\n".join(
-        ast.dump(
-            functions[name], annotate_fields=True, include_attributes=False,
-        )
-        for name in names
-    ).encode("utf-8")
+    lines = manager.splitlines(keepends=True)
+    source_slices: list[bytes] = []
+    for name in names:
+        node = functions[name]
+        if (node.col_offset != 0 or node.end_lineno is None
+                or node.end_lineno < node.lineno
+                or node.end_lineno > len(lines)):
+            raise ReleaseFailure(
+                "console_user_broker_recovery_successor_invalid"
+            )
+        source_slices.append(b"".join(
+            lines[node.lineno - 1:node.end_lineno]
+        ))
+    payload = b"\0".join(source_slices)
     return sha256_bytes(payload)
 
 
@@ -17598,8 +17607,8 @@ def install(
                 or release_id == BROKEN_CONSOLE_USER_RELEASE_ID
                 or sha256_bytes(values["release_manager"])
                     == BROKEN_CONSOLE_USER_MANAGER_SHA256
-                or console_user_repair_ast_sha256(manager)
-                    != CONSOLE_USER_REPAIR_AST_SHA256):
+                or console_user_repair_source_sha256(manager)
+                    != CONSOLE_USER_REPAIR_SOURCE_SHA256):
             raise ReleaseFailure(
                 "console_user_broker_recovery_successor_invalid"
             )
@@ -20573,8 +20582,8 @@ def stage_console_user_broker_recovery(
             or source_release_id == current_path.name
             or hashes["release_manager"]
                 == BROKEN_CONSOLE_USER_MANAGER_SHA256
-            or console_user_repair_ast_sha256(manager)
-                != CONSOLE_USER_REPAIR_AST_SHA256):
+            or console_user_repair_source_sha256(manager)
+                != CONSOLE_USER_REPAIR_SOURCE_SHA256):
         raise ReleaseFailure(
             "console_user_broker_recovery_successor_invalid"
         )

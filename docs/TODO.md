@@ -637,6 +637,14 @@ in ignored local records, not in this file.
   reviewed bounded `scutil` repair markers. Never reopen or replay the spent
   receipt. Preserve the existing campaign and all retained predecessors
   without deletion.
+  The first exact recovery candidate (`c228a02...`) rejected safely during its
+  password phase because `ast.dump` was not stable between Python 3.13 on the
+  release Mac and Apple's Python 3.9 on the Neo. No candidate was staged, no
+  Touch ID request was created, and all live selectors and the stable pair
+  remained unchanged. The successor locates the reviewed unique top-level
+  functions through the AST but hashes their exact source slices; both Python
+  versions independently produce the same digest. Republish and replay only
+  that successor.
 
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case

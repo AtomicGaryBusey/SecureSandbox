@@ -552,6 +552,30 @@ BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID = (
 BROKEN_PRIVATE_FLOOR_BROKER_SHA256 = (
     "d60c671a4ba09cc110c2387afd79f6e0f4358a1908e4c27f6a77e9eb748eb445"
 )
+# Exact release whose root-side transition manager derives the active Aqua
+# principal only from /dev/console.  On the disposable Neo, macOS 27.2.1
+# leaves that character device root-owned while SystemConfiguration retains
+# the completed UID-501 console session.  Ordinary installation therefore
+# cannot select its own repair: the predecessor rejects before it can publish
+# a transition.  The dedicated recovery below may stage (never select) one
+# exact signed/notarized successor before its broker performs the normal
+# Touch ID-authorized atomic transition.
+BROKEN_CONSOLE_USER_RELEASE_ID = (
+    "a585d8f747b5bda52e1edaca5db6f066fade97bbc8de7bb6c2c07d4747dd1f04"
+)
+BROKEN_CONSOLE_USER_BROKER_SHA256 = (
+    "4cfef1c01bd23a9738b57266c31b8ab865e996ecba0b7e22a723d9b3b365406c"
+)
+BROKEN_CONSOLE_USER_MANAGER_SHA256 = (
+    "909c32c1e1e2b3fc6e1e25aa1f939eb47e160f7cf4f6a3d7d83f4f0fe4e20f91"
+)
+# Attribute-free AST digest of the reviewed `system_console_user_identity` and
+# `console_user_uid` functions, in that order.  Checking syntax-tree structure
+# prevents marker literals elsewhere in this manager from self-satisfying the
+# one-time successor gate.
+CONSOLE_USER_REPAIR_AST_SHA256 = (
+    "79a3495a75eca51c173f3e2f1664817f90be8f881daa61f1b7ee38ea5caf3293"
+)
 EXPECTED_MODES = {
     "authorization_broker": 0o755,
     "authorization_service": 0o444,
@@ -1040,6 +1064,35 @@ class _ProcBSDInfo(ctypes.Structure):
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def console_user_repair_ast_sha256(manager: bytes) -> str:
+    """Digest the exact reviewed console-principal implementation."""
+    try:
+        tree = ast.parse(manager)
+    except (SyntaxError, UnicodeDecodeError) as error:
+        raise ReleaseFailure(
+            "console_user_broker_recovery_successor_invalid"
+        ) from error
+    names = ("system_console_user_identity", "console_user_uid")
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    counts = {name: 0 for name in names}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in counts:
+                counts[node.name] += 1
+                functions[node.name] = node
+    if any(counts[name] != 1 for name in names):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_successor_invalid"
+        )
+    payload = "\n".join(
+        ast.dump(
+            functions[name], annotate_fields=True, include_attributes=False,
+        )
+        for name in names
+    ).encode("utf-8")
+    return sha256_bytes(payload)
 
 
 def write_all(descriptor: int, data: bytes, label: str) -> None:
@@ -17100,6 +17153,7 @@ def install(
     _host_pair_bootstrap_mode: str | None = None,
     authorized_target_plan_sha256: str | None = None,
     _stage_private_floor_broker_recovery_from: str | None = None,
+    _stage_console_user_broker_recovery_from: str | None = None,
 ) -> dict[str, Any]:
     if (install_root == DEFAULT_INSTALL_ROOT and expected_uid == 0
             and (native_host_generation is None
@@ -17112,6 +17166,11 @@ def install(
     private_floor_broker_staging = (
         _stage_private_floor_broker_recovery_from is not None
     )
+    console_user_broker_staging = (
+        _stage_console_user_broker_recovery_from is not None
+    )
+    if private_floor_broker_staging and console_user_broker_staging:
+        raise ReleaseFailure("broker_recovery_stage_ambiguous")
     if private_floor_broker_staging:
         if (authorization_request_id is not None
                 or authorization_request_sha256 is not None
@@ -17131,6 +17190,28 @@ def install(
                 )) != BROKEN_PRIVATE_FLOOR_BROKER_SHA256):
             raise ReleaseFailure(
                 "private_floor_broker_recovery_predecessor_invalid"
+            )
+    if console_user_broker_staging:
+        if (authorization_request_id is not None
+                or authorization_request_sha256 is not None
+                or _host_pair_bootstrap_mode is not None
+                or _stage_console_user_broker_recovery_from
+                    != BROKEN_CONSOLE_USER_RELEASE_ID):
+            raise ReleaseFailure(
+                "console_user_broker_recovery_stage_binding_invalid"
+            )
+        recovery_current, _recovery_manifest = verified_release(
+            install_root, install_root / "current", expected_uid,
+        )
+        if (recovery_current.name != BROKEN_CONSOLE_USER_RELEASE_ID
+                or sha256_bytes(read_regular(
+                    recovery_current / "authorization_broker"
+                )) != BROKEN_CONSOLE_USER_BROKER_SHA256
+                or sha256_bytes(read_regular(
+                    recovery_current / "release_manager"
+                )) != BROKEN_CONSOLE_USER_MANAGER_SHA256):
+            raise ReleaseFailure(
+                "console_user_broker_recovery_predecessor_invalid"
             )
     if (authorization_request_id is not None
             and install_root == DEFAULT_INSTALL_ROOT
@@ -17340,12 +17421,14 @@ def install(
             source_stable_sha256=pair_source_sha256,
         )
         if authorized_target_plan_sha256 is None:
-            if not pair_bootstrap and not private_floor_broker_staging:
+            if (not pair_bootstrap and not private_floor_broker_staging
+                    and not console_user_broker_staging):
                 raise ReleaseFailure("host_release_target_plan_required")
             authorized_target_plan_sha256 = pair_plan_sha256
         elif authorized_target_plan_sha256 != pair_plan_sha256:
             raise ReleaseFailure("host_release_target_plan_changed")
-        if not pair_bootstrap and not private_floor_broker_staging:
+        if (not pair_bootstrap and not private_floor_broker_staging
+                and not console_user_broker_staging):
             if (authorization_request_id is None
                     or authorization_request_sha256 is None):
                 raise ReleaseFailure(
@@ -17506,6 +17589,35 @@ def install(
             "release_id": release_id,
             "schema": SCHEMA,
             "status": "private_floor_broker_recovery_staged",
+        }
+    if console_user_broker_staging:
+        manager = values["release_manager"]
+        if (expected_native_host_candidate is None
+                or native_host_generation is None
+                or pair_plan_sha256 is None
+                or release_id == BROKEN_CONSOLE_USER_RELEASE_ID
+                or sha256_bytes(values["release_manager"])
+                    == BROKEN_CONSOLE_USER_MANAGER_SHA256
+                or console_user_repair_ast_sha256(manager)
+                    != CONSOLE_USER_REPAIR_AST_SHA256):
+            raise ReleaseFailure(
+                "console_user_broker_recovery_successor_invalid"
+            )
+        authority = native_host_candidate_authority(
+            install_root, release_id, expected_uid,
+        )
+        return {
+            "authorized_target_plan_sha256": pair_plan_sha256,
+            "authorization_broker_sha256": sha256_bytes(
+                values["authorization_broker"]
+            ),
+            "candidate_authority_sha256": sha256_bytes(
+                _native_host_candidate_authority_bytes(authority)
+            ),
+            "previous_release_id": BROKEN_CONSOLE_USER_RELEASE_ID,
+            "release_id": release_id,
+            "schema": SCHEMA,
+            "status": "console_user_broker_recovery_staged",
         }
     current = install_root / "current"
     old_current: str | None = None
@@ -20418,6 +20530,118 @@ def stage_private_floor_broker_recovery(
 
 
 @host_release_mutation()
+def stage_console_user_broker_recovery(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    native_host_candidate: Mapping[str, object],
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """Stage the exact console-user fix without changing the active Host pair."""
+    if expected_current_release_id != BROKEN_CONSOLE_USER_RELEASE_ID:
+        raise ReleaseFailure(
+            "console_user_broker_recovery_predecessor_invalid"
+        )
+    current_path, _current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    if (current_path.name != expected_current_release_id
+            or sha256_bytes(read_regular(
+                current_path / "authorization_broker"
+            )) != BROKEN_CONSOLE_USER_BROKER_SHA256
+            or sha256_bytes(read_regular(
+                current_path / "release_manager"
+            )) != BROKEN_CONSOLE_USER_MANAGER_SHA256):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_predecessor_invalid"
+        )
+    generation_value = native_host_candidate.get("generation_path")
+    if not isinstance(generation_value, str):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_candidate_invalid"
+        )
+    generation = Path(generation_value)
+    values, hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+    )
+    manager = values["release_manager"]
+    if (source_release_id != expected_source_release_id
+            or source_release_id == current_path.name
+            or hashes["release_manager"]
+                == BROKEN_CONSOLE_USER_MANAGER_SHA256
+            or console_user_repair_ast_sha256(manager)
+                != CONSOLE_USER_REPAIR_AST_SHA256):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_successor_invalid"
+        )
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
+    replacement = native_host_candidate_tracked_source(
+        repo, generation, native_host_candidate, LAUNCHER_SOURCE,
+    )
+    replacement_sha256 = sha256_bytes(replacement)
+    if (installed_sha256 != expected_installed_sha256
+            or replacement_sha256 != expected_replacement_sha256
+            or installed_sha256 != replacement_sha256):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_launcher_invalid"
+        )
+    previous_before = selector_target(
+        install_root / "previous", "previous",
+    )
+    stable, stable_sha256, *_ = verified_host_release_launcher_pair(
+        install_root, launcher_path, expected_uid,
+    )
+    if stable["pair"]["release_id"] != current_path.name:
+        raise ReleaseFailure(
+            "console_user_broker_recovery_pair_invalid"
+        )
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+        _stage_console_user_broker_recovery_from=(
+            BROKEN_CONSOLE_USER_RELEASE_ID
+        ),
+    )
+    if (result.get("status")
+            != "console_user_broker_recovery_staged"
+            or result.get("release_id") != expected_source_release_id
+            or result.get("authorization_broker_sha256")
+                != hashes["authorization_broker"]):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_stage_unverified"
+        )
+    selected_after, _selected_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    stable_after, stable_sha256_after, *_ = (
+        verified_host_release_launcher_pair(
+            install_root, launcher_path, expected_uid,
+        )
+    )
+    if (selected_after.name != current_path.name
+            or selector_target(
+                install_root / "previous", "previous",
+            ) != previous_before
+            or stable_after != stable
+            or stable_sha256_after != stable_sha256
+            or sha256_bytes(read_trusted_stable_launcher(
+                launcher_path, expected_uid,
+            )) != installed_sha256):
+        raise ReleaseFailure(
+            "console_user_broker_recovery_live_pair_changed"
+        )
+    return result
+
+
+@host_release_mutation()
 def recover_operator_ceremony_broker(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -20845,6 +21069,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-native-host-candidate-schema",
                  "bootstrap-authorization-icon-schema",
                  "stage-private-floor-broker-recovery",
+                 "stage-console-user-broker-recovery",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
                  "archive-inactive-releases"),
@@ -21394,6 +21619,31 @@ def main() -> int:
                     "private_floor_broker_recovery_binding_required"
                 )
             result = stage_private_floor_broker_recovery(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256,
+                args.expected_replacement_sha256, candidate,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "stage-console-user-broker-recovery":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if (not args.expected_source_release_id
+                    or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256
+                    or candidate is None):
+                raise ReleaseFailure(
+                    "console_user_broker_recovery_binding_required"
+                )
+            result = stage_console_user_broker_recovery(
                 args.repo.resolve(), args.install_root, args.launcher,
                 state_root, expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,

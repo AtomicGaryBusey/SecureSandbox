@@ -246,6 +246,21 @@ cannot suspend privileged deployment indefinitely. The
 identity is reread at the existing transition boundaries; this fallback does
 not turn a stale login record into mutation authority.
 
+The physical installation of that fallback exposed a self-update deadlock:
+the immutable predecessor manager evaluates the obsolete root-owned
+`/dev/console` rule before an ordinary transition can select the repaired
+manager. A generic Touch ID request is therefore spent and fails closed with
+`native_credential_console_user_unavailable`; its receipt is not recoverable
+or replayable. A separate two-gate recovery is bound to the exact predecessor
+release, authorization-broker digest, and release-manager digest observed on
+the Neo. Its password phase may only stage the exact signed/notarized successor
+release and candidate authority. It proves `current`, `previous`, the stable
+launcher, and the stable Host-pair record unchanged, and requires the successor
+manager to contain the fixed absolute `scutil` query, bounded input/output,
+timeout, and two-read stability checks. The staged successor broker then owns
+a fresh ordinary Touch ID request for the normal atomic transition. Neither
+the password phase nor the consumed failed receipt can select a release.
+
 The first enrolled-Touch-ID transition retained an exact failed broker receipt
 and left the stable Host pair and selectors unchanged. The terminal receipt's
 stdout digest resolved to

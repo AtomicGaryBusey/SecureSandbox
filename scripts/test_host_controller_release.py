@@ -13123,6 +13123,162 @@ class HostControllerReleaseTests(unittest.TestCase):
         )
         self.assertEqual(authority["release_id"], target_id)
 
+    def test_console_user_broker_recovery_stages_without_selecting(self):
+        installed = self.install()
+        current_id = installed["release_id"]
+        current_path = self.install_root / "releases" / current_id
+        current_broker = (current_path / "authorization_broker").read_bytes()
+        current_manager = (current_path / "release_manager").read_bytes()
+        fixed_manager = current_manager + b"\n# stable SystemConfiguration console-user fix\n"
+        for marker in (
+            b"def system_console_user_identity()",
+            b'command = ["/usr/sbin/scutil"]',
+            b'input="show State:/Users/ConsoleUser\\n"',
+            b"timeout=2",
+            b"first = system_console_user_identity()",
+            b"second = system_console_user_identity()",
+        ):
+            self.assertIn(marker, fixed_manager)
+        generation, candidate = self.alternate_native_host_candidate({
+            "release_manager": fixed_manager,
+        })
+        _values, _hashes, target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        current_target = os.readlink(self.install_root / "current")
+        previous_target = (
+            os.readlink(self.install_root / "previous")
+            if (self.install_root / "previous").is_symlink() else None
+        )
+        pair_path = (
+            self.install_root / MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+        )
+        pair_before = pair_path.read_bytes()
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_RELEASE_ID", current_id,
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_BROKER_SHA256",
+            MANAGER.sha256_bytes(current_broker),
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_MANAGER_SHA256",
+            MANAGER.sha256_bytes(current_manager),
+        ):
+            result = MANAGER.stage_console_user_broker_recovery(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, target_id, current_id, launcher_sha256,
+                launcher_sha256, candidate, self.op_binary,
+                self.gpgv_binary,
+            )
+        self.assertEqual(
+            result["status"], "console_user_broker_recovery_staged",
+        )
+        self.assertEqual(result["release_id"], target_id)
+        self.assertEqual(
+            result["authorization_broker_sha256"],
+            MANAGER.sha256_bytes(current_broker),
+        )
+        self.assertEqual(
+            os.readlink(self.install_root / "current"), current_target,
+        )
+        self.assertEqual(
+            os.readlink(self.install_root / "previous")
+            if (self.install_root / "previous").is_symlink() else None,
+            previous_target,
+        )
+        self.assertEqual(pair_path.read_bytes(), pair_before)
+        self.assertTrue((self.install_root / "releases" / target_id).is_dir())
+        authority = MANAGER.native_host_candidate_authority(
+            self.install_root, target_id, self.uid,
+        )
+        self.assertEqual(authority["release_id"], target_id)
+
+    def test_console_user_broker_recovery_rejects_other_predecessor_manager(self):
+        installed = self.install()
+        current_id = installed["release_id"]
+        current_path = self.install_root / "releases" / current_id
+        current_broker = (current_path / "authorization_broker").read_bytes()
+        current_manager = (current_path / "release_manager").read_bytes()
+        fixed_manager = current_manager + b"\n# stable console-user fix\n"
+        generation, candidate = self.alternate_native_host_candidate({
+            "release_manager": fixed_manager,
+        })
+        _values, _hashes, target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_RELEASE_ID", current_id,
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_BROKER_SHA256",
+            MANAGER.sha256_bytes(current_broker),
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_MANAGER_SHA256", "0" * 64,
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "console_user_broker_recovery_predecessor_invalid",
+        ):
+            MANAGER.stage_console_user_broker_recovery(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, target_id, current_id, launcher_sha256,
+                launcher_sha256, candidate, self.op_binary,
+                self.gpgv_binary,
+            )
+        self.assertFalse(
+            (self.install_root / "releases" / target_id).exists()
+        )
+
+    def test_console_user_broker_recovery_rejects_successor_without_fix(self):
+        installed = self.install()
+        current_id = installed["release_id"]
+        current_path = self.install_root / "releases" / current_id
+        current_broker = (current_path / "authorization_broker").read_bytes()
+        current_manager = (current_path / "release_manager").read_bytes()
+        unfixed_manager = current_manager.replace(
+            b"def system_console_user_identity()",
+            b"def removed_console_user_identity()",
+            1,
+        )
+        self.assertNotEqual(unfixed_manager, current_manager)
+        generation, candidate = self.alternate_native_host_candidate({
+            "release_manager": unfixed_manager,
+        })
+        _values, _hashes, target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        current_target = os.readlink(self.install_root / "current")
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_RELEASE_ID", current_id,
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_BROKER_SHA256",
+            MANAGER.sha256_bytes(current_broker),
+        ), mock.patch.object(
+            MANAGER, "BROKEN_CONSOLE_USER_MANAGER_SHA256",
+            MANAGER.sha256_bytes(current_manager),
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "console_user_broker_recovery_successor_invalid",
+        ):
+            MANAGER.stage_console_user_broker_recovery(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, target_id, current_id, launcher_sha256,
+                launcher_sha256, candidate, self.op_binary,
+                self.gpgv_binary,
+            )
+        self.assertEqual(
+            os.readlink(self.install_root / "current"), current_target,
+        )
+        self.assertFalse(
+            (self.install_root / "releases" / target_id).exists()
+        )
+
     def test_operator_ceremony_broker_recovery_cannot_bypass_candidate_authority(self):
         predecessor = self.install()["release_id"]
         current = (self.install_root / "current").resolve()

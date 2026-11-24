@@ -626,9 +626,17 @@ in ignored local records, not in this file.
   The fixed-input child has a closed environment and bounded output; the
   earlier direct framework implementation was discarded after the exact
   publication suite demonstrated an unbounded SystemConfiguration stall.
-  Publish a fresh signed/notarized candidate and use a fresh Touch ID request;
-  never reopen or replay the spent receipt. Preserve the existing campaign and
-  all retained predecessors without deletion.
+  The installed predecessor evaluates its obsolete console-user rule before it
+  can select that repaired manager, so an ordinary deploy cannot self-heal it.
+  Publish a fresh signed/notarized candidate, then use the exact-predecessor
+  two-gate recovery: its password phase may only stage the notarized successor
+  broker while proving the live selectors and stable launcher pair unchanged;
+  that staged broker must create a fresh ordinary Touch ID request before any
+  selector or release mutation. Bind the exception to the Neo's exact current
+  release, broker digest, and manager digest, and require the successor's
+  reviewed bounded `scutil` repair markers. Never reopen or replay the spent
+  receipt. Preserve the existing campaign and all retained predecessors
+  without deletion.
 
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case

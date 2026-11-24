@@ -1421,6 +1421,32 @@ and never boots, unregisters, moves, or deletes a VM.
 Physical migration and post-migration boundary replay remain pending;
 bootstrap must not resume against the old virtio bundles.
 
+## Console-user repair activation checkpoint
+
+Exact commit `43c3b24...` was published to both authorized remotes, passed the
+canonical public-release suite, and was built as Developer ID/notarized
+submission retained in the private acceptance evidence. The transferred candidate
+verified on the Neo with generation-tree SHA-256 `7e9c4628...` and Host
+preimage SHA-256 `e8d9a190...`. Two unattended authorization requests expired
+without mutation. A later attended generic request
+with request digest `13d764...` was approved, then failed before
+transition publication. Its root-private receipt is terminal `failed`, exit
+status 1, empty stderr, and stdout digest `9fa4b402...`, which the bounded
+read-only receipt inspector resolves exactly to
+`native_credential_console_user_unavailable`. The installed selectors remain
+current `a585d8f7...`, previous `b3d6600f...`; no PENDING record or public
+terminal exists. The request is spent and must not be replayed.
+
+This proves the predecessor manager cannot install its own console-user repair:
+it evaluates the obsolete `/dev/console` rule before ordinary target
+selection. Source now adds a distinct exact-predecessor two-gate recovery bound
+to current release `a585d8f7...`, authorization broker `4cfef1c0...`, and
+release manager `909c32c1...`. Its password phase stages only a verified
+signed/notarized successor and candidate authority while proving both selectors,
+the stable launcher, and Host-pair record unchanged. Only the staged successor
+broker may create the following fresh Touch ID request. Publication, a new
+signed candidate, and physical replay remain pending.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

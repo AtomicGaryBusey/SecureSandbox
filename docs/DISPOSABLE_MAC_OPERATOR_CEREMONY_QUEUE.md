@@ -1008,3 +1008,25 @@ required closed baseline with Parallels Desktop's GUI closed, then rerun the
 post-install morning preflight. Initialize a fresh exact-source campaign only
 after guest installation, boundary readback, the exact-commit ten-driver
 protected installation, and that preflight all pass.
+
+### Console-user repair activation continuation
+
+Do not replay the spent attended authorization request identified in the
+private acceptance evidence by request digest `13d764...`. Its exact terminal receipt is
+`failed` with `native_credential_console_user_unavailable`; current remains
+`a585d8f7...`, previous remains `b3d6600f...`, and no PENDING transition
+exists. Generic `deploy` cannot install this repair because the predecessor
+manager evaluates its obsolete console-user rule before target selection.
+
+After publishing and transferring the new exact signed/notarized successor,
+run only `deploy-host-controller.py recover-console-user-broker` from the
+clean exact-tip Neo checkout with explicit agent, session, and purpose
+attribution. The graphical notice must name predecessor `a585d8f7...`,
+broker `4cfef1c0...`, and manager `909c32c1...`. The following local
+Terminal password phase may stage only the displayed successor and must leave
+`current`, `previous`, the stable launcher, and stable Host pair unchanged.
+Only after that staged result verifies may the same invocation launch a fresh
+Touch ID request through the staged successor broker. Cancel on any identity,
+plan, placement, or purpose mismatch. Independently verify the committed public
+terminal, selectors, services, candidate authority, release-tree identity, and
+absent private journal before resuming the 40/91 campaign at case 41.

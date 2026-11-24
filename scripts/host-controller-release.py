@@ -11150,7 +11150,11 @@ def host_release_mutation(
                     if controller_fence:
                         controller_state_root = Path(
                             bound.arguments["state_root"])
-                        controller_uid = console_user_uid()
+                        controller_uid = bound.arguments.get(
+                            "authorized_operator_uid"
+                        )
+                        if controller_uid is None:
+                            controller_uid = console_user_uid()
                         controller_state_fd = stack.enter_context(
                             controller_admission_fence(
                                 controller_state_root, controller_uid,
@@ -13933,9 +13937,66 @@ def authorization_receipt_for_host_pair(
             or receipt.get("operation") != expected_operation
             or receipt.get("host_pair_authorized_target_plan_sha256")
                 != authorized_target_plan_sha256
+            or not isinstance(receipt.get("operator_uid"), int)
+            or isinstance(receipt.get("operator_uid"), bool)
+            or receipt["operator_uid"] <= 0
             or receipt.get("status") != "executing"):
         raise ReleaseFailure("host_pair_transition_receipt_invalid")
     return receipt, raw
+
+
+def authorized_operator_uid_for_host_pair(
+    receipt: Mapping[str, Any], repo: Path, state_root: Path,
+) -> int:
+    """Bind the Touch-ID request principal to its local source custody."""
+    operator_uid = receipt.get("operator_uid")
+    if (not isinstance(operator_uid, int) or isinstance(operator_uid, bool)
+            or operator_uid <= 0):
+        raise ReleaseFailure("host_pair_transition_operator_invalid")
+    descriptors: list[int] = []
+    try:
+        account = pwd.getpwuid(operator_uid)
+        home_path = Path(account.pw_dir)
+        home_before = home_path.lstat()
+        repo_before = repo.lstat()
+        state_before = state_root.lstat()
+        home = home_path.resolve(strict=True)
+        repo_resolved = repo.resolve(strict=True)
+        state_resolved = state_root.resolve(strict=True)
+        if (account.pw_uid != operator_uid
+                or account.pw_name in {"", "loginwindow", "root"}
+                or not repo_resolved.is_relative_to(home)
+                or not state_resolved.is_relative_to(home)):
+            raise ReleaseFailure("host_pair_transition_operator_invalid")
+        for path, before, require_acl_free in (
+            (home_path, home_before, False),
+            (repo, repo_before, True),
+            (state_root, state_before, True),
+        ):
+            if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+                raise ReleaseFailure("host_pair_transition_operator_invalid")
+            descriptor = open_trusted_absolute_directory(
+                path, operator_uid,
+                final_mode=stat.S_IMODE(before.st_mode),
+            )
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            if (opened.st_uid != operator_uid
+                    or (opened.st_dev, opened.st_ino)
+                        != (before.st_dev, before.st_ino)):
+                raise ReleaseFailure("host_pair_transition_operator_invalid")
+            if require_acl_free:
+                reject_extended_acl(
+                    descriptor, "host_pair_transition_operator_invalid",
+                )
+    except (KeyError, OSError, ReleaseFailure) as error:
+        raise ReleaseFailure(
+            "host_pair_transition_operator_invalid"
+        ) from error
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    return operator_uid
 
 
 def reopen_runtime_metadata_failed_host_pair_receipt(
@@ -13977,7 +14038,8 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
         "authorization_method", "ceremony", "completed_at",
         "declared_agent", "declared_session", "exit_status",
         "host_pair_authorized_target_plan_sha256", "identity_evidence",
-        "operation", "purpose", "request_id", "request_sha256",
+        "operation", "operator_uid", "purpose", "request_id",
+        "request_sha256",
         "resource", "schema", "started_at", "status", "stderr_sha256",
         "stdout_sha256",
     }
@@ -14175,7 +14237,8 @@ def authorization_receipt_summary(
         "authorization_method", "ceremony", "completed_at",
         "declared_agent", "declared_session", "exit_status",
         "host_pair_authorized_target_plan_sha256", "identity_evidence",
-        "operation", "purpose", "request_id", "request_sha256",
+        "operation", "operator_uid", "purpose", "request_id",
+        "request_sha256",
         "resource", "schema", "started_at", "status", "stderr_sha256",
         "stdout_sha256",
     }
@@ -14190,6 +14253,9 @@ def authorization_receipt_summary(
                 != authorized_target_plan_sha256
             or receipt.get("authorization_method") != "touch-id"
             or receipt.get("ceremony") != "approve"
+            or not isinstance(receipt.get("operator_uid"), int)
+            or isinstance(receipt.get("operator_uid"), bool)
+            or receipt["operator_uid"] <= 0
             or receipt.get("status") not in {"executing", "failed", "succeeded"}
             or not isinstance(receipt.get("started_at"), int)
             or isinstance(receipt.get("started_at"), bool)):
@@ -14218,6 +14284,7 @@ def authorization_receipt_summary(
         "completed_at": receipt["completed_at"],
         "exit_status": receipt["exit_status"],
         "operation": receipt["operation"],
+        "operator_uid": receipt["operator_uid"],
         "receipt_sha256": sha256_bytes(raw),
         "request_id": request_id,
         "request_sha256": request_sha256,
@@ -14413,10 +14480,12 @@ def begin_host_pair_transition(
         if (authorization_request_id is None
                 or authorization_request_sha256 is None):
             raise ReleaseFailure("host_pair_transition_authorization_required")
-        _receipt, receipt_raw = authorization_receipt_for_host_pair(
+        receipt, receipt_raw = authorization_receipt_for_host_pair(
             authorization_request_id, authorization_request_sha256,
             expected_uid, operation, authorized_target_plan_sha256,
         )
+        if native_uid >= 0 and receipt["operator_uid"] != native_uid:
+            raise ReleaseFailure("host_pair_transition_operator_invalid")
         receipt_sha256 = sha256_bytes(receipt_raw)
     created = int(time.time()) if now is None else now
     value: dict[str, Any] = {
@@ -17416,6 +17485,7 @@ def install(
     _native_host_candidate_schema_predecessor_release_id: str | None = None,
     _host_pair_bootstrap_mode: str | None = None,
     authorized_target_plan_sha256: str | None = None,
+    authorized_operator_uid: int | None = None,
     _stage_private_floor_broker_recovery_from: str | None = None,
     _stage_console_user_broker_recovery_from: str | None = None,
 ) -> dict[str, Any]:
@@ -17427,6 +17497,9 @@ def install(
         authorization_request_sha256 is None
     ):
         raise ReleaseFailure("install_transition_authorization_incomplete")
+    if ((authorization_request_id is None)
+            != (authorized_operator_uid is None)):
+        raise ReleaseFailure("install_transition_operator_incomplete")
     private_floor_broker_staging = (
         _stage_private_floor_broker_recovery_from is not None
     )
@@ -17698,10 +17771,17 @@ def install(
                 raise ReleaseFailure(
                     "host_pair_transition_authorization_required"
                 )
-            authorization_receipt_for_host_pair(
-                authorization_request_id, authorization_request_sha256,
-                expected_uid, "install", pair_plan_sha256,
+            operator_receipt, _operator_receipt_raw = (
+                authorization_receipt_for_host_pair(
+                    authorization_request_id, authorization_request_sha256,
+                    expected_uid, "install", pair_plan_sha256,
+                )
             )
+            observed_operator_uid = authorized_operator_uid_for_host_pair(
+                operator_receipt, repo, state_root,
+            )
+            if observed_operator_uid != authorized_operator_uid:
+                raise ReleaseFailure("host_pair_transition_operator_invalid")
     releases = prepare_release_root(install_root, expected_uid)
     if _developer_id_migration_current_release_id is None:
         signing_floor, signing_floor_sha256 = prepare_developer_id_team_floor(
@@ -18003,7 +18083,11 @@ def install(
             result["status"] = "deployed"
             return result
         if manages_live_touchid_service(install_root, expected_uid):
-            native_uid = console_user_uid()
+            native_uid = (
+                authorized_operator_uid
+                if authorized_operator_uid is not None
+                else console_user_uid()
+            )
         else:
             native_uid = -1
         old_services: dict[str, Any] = {}
@@ -18053,7 +18137,8 @@ def install(
     if authorization_request_id is not None:
         if (old_path is None or old_manifest is None or old_current is None):
             raise ReleaseFailure("install_transition_predecessor_missing")
-        native_uid = console_user_uid()
+        assert authorized_operator_uid is not None
+        native_uid = authorized_operator_uid
         transition = begin_install_transition(
             install_root, expected_uid, final,
             {"schema": SCHEMA, "release_id": release_id, "payloads": hashes},
@@ -18215,6 +18300,13 @@ def recover_runtime_metadata_authorized_install(
         raise ReleaseFailure(
             "runtime_metadata_recovery_target_plan_mismatch"
         )
+    receipt_summary = authorization_receipt_summary(
+        authorization_request_id, authorization_request_sha256,
+        authorized_target_plan_sha256, expected_uid,
+    )
+    authorized_operator_uid = authorized_operator_uid_for_host_pair(
+        receipt_summary, repo, state_root,
+    )
     reopen_runtime_metadata_failed_host_pair_receipt(
         authorization_request_id, authorization_request_sha256,
         authorized_target_plan_sha256, expected_uid,
@@ -18228,6 +18320,7 @@ def recover_runtime_metadata_authorized_install(
         authorization_request_id=authorization_request_id,
         authorization_request_sha256=authorization_request_sha256,
         authorized_target_plan_sha256=authorized_target_plan_sha256,
+        authorized_operator_uid=authorized_operator_uid,
     )
     result["runtime_metadata_recovery"] = True
     return result
@@ -18631,7 +18724,13 @@ def rollback(
     authorization_request_id: str | None = None,
     authorization_request_sha256: str | None = None,
     authorized_target_plan_sha256: str | None = None,
+    authorized_operator_uid: int | None = None,
 ) -> dict[str, Any]:
+    if ((authorization_request_id is None)
+            != (authorization_request_sha256 is None)
+            or (authorization_request_id is None)
+            != (authorized_operator_uid is None)):
+        raise ReleaseFailure("rollback_transition_authorization_incomplete")
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
@@ -18759,10 +18858,17 @@ def rollback(
         if (authorization_request_id is None
                 or authorization_request_sha256 is None):
             raise ReleaseFailure("host_pair_transition_authorization_required")
-        authorization_receipt_for_host_pair(
-            authorization_request_id, authorization_request_sha256,
-            expected_uid, "rollback", plan_sha256,
+        operator_receipt, _operator_receipt_raw = (
+            authorization_receipt_for_host_pair(
+                authorization_request_id, authorization_request_sha256,
+                expected_uid, "rollback", plan_sha256,
+            )
         )
+        observed_operator_uid = authorized_operator_uid_for_host_pair(
+            operator_receipt, repo, state_root,
+        )
+        if observed_operator_uid != authorized_operator_uid:
+            raise ReleaseFailure("host_pair_transition_operator_invalid")
         retain_launcher_generation(
             install_root,
             read_trusted_stable_launcher(launcher_path, expected_uid),
@@ -18774,7 +18880,7 @@ def rollback(
         manages_services = manages_live_touchid_service(
             install_root, expected_uid,
         )
-        native_uid = console_user_uid() if manages_services else -1
+        native_uid = authorized_operator_uid if manages_services else -1
         old_services = (
             verify_release_host_services(
                 current_path, current_manifest, native_uid,
@@ -18860,7 +18966,11 @@ def rollback(
         install_root, target_path, target_manifest["payloads"], expected_uid,
     )
     manages_services = manages_live_touchid_service(install_root, expected_uid)
-    native_uid = console_user_uid() if manages_services else -1
+    native_uid = (
+        authorized_operator_uid
+        if manages_services and authorized_operator_uid is not None
+        else console_user_uid() if manages_services else -1
+    )
     try:
         if manages_services:
             stop_and_fence_host_services(native_uid)
@@ -21496,6 +21606,9 @@ def main() -> int:
                 raise ReleaseFailure("native_host_candidate_record_required")
             if default_layout and not args.authorized_target_plan_sha256:
                 raise ReleaseFailure("host_release_target_plan_required")
+            if default_layout and (args.operator_uid is None
+                    or args.operator_uid <= 0):
+                raise ReleaseFailure("host_release_operator_uid_required")
             result = install(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.op_binary, args.gpgv_binary,
@@ -21510,6 +21623,7 @@ def main() -> int:
                 authorized_target_plan_sha256=(
                     args.authorized_target_plan_sha256
                 ),
+                authorized_operator_uid=args.operator_uid,
             )
         elif args.command == "recover-runtime-metadata-install":
             ensure_root(default_layout)
@@ -21578,6 +21692,9 @@ def main() -> int:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
             if default_layout and not args.authorized_target_plan_sha256:
                 raise ReleaseFailure("host_release_target_plan_required")
+            if default_layout and (args.operator_uid is None
+                    or args.operator_uid <= 0):
+                raise ReleaseFailure("host_release_operator_uid_required")
             result = rollback(
                 args.repo.resolve(), args.install_root, state_root, args.release_id,
                 expected_uid, args.op_binary, args.gpgv_binary,
@@ -21587,6 +21704,7 @@ def main() -> int:
                 authorized_target_plan_sha256=(
                     args.authorized_target_plan_sha256
                 ),
+                authorized_operator_uid=args.operator_uid,
             )
         elif args.command == "recover-host-pair-transition":
             ensure_root(default_layout)

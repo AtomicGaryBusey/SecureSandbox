@@ -1074,3 +1074,14 @@ Touch ID request may select it. After activation, independently verify the
 public terminal and STABLE before proceeding to machine SSH trust enrollment.
 The prepublication root probe of those exact successor source bytes is now
 complete and successful; it does not waive or replace any of those gates.
+
+Do not reuse request `d17728de...`. It proved the
+single-password supervisor and fresh Touch ID flow, then failed before PENDING
+with the same exact console-user digest. The next successor must instead carry
+the Touch-ID-authenticated operator UID end to end: request parameter, displayed
+plan, executing receipt, fixed manager argument, repository/state-root custody,
+controller-admission fence, Host transition, and native credential service.
+Before launching the next ceremony, independently verify those bindings in the
+new signed/notarized candidate and confirm the old request is terminal. Use one
+fresh password plus one fresh Touch ID request; any second password prompt,
+ambient console-user error, UID mismatch, or custody mismatch is a hard stop.

@@ -8988,6 +8988,13 @@ class HostControllerReleaseTests(unittest.TestCase):
                 MANAGER, "system_console_user_identity",
                 return_value=(os.geteuid(), os.getegid()),
             ),
+            mock.patch.object(
+                MANAGER.pwd, "getpwuid",
+                return_value=types.SimpleNamespace(
+                    pw_uid=os.geteuid(), pw_gid=os.getegid(),
+                    pw_name="test-operator", pw_dir=str(self.root),
+                ),
+            ),
         ]
         for verifier in self.generated_host_verifiers:
             verifier.start()
@@ -9263,6 +9270,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             authorization_request_id=authorization_request_id,
             authorization_request_sha256=authorization_request_sha256,
             authorized_target_plan_sha256=authorized_target_plan_sha256,
+            authorized_operator_uid=(
+                self.uid if authorization_request_id is not None else None
+            ),
             _host_pair_bootstrap_mode=(
                 MANAGER.native_host_candidate_floor(
                     self.install_root, self.uid,
@@ -9284,6 +9294,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256":
                 authorized_target_plan_sha256,
             "operation": operation,
+            "operator_uid": self.uid,
             "request_id": request_id,
             "request_sha256": request_sha256,
             "schema": "secure-sandbox-operator-authorization-receipt-v1",
@@ -9293,6 +9304,49 @@ class HostControllerReleaseTests(unittest.TestCase):
         path.write_bytes(MANAGER.canonical_state_record(receipt))
         path.chmod(0o600)
         return request_id, request_sha256
+
+    def test_authorized_operator_uid_is_bound_to_owned_repo_and_state(self):
+        self.state.mkdir(mode=0o700)
+        receipt = {"operator_uid": self.uid}
+        self.assertEqual(
+            MANAGER.authorized_operator_uid_for_host_pair(
+                receipt, self.repo, self.state,
+            ),
+            self.uid,
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_transition_operator_invalid",
+        ):
+            MANAGER.authorized_operator_uid_for_host_pair(
+                {"operator_uid": self.uid + 1}, self.repo, self.state,
+            )
+
+        original_open = MANAGER.open_trusted_absolute_directory
+        substituted = False
+
+        def substitute_state(path, expected_uid, *, final_mode=0o755):
+            nonlocal substituted
+            if path == self.state and not substituted:
+                substituted = True
+                self.state.rename(self.root / "state.parked")
+                self.state.mkdir(mode=0o700)
+            return original_open(
+                path, expected_uid, final_mode=final_mode,
+            )
+
+        with (
+            mock.patch.object(
+                MANAGER, "open_trusted_absolute_directory",
+                side_effect=substitute_state,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "host_pair_transition_operator_invalid",
+            ),
+        ):
+            MANAGER.authorized_operator_uid_for_host_pair(
+                receipt, self.repo, self.state,
+            )
 
     def test_runtime_metadata_receipt_recovery_is_exact_and_idempotent(self):
         request_id = str(uuid.uuid4())
@@ -9308,6 +9362,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9380,6 +9435,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9438,6 +9494,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9492,6 +9549,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9552,6 +9610,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9592,6 +9651,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             "host_pair_authorized_target_plan_sha256": plan_sha256,
             "identity_evidence": "operator-declared",
             "operation": "host-controller-install",
+            "operator_uid": self.uid,
             "purpose": "test",
             "request_id": request_id,
             "request_sha256": request_sha256,
@@ -9723,6 +9783,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             authorization_request_id=request_id,
             authorization_request_sha256=request_sha256,
             authorized_target_plan_sha256=plan_sha256,
+            authorized_operator_uid=self.uid,
         )
 
     def test_install_and_verify_are_content_bound(self):
@@ -11313,6 +11374,12 @@ class HostControllerReleaseTests(unittest.TestCase):
         with (
             mock.patch.object(
                 MANAGER, "manages_live_touchid_service", return_value=True,
+            ),
+            mock.patch.object(
+                MANAGER, "console_user_uid",
+                side_effect=AssertionError(
+                    "authorized install must use the attested operator UID"
+                ),
             ),
             mock.patch.object(
                 MANAGER, "install_touchid_service",

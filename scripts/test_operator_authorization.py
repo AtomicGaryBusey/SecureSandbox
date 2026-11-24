@@ -140,6 +140,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "target_launcher_sha256": "8" * 64,
         }
         return {
+            "operator_uid": self.uid,
             "repo": str(repo),
             "state_root": str(
                 self.home
@@ -163,6 +164,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "target_release_tree_identity_sha256": "5" * 64,
         }
         return {
+            "operator_uid": self.uid,
             "repo": str(repo),
             "state_root": str(
                 self.home
@@ -1731,7 +1733,12 @@ class OperatorAuthorizationTests(unittest.TestCase):
             history / f"{transaction}.acceptance-verifier.json", verifier
         )
         (root / "acceptance-verifier.json").unlink()
-        with mock.patch.object(AUTH, "EXECUTION_APPROVAL_ROOT", root):
+        with (
+            mock.patch.object(AUTH, "EXECUTION_APPROVAL_ROOT", root),
+            mock.patch.object(
+                AUTH, "host_boot_identity", return_value="boot-new",
+            ),
+        ):
             rotated = AUTH.prepare_secure_enclave_challenge(
                 {"invoking_uid":self.uid,
                  "request_id":"77777777-7777-4777-8777-777777777777",
@@ -2701,7 +2708,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         release_id = parameters["authorized_target_plan"]["release_id"]
         self.assertIn("Pre-install target release: " + release_id,
                       AUTH.preflight_message(install_value, "b" * 64))
-        command = AUTH.operation_command(install_value, Path("/protected/release"))
+        command = AUTH.operation_command(
+            install_value, Path("/protected/release"), operator_uid=self.uid,
+        )
         self.assertEqual(command[:2], ["/usr/bin/python3", "-I"])
         self.assertEqual(
             command[command.index("--expected-source-release-id") + 1],
@@ -2710,6 +2719,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--authorized-target-plan-sha256") + 1],
             parameters["authorized_target_plan_sha256"],
+        )
+        self.assertEqual(
+            command[command.index("--operator-uid") + 1], str(self.uid),
         )
         candidate_argument = json.loads(
             command[command.index("--native-host-candidate-json") + 1]
@@ -2817,7 +2829,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "parameters": parameters,
             "request_id": "12345678-1234-4123-8123-123456789abc",
         }
-        command = AUTH.operation_command(value, Path("/protected/release"))
+        command = AUTH.operation_command(
+            value, Path("/protected/release"), operator_uid=self.uid,
+        )
         self.assertEqual(
             command[command.index("--release-id") + 1], "4" * 64,
         )
@@ -2825,6 +2839,16 @@ class OperatorAuthorizationTests(unittest.TestCase):
             command[command.index("--authorized-target-plan-sha256") + 1],
             parameters["authorized_target_plan_sha256"],
         )
+        self.assertEqual(
+            command[command.index("--operator-uid") + 1], str(self.uid),
+        )
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "host_controller_operator_uid_mismatch",
+        ):
+            AUTH.operation_command(
+                value, Path("/protected/release"),
+                operator_uid=self.uid + 1,
+            )
         self.assertEqual(
             command[command.index("--authorization-request-id") + 1],
             value["request_id"],

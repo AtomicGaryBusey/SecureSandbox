@@ -1528,6 +1528,32 @@ broker path without a second `sudo` invocation. Publication and the next
 physical one-password replay remain pending; spent request `99051dc0...` must
 not be replayed.
 
+Commit `0244902...` was then published to both authorized remotes, signed and
+notarized, transferred to the Neo, and staged as target release `2802ef47...`.
+The attended recovery proved the batching objective: one administrator password
+started the supervisor, the fresh attributed Touch ID request
+`d17728de...` was approved, the same root process
+returned the bounded receipt result, and no second password prompt occurred.
+The install still failed before PENDING with exact stdout digest
+`9fa4b402...`; the existing allowlist correctly returned
+`recovery-rejected` / `runtime_metadata_receipt_recovery_error_mismatch` and
+did not convert the unknown error into authority. Independent readback proved
+current `a585d8f7...`, previous `b3d6600f...`, STABLE, and launcher unchanged,
+PENDING and TERMINAL absent, and the target retained inert. The request is spent.
+
+Twelve immediate login-context samples then reported stable
+`State:/Users/ConsoleUser` identity `alextester` UID 501/GID 20 while the same
+immutable manager failed inside the system authorization-service context. Code
+review localized the remaining ambient lookup to the outer mutation admission
+fence and the inner service transition. Source now carries the already
+Touch-ID-attested operator UID through the displayed plan, protected receipt,
+fixed command, release-manager custody checks, controller fence, transition,
+rollback, and runtime-metadata recovery. Tests make `console_user_uid()` raise
+during an authorized live-service install and prove the operation still reaches
+its intended service failure, while UID substitution and custody mismatch fail
+closed. Publication, a fresh signed candidate, and physical replay remain
+pending; request `d17728de...` must never be replayed.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

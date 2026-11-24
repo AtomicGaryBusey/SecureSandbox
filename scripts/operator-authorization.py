@@ -2579,7 +2579,7 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         )
         return
     if operation in {"host-controller-install", "host-controller-rollback"}:
-        common = {"repo", "state_root"}
+        common = {"operator_uid", "repo", "state_root"}
         extras = {
             "host-controller-install": {
                 "authorized_target_plan", "authorized_target_plan_sha256",
@@ -2599,8 +2599,14 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             resolved_home = home.resolve(strict=True)
         except OSError as error:
             raise AuthorizationError("repository_path_invalid") from error
-        if (not repo.is_absolute() or repo == Path("/") or stat.S_ISLNK(repo_info.st_mode)
-                or not stat.S_ISDIR(repo_info.st_mode) or not resolved_repo.is_relative_to(resolved_home)):
+        operator_uid = parameters["operator_uid"]
+        if (not isinstance(operator_uid, int) or isinstance(operator_uid, bool)
+                or operator_uid <= 0 or operator_uid != home.lstat().st_uid
+                or repo_info.st_uid != operator_uid
+                or not repo.is_absolute() or repo == Path("/")
+                or stat.S_ISLNK(repo_info.st_mode)
+                or not stat.S_ISDIR(repo_info.st_mode)
+                or not resolved_repo.is_relative_to(resolved_home)):
             raise AuthorizationError("repository_path_invalid")
         if state_root != expected_state:
             raise AuthorizationError("controller_state_path_invalid")
@@ -3980,6 +3986,8 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--transaction-id", parameters["transaction_id"],
         ]
     if operation in {"host-controller-install", "host-controller-rollback"}:
+        if operator_uid is None or operator_uid != parameters["operator_uid"]:
+            raise AuthorizationError("host_controller_operator_uid_mismatch")
         action = operation.removeprefix("host-controller-")
         target_plan = parameters["authorized_target_plan"]
         command = [
@@ -3987,7 +3995,8 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             action,
             "--repo", parameters["repo"], "--state-root",
             parameters["state_root"], "--authorized-target-plan-sha256",
-            parameters["authorized_target_plan_sha256"], "--json",
+            parameters["authorized_target_plan_sha256"],
+            "--operator-uid", str(operator_uid), "--json",
         ]
         if action == "rollback":
             command.extend([
@@ -5788,6 +5797,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending["host_pair_authorized_target_plan_sha256"] = value[
             "parameters"
         ]["authorized_target_plan_sha256"]
+        pending["operator_uid"] = uid
     if value["operation"] == HOST_SSH_TRUST_OPERATION:
         plan = value["parameters"]["plan"]
         pending.update({
@@ -11127,6 +11137,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
         plan = parameters["authorized_target_plan"]
         return [
             f"Repository: {parameters['repo']}",
+            f"Operator UID: {parameters['operator_uid']}",
             "Transition operation: install",
             "Authorization scope: deterministic pre-install target plan",
             f"Pre-install target release: {plan['release_id']}",
@@ -11145,6 +11156,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
         plan = parameters["authorized_target_plan"]
         return [
             f"Repository: {parameters['repo']}",
+            f"Operator UID: {parameters['operator_uid']}",
             "Transition operation: rollback",
             f"Installed target release: {plan['target_release_id']}",
             "Installed target launcher SHA-256: "

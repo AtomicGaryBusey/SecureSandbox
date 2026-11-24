@@ -69,6 +69,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.host_deployer = (
             ROOT / "scripts/deploy-host-controller.py"
         ).read_text()
+        cls.operator_authorization = (
+            ROOT / "scripts/operator-authorization.py"
+        ).read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
         cls.authorization = (ROOT / "scripts/harness-lifecycle-acceptance-authorization.py").read_text()
@@ -772,6 +775,27 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.host_deployer)
         self.assertIn("one bounded privileged ceremony", self.design)
         self.assertIn("must not produce a second password", self.operator_queue)
+
+    def test_authorized_host_mutation_carries_touchid_operator_uid(self):
+        for phrase in (
+            '"operator_uid": os.geteuid()',
+            '"--operator-uid", str(operator_uid)',
+            'pending["operator_uid"] = uid',
+        ):
+            self.assertIn(
+                phrase, self.host_deployer + self.operator_authorization,
+            )
+        for phrase in (
+            'def authorized_operator_uid_for_host_pair(',
+            'authorized_operator_uid: int | None = None',
+            'bound.arguments.get(\n                            "authorized_operator_uid"',
+            'receipt["operator_uid"] != native_uid',
+        ):
+            self.assertIn(phrase, self.host_release_manager)
+        self.assertIn(
+            "must not rediscover the login principal", self.design,
+        )
+        self.assertIn("any second password prompt", self.operator_queue)
 
     def test_progressed_qualification_retention_preserves_current_rejection(self):
         for phrase in (

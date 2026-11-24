@@ -184,6 +184,19 @@ receipt inspection, the already-authorized recovery branch, and final root
 readback under one password while preserving Touch ID as independent selection
 authority.
 
+The ordinary authorized Host mutation must not rediscover the login principal
+from ambient console state after Touch ID. The broker already authenticates the
+request owner UID; that UID is therefore a closed request parameter, is shown
+in the authorization UI, is copied into the root-owned executing receipt, and
+is passed as a fixed release-manager argument. The manager independently proves
+that the account exists, is non-root, owns the exact repository and controller
+state roots, and that both roots remain real directories beneath that account's
+home. The same UID drives the outer controller-admission fence, Host transition,
+and native credential service. Missing, substituted, mismatched, or legacy
+receipts fail closed. Ambient `/dev/console` and SystemConfiguration discovery
+remain available only to non-authorized bootstrap/migration paths that have no
+Touch ID principal to carry forward.
+
 The first recovery launch also failed closed before displaying its notice: its
 login-user preflight reused a full release verifier that attempted to read the
 root-private native-stack coordination floor. Recovery preflight now identifies

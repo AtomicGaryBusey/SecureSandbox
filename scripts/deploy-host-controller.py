@@ -3791,7 +3791,11 @@ def main() -> int:
             "deploy": "host-controller-install",
             "rollback": "host-controller-rollback",
         }[args.command]
-        parameters = {"repo": str(MANAGER_PATH.parent.parent), "state_root": str(state_root)}
+        parameters = {
+            "operator_uid": os.geteuid(),
+            "repo": str(MANAGER_PATH.parent.parent),
+            "state_root": str(state_root),
+        }
         if args.command == "deploy":
             source = expected_source_release_binding()
             parameters.update({

@@ -666,6 +666,20 @@ in ignored local records, not in this file.
   admitted UID 501, matching repair digest, Apple Python 3.9.6, and exit 0. That
   diagnostic proof is not activation authority; publication, notarization, and
   both fresh operator gates remain pending.
+  The published `0244902...` batching candidate subsequently proved the desired
+  operator experience on the Neo: one administrator password spanned staging,
+  fresh Touch ID, receipt inspection, and rejection, with no second password
+  prompt. Fresh request `d17728de...` nevertheless failed before PENDING with
+  the same exact `native_credential_console_user_unavailable` digest. Twelve
+  immediate login-context samples were stable at `alextester` UID 501/GID 20,
+  localizing the failure to ambient console discovery from the system
+  authorization-service context. The next repair carries the UID already
+  authenticated by Touch ID through the request, prompt, protected receipt,
+  fixed manager command, repository/state-root custody checks, outer controller
+  fence, transition, rollback, and service installation. Missing or mismatched
+  UID authority fails closed; no authorized path may fall back to ambient
+  console discovery. Publish, notarize, transfer, and use one fresh request;
+  never replay `d17728de...`.
 
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case

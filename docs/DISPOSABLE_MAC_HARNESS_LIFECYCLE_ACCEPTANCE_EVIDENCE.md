@@ -51,6 +51,40 @@ OpenSSH directly as root cannot bypass the projection and never run
 Publication, notarized Host installation, trust enrollment, independent root
 Research readback, and resumption of case 41 remain pending.
 
+The first attended install of the transferred `4595cea...` candidate consumed
+Touch ID request `a56117ee...` and plan `277c3b22...`, then failed before a
+transition with `native_credential_console_user_unavailable`. Its canonical
+failed receipt has empty stderr and retained stdout digest `9fa4b402...`.
+Independent public readback proves current release `a585d8f7...`, previous
+release `b3d6600...`, and no PENDING record. The exact receipt-bound recovery
+correctly rejected `runtime_metadata_receipt_recovery_error_mismatch`; the
+receipt is spent and replay is forbidden.
+
+The environmental contradiction is independently reproduced on macOS 27.2.1:
+`/dev/console` is a root-owned character device while both `scutil` and direct
+SystemConfiguration inspection identify the completed on-console
+`alextester` session as UID 501/GID 20. Disconnecting Screen Sharing does not
+change either fact. The source repair keeps a non-root `/dev/console` as the
+established authority and requires any available dynamic-store identity to
+agree. Only a root-owned device node activates the fallback, which requires
+two identical structured dynamic-store reads and a known non-root account with
+matching UID/GID. Nil, root/loginwindow, unknown-account, unstable-read,
+non-character-device, and explicit mismatch cases fail closed in that
+root-owned fallback. An established non-root device owner tolerates only two
+consecutive nil structured reads; structured errors, malformed identities,
+one-sided nil, and disagreements fail closed. The structured reads now use an
+absolute, fixed-input `/usr/sbin/scutil` child
+with a closed environment, 16-KiB output ceiling, and two-second timeout. This
+replaced an initially tested direct framework call after the exact publication
+suite proved that call could block indefinitely in a nested verifier process.
+Seven focused tests pass; the
+complete Host manager suite passes all 302 applicable tests
+with two intentional skips (301 in the sandbox plus the one temporary-socket
+test rerun outside it). A transferred inert copy of the patched manager returns
+`dynamic: (501, 20)` and `admitted_uid: 501` on the live Neo. Publication,
+notarization, fresh authorization, and independent installed readback remain
+pending.
+
 ## Current physical checkpoint — 2026-11-19
 
 The exact `0abefb4...` protected release completed both bootstrap cases, all

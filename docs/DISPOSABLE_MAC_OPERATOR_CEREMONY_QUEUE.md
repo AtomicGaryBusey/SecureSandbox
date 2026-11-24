@@ -23,9 +23,21 @@ development Mac.
 
 ## Current Neo resumption
 
+The attended install request `a56117ee...` is spent and must not be replayed.
+It failed before a transition with
+`native_credential_console_user_unavailable`; independent readback proves the
+source selector `a585d8f7...`, predecessor `b3d6600...`, and absent PENDING
+record remain unchanged. `/dev/console` was root-owned even though
+SystemConfiguration reported `alextester` UID 501 as the completed on-console
+session. The exact receipt-bound recovery correctly rejected because this
+environmental failure is outside its closed recoverable-error set.
+
 Publish, sign, notarize, install, and independently verify the compatible Host
-repair whose active SSH aliases use only the protected machine trust store.
-Then authorize a separate `host-ssh-trust-enroll` Touch ID request that binds
+repair whose console-user gate accepts a root-owned `/dev/console` only after
+two stable structured SystemConfiguration reads, and whose active SSH aliases
+use only the protected machine trust store. Use a fresh Touch ID request; do
+not reopen the spent receipt. Then authorize a separate
+`host-ssh-trust-enroll` Touch ID request that binds
 the exact operator, machine, signed SSH configuration, two public agent
 identities, and exactly one Gateway, Research, and Target HostKeyAlias. The
 root-owned immutable projection contains no private key. Only after the current

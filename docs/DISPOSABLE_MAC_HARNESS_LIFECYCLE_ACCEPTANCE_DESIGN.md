@@ -226,6 +226,26 @@ leaving stdin attached to that local terminal. Touch ID must be enrolled in the
 Mac's Secure Enclave before the subsequent biometric-only gate; no password
 fallback is permitted.
 
+The privileged Host service target must bind the active Aqua console principal
+without trusting mutable caller environment. A non-root owner of the
+character-special `/dev/console` remains the established kernel-projected
+identity; when Apple's structured SystemConfiguration identity is available,
+two stable reads must agree with it. macOS 27.2.1 can instead leave the device
+node root-owned while a completed non-root session remains on-console. Only in
+that state may two identical, two-second-bounded reads of
+`State:/Users/ConsoleUser` through Apple's absolute `/usr/sbin/scutil` supply
+the UID/GID, and the account database must independently resolve the same non-root,
+non-loginwindow principal. Nil, root/loginwindow, unknown account, unstable
+read, non-character device, or explicit source disagreement fails closed in
+that root-owned fallback. For an established non-root device owner, only two
+consecutive nil structured reads may defer to that kernel identity; any
+structured error, malformed identity, one-sided nil, or disagreement fails
+closed. Each query uses a fixed command, fixed input, closed environment,
+bounded output, and a hard timeout so a stalled SystemConfiguration daemon
+cannot suspend privileged deployment indefinitely. The
+identity is reread at the existing transition boundaries; this fallback does
+not turn a stale login record into mutation authority.
+
 The first enrolled-Touch-ID transition retained an exact failed broker receipt
 and left the stable Host pair and selectors unchanged. The terminal receipt's
 stdout digest resolved to

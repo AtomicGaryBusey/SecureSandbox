@@ -11760,15 +11760,112 @@ def bootstrap_touchid_service_exact(
         time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
 
 
+def system_console_user_identity() -> tuple[int, int] | None:
+    """Read the active console principal from SystemConfiguration.
+
+    Modern macOS can leave ``/dev/console`` owned by root while an Aqua user
+    remains the completed, on-console session.  The documented dynamic-store
+    API is authoritative in that state; the device node remains an independent
+    mismatch check whenever it names a non-root principal.
+    """
+    command = ["/usr/sbin/scutil"]
+    try:
+        observed = subprocess.run(
+            command,
+            input="show State:/Users/ConsoleUser\n",
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseFailure(
+            "native_credential_console_user_unavailable"
+        ) from error
+    if (observed.returncode != 0 or observed.stderr
+            or len(observed.stdout.encode("utf-8")) > 16384):
+        raise ReleaseFailure("native_credential_console_user_unavailable")
+    if observed.stdout.strip() == "No such key":
+        # A locked login session can temporarily have no dynamic-store
+        # principal even though /dev/console retains its established non-root
+        # owner.  Preserve that one distinguishable absence state for the
+        # caller; malformed or contradictory identities still fail closed.
+        return None
+    fields: dict[str, str] = {}
+    for key in ("Name", "UID", "GID"):
+        values = re.findall(
+            rf"^  {key} : ([^\r\n]+)$", observed.stdout, re.MULTILINE,
+        )
+        if len(values) != 1:
+            raise ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            )
+        fields[key] = values[0]
+    try:
+        uid = int(fields["UID"])
+        gid = int(fields["GID"])
+        account = pwd.getpwuid(uid)
+    except (KeyError, ValueError) as error:
+        raise ReleaseFailure(
+            "native_credential_console_user_unavailable"
+        ) from error
+    if (uid <= 0 or gid <= 0
+            or account.pw_uid != uid
+            or account.pw_gid != gid
+            or account.pw_name != fields["Name"]
+            or account.pw_name in {"loginwindow", "root"}):
+        raise ReleaseFailure("native_credential_console_user_unavailable")
+    return uid, gid
+
+
 def console_user_uid(console: Path = Path("/dev/console")) -> int:
     try:
-        uid = console.stat().st_uid
-        pwd.getpwuid(uid)
-    except (OSError, KeyError) as error:
+        console_info = console.stat()
+        if not stat.S_ISCHR(console_info.st_mode):
+            raise OSError("console_not_character_device")
+    except OSError as error:
         raise ReleaseFailure("native_credential_console_user_unavailable") from error
-    if uid <= 0:
+    if console_info.st_uid > 0:
+        try:
+            account = pwd.getpwuid(console_info.st_uid)
+        except KeyError as error:
+            raise ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            ) from error
+        if (account.pw_uid != console_info.st_uid
+                or account.pw_name in {"loginwindow", "root"}):
+            raise ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            )
+        try:
+            first = system_console_user_identity()
+            second = system_console_user_identity()
+        except ReleaseFailure as error:
+            raise ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            ) from error
+        if first is None and second is None:
+            # A locked but still valid console can make the dynamic-store API
+            # temporarily return no principal. Preserve the kernel-owned
+            # non-root device-node identity in that state.
+            return console_info.st_uid
+        if (first is None or second is None or first != second
+                or first[0] != console_info.st_uid):
+            raise ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            )
+        return console_info.st_uid
+    try:
+        first = system_console_user_identity()
+        second = system_console_user_identity()
+    except ReleaseFailure as error:
+        raise ReleaseFailure(
+            "native_credential_console_user_unavailable"
+        ) from error
+    if first is None or second is None or first != second:
         raise ReleaseFailure("native_credential_console_user_unavailable")
-    return uid
+    return first[0]
 
 
 def native_credential_service_is_loaded(uid: int) -> bool:

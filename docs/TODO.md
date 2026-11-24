@@ -607,8 +607,28 @@ in ignored local records, not in this file.
   its fixed Parallels resolver to the enrolled operator so protected root
   drivers cannot run `vm_maintenance` as root. Private keys remain only in the ephemeral
   operator agents; the projection contains canonical public identities and
-  exact Gateway/Research/Target host-key aliases. Preserve the existing
-  campaign and all retained predecessors without deletion.
+  exact Gateway/Research/Target host-key aliases. The first attended install
+  of the compatible Host candidate consumed an exact Touch ID request but
+  failed before transition creation with
+  `native_credential_console_user_unavailable`: on macOS 27.2.1 the Neo's
+  `/dev/console` remained root-owned while SystemConfiguration independently
+  reported the completed on-console `alextester` session at UID 501. The spent
+  receipt is not recoverable and the stable source pair remains unchanged.
+  The reviewed repair preserves non-root `/dev/console` as the established
+  authority, requires any available SystemConfiguration identity to agree,
+  and uses two stable, two-second-bounded reads of
+  `State:/Users/ConsoleUser` through Apple's absolute `/usr/sbin/scutil` only
+  when the device node is root-owned. That fallback rejects nil, root/loginwindow,
+  unknown, unstable, non-character-device, and explicit mismatch states. An
+  established non-root device identity tolerates only two consecutive nil
+  structured reads; errors, malformed identities, one-sided nil, and
+  disagreement still fail closed.
+  The fixed-input child has a closed environment and bounded output; the
+  earlier direct framework implementation was discarded after the exact
+  publication suite demonstrated an unbounded SystemConfiguration stall.
+  Publish a fresh signed/notarized candidate and use a fresh Touch ID request;
+  never reopen or replay the spent receipt. Preserve the existing campaign and
+  all retained predecessors without deletion.
 
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case

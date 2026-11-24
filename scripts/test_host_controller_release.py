@@ -64,6 +64,174 @@ assert AUDIT_SPEC.loader is not None
 AUDIT_SPEC.loader.exec_module(AUDIT)
 
 
+class ConsoleUserIdentityTests(unittest.TestCase):
+    @staticmethod
+    def console(uid: int, mode: int = stat.S_IFCHR):
+        value = mock.Mock()
+        value.stat.return_value = types.SimpleNamespace(
+            st_uid=uid, st_mode=mode,
+        )
+        return value
+
+    def test_root_owned_console_accepts_stable_system_console_user(self):
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[(501, 20), (501, 20)],
+        ):
+            self.assertEqual(MANAGER.console_user_uid(self.console(0)), 501)
+
+    def test_nonroot_console_must_match_system_console_user(self):
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[(501, 20), (501, 20)],
+        ):
+            self.assertEqual(MANAGER.console_user_uid(self.console(501)), 501)
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[(501, 20), (501, 20)],
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_console_user_unavailable",
+        ):
+            MANAGER.console_user_uid(self.console(502))
+
+    def test_nonroot_console_survives_unavailable_dynamic_store(self):
+        account = types.SimpleNamespace(
+            pw_uid=501, pw_gid=20, pw_name="alextester",
+        )
+        with mock.patch.object(
+            MANAGER.pwd, "getpwuid", return_value=account,
+        ), mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[None, None],
+        ):
+            self.assertEqual(MANAGER.console_user_uid(self.console(501)), 501)
+
+    def test_nonroot_console_rejects_invalid_or_unstable_dynamic_store(self):
+        account = types.SimpleNamespace(
+            pw_uid=501, pw_gid=20, pw_name="alextester",
+        )
+        with mock.patch.object(
+            MANAGER.pwd, "getpwuid", return_value=account,
+        ), mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=MANAGER.ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            ),
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_console_user_unavailable",
+        ):
+            MANAGER.console_user_uid(self.console(501))
+        with mock.patch.object(
+            MANAGER.pwd, "getpwuid", return_value=account,
+        ), mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[None, (501, 20)],
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_console_user_unavailable",
+        ):
+            MANAGER.console_user_uid(self.console(501))
+
+    def test_console_identity_change_and_noncharacter_device_fail_closed(self):
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=[(501, 20), (502, 20)],
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_console_user_unavailable",
+        ):
+            MANAGER.console_user_uid(self.console(0))
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+        ) as identity, self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_console_user_unavailable",
+        ):
+            MANAGER.console_user_uid(self.console(0, stat.S_IFREG))
+        identity.assert_not_called()
+
+    @staticmethod
+    def scutil(stdout: str, *, returncode: int = 0, stderr: str = ""):
+        return subprocess.CompletedProcess(
+            ["/usr/sbin/scutil"], returncode, stdout, stderr,
+        )
+
+    def test_system_console_user_distinguishes_absence_from_invalid_accounts(self):
+        account = types.SimpleNamespace(
+            pw_uid=501, pw_gid=20, pw_name="alextester",
+        )
+        valid = (
+            "<dictionary> {\n"
+            "  GID : 20\n"
+            "  Name : alextester\n"
+            "  SessionInfo : <array> {\n"
+            "    0 : <dictionary> {\n"
+            "      kCGSSessionUserIDKey : 999\n"
+            "    }\n"
+            "  }\n"
+            "  UID : 501\n"
+            "}\n"
+        )
+        with mock.patch.object(
+            MANAGER.subprocess, "run", return_value=self.scutil(valid),
+        ) as run, mock.patch.object(
+            MANAGER.pwd, "getpwuid", return_value=account,
+        ):
+            self.assertEqual(MANAGER.system_console_user_identity(), (501, 20))
+        self.assertEqual(run.call_args.args, (["/usr/sbin/scutil"],))
+        self.assertEqual(
+            run.call_args.kwargs["input"],
+            "show State:/Users/ConsoleUser\n",
+        )
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+        with mock.patch.object(
+            MANAGER.subprocess, "run",
+            return_value=self.scutil("  No such key\n"),
+        ):
+            self.assertIsNone(MANAGER.system_console_user_identity())
+
+        invalid_outputs = [
+            valid.replace("  UID : 501", "  UID : 0"),
+            valid.replace("  Name : alextester", "  Name : root"),
+            valid.replace("  GID : 20\n", ""),
+            valid + "  UID : 501\n",
+        ]
+        for output in invalid_outputs:
+            with self.subTest(output=output), mock.patch.object(
+                MANAGER.subprocess, "run",
+                return_value=self.scutil(output),
+            ), mock.patch.object(
+                MANAGER.pwd, "getpwuid", return_value=account,
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_credential_console_user_unavailable",
+            ):
+                MANAGER.system_console_user_identity()
+
+    def test_system_console_user_command_failure_and_timeout_fail_closed(self):
+        failures = [
+            self.scutil("", returncode=1),
+            self.scutil("<dictionary> {\n}\n", stderr="warning\n"),
+            subprocess.TimeoutExpired(["/usr/sbin/scutil"], 2),
+            OSError("unavailable"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure), mock.patch.object(
+                MANAGER.subprocess, "run",
+                side_effect=failure if isinstance(failure, BaseException)
+                else None,
+                return_value=None if isinstance(failure, BaseException)
+                else failure,
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_credential_console_user_unavailable",
+            ):
+                MANAGER.system_console_user_identity()
+
+
 def inactive_launchd_snapshot(
     *, domain: str, label: str, plist: Path, program: str,
     runs: int | None = 0, job_state: str | None = "uninitialized",
@@ -2217,6 +2385,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             state_root = root / "controller-state"
             with (
                 mock.patch.object(
+                    MANAGER, "console_user_uid", return_value=os.geteuid(),
+                ),
+                mock.patch.object(
                     MANAGER, "ensure_native_deployment_inactive_locked",
                     side_effect=MANAGER.ReleaseFailure(
                         "native_deployment_active"
@@ -2232,6 +2403,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 )
             source.assert_not_called()
             with (
+                mock.patch.object(
+                    MANAGER, "console_user_uid", return_value=os.geteuid(),
+                ),
                 mock.patch.object(
                     MANAGER, "ensure_native_deployment_inactive_locked",
                     side_effect=MANAGER.ReleaseFailure(
@@ -8763,6 +8937,13 @@ class HostControllerReleaseTests(unittest.TestCase):
             mock.patch.object(
                 MANAGER, "ensure_no_d8653cb_release_processes",
                 return_value=None,
+            ),
+            # Host-controller unit fixtures must not inherit the test Mac's
+            # live login state or invoke SystemConfiguration. Dedicated
+            # ConsoleUserIdentityTests cover that boundary directly.
+            mock.patch.object(
+                MANAGER, "system_console_user_identity",
+                return_value=(os.geteuid(), os.getegid()),
             ),
         ]
         for verifier in self.generated_host_verifiers:

@@ -32,9 +32,27 @@ SystemConfiguration reported `alextester` UID 501 as the completed on-console
 session. The exact receipt-bound recovery correctly rejected because this
 environmental failure is outside its closed recoverable-error set.
 
+The later exact-predecessor replay from portable-fingerprint commit
+`1e4f7a7...` successfully staged inert successor `9030aa65...`, then consumed
+fresh Touch ID request `df7c8644...`. Its protected child again failed before
+transition publication with the same exact receipt-mapped console-user error.
+Current, previous, STABLE, launcher, and the public terminal remain unchanged;
+PENDING is absent. A later root probe of the exact staged manager succeeds,
+proving a transient sampling window. That request is also spent and must not be
+replayed.
+
+The bounded-stabilizer successor source has now passed its separate root-context
+prepublication probe on the Neo. The transferred bytes exactly match the release
+Mac source; Apple Python 3.9.6 computed the expected repair digest, observed
+stable UID 501/GID 20, admitted UID 501 at EUID 0, and exited 0. Do not reuse
+that diagnostic authorization as transition authority: canonical publication,
+Developer ID/notarization, a fresh password stage, and a fresh Touch ID request
+remain mandatory.
+
 Publish, sign, notarize, install, and independently verify the compatible Host
 repair whose console-user gate accepts a root-owned `/dev/console` only after
-two stable structured SystemConfiguration reads, and whose active SSH aliases
+two consecutive identical structured SystemConfiguration samples within a
+fixed four-sample window, and whose active SSH aliases
 use only the protected machine trust store. Use a fresh Touch ID request; do
 not reopen the spent receipt. Then authorize a separate
 `host-ssh-trust-enroll` Touch ID request that binds
@@ -1038,3 +1056,16 @@ not change and no Touch ID request was created. Publish, notarize, transfer,
 and invoke only the successor whose unique top-level function source-slice
 digest is stable across the release Mac's Python 3.13 and the Neo's Apple
 Python 3.9.
+
+Do not reuse the later `1e4f7a7...` candidate or request `df7c8644...` either.
+That password stage correctly retained inert `9030aa65...`, but its fresh
+Touch ID child encountered a transient console-identity window before PENDING
+publication. The separately inspected failed receipt is terminal, and the same
+staged manager later succeeds under root. Publish a new successor whose
+source-slice digest binds the absolute hard-timeout `scutil` query, the fixed
+four-sample stabilizer, and the final `/dev/console` cross-check. Its fresh
+password stage may retain another inert release, but only its separately fresh
+Touch ID request may select it. After activation, independently verify the
+public terminal and STABLE before proceeding to machine SSH trust enrollment.
+The prepublication root probe of those exact successor source bytes is now
+complete and successful; it does not waive or replace any of those gates.

@@ -75,20 +75,20 @@ class ConsoleUserIdentityTests(unittest.TestCase):
 
     def test_root_owned_console_accepts_stable_system_console_user(self):
         with mock.patch.object(
-            MANAGER, "system_console_user_identity",
-            side_effect=[(501, 20), (501, 20)],
+            MANAGER, "_stable_system_console_user_identity",
+            return_value=(501, 20),
         ):
             self.assertEqual(MANAGER.console_user_uid(self.console(0)), 501)
 
     def test_nonroot_console_must_match_system_console_user(self):
         with mock.patch.object(
-            MANAGER, "system_console_user_identity",
-            side_effect=[(501, 20), (501, 20)],
+            MANAGER, "_stable_system_console_user_identity",
+            return_value=(501, 20),
         ):
             self.assertEqual(MANAGER.console_user_uid(self.console(501)), 501)
         with mock.patch.object(
-            MANAGER, "system_console_user_identity",
-            side_effect=[(501, 20), (501, 20)],
+            MANAGER, "_stable_system_console_user_identity",
+            return_value=(501, 20),
         ), self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_credential_console_user_unavailable",
@@ -102,8 +102,8 @@ class ConsoleUserIdentityTests(unittest.TestCase):
         with mock.patch.object(
             MANAGER.pwd, "getpwuid", return_value=account,
         ), mock.patch.object(
-            MANAGER, "system_console_user_identity",
-            side_effect=[None, None],
+            MANAGER, "_stable_system_console_user_identity",
+            return_value=None,
         ):
             self.assertEqual(MANAGER.console_user_uid(self.console(501)), 501)
 
@@ -114,7 +114,7 @@ class ConsoleUserIdentityTests(unittest.TestCase):
         with mock.patch.object(
             MANAGER.pwd, "getpwuid", return_value=account,
         ), mock.patch.object(
-            MANAGER, "system_console_user_identity",
+            MANAGER, "_stable_system_console_user_identity",
             side_effect=MANAGER.ReleaseFailure(
                 "native_credential_console_user_unavailable"
             ),
@@ -126,25 +126,68 @@ class ConsoleUserIdentityTests(unittest.TestCase):
         with mock.patch.object(
             MANAGER.pwd, "getpwuid", return_value=account,
         ), mock.patch.object(
-            MANAGER, "system_console_user_identity",
-            side_effect=[None, (501, 20)],
+            MANAGER, "_stable_system_console_user_identity",
+            return_value=(502, 20),
         ), self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_credential_console_user_unavailable",
         ):
             MANAGER.console_user_uid(self.console(501))
 
-    def test_console_identity_change_and_noncharacter_device_fail_closed(self):
+    def test_stable_console_identity_requires_consecutive_equal_samples(self):
         with mock.patch.object(
             MANAGER, "system_console_user_identity",
-            side_effect=[(501, 20), (502, 20)],
-        ), self.assertRaisesRegex(
+            side_effect=[None, (501, 20), (501, 20)],
+        ) as identity, mock.patch.object(MANAGER.time, "sleep") as sleep:
+            self.assertEqual(
+                MANAGER._stable_system_console_user_identity(), (501, 20),
+            )
+        self.assertEqual(identity.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_stable_console_identity_oscillation_fails_closed(self):
+        observations = iter(
+            (501, 20) if index % 2 == 0 else (502, 20)
+            for index in range(4)
+        )
+        with mock.patch.object(
+            MANAGER, "system_console_user_identity",
+            side_effect=lambda: next(observations),
+        ) as identity, mock.patch.object(
+            MANAGER.time, "sleep",
+        ) as sleep, self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_credential_console_user_unavailable",
         ):
-            MANAGER.console_user_uid(self.console(0))
+            MANAGER._stable_system_console_user_identity()
+        self.assertEqual(identity.call_count, 4)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_stable_console_identity_errors_do_not_count_as_identity(self):
+        observations = iter([
+            MANAGER.ReleaseFailure(
+                "native_credential_console_user_unavailable"
+            ),
+            (501, 20),
+            (501, 20),
+        ])
+
+        def observe():
+            value = next(observations)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
         with mock.patch.object(
-            MANAGER, "system_console_user_identity",
+            MANAGER, "system_console_user_identity", side_effect=observe,
+        ), mock.patch.object(MANAGER.time, "sleep"):
+            self.assertEqual(
+                MANAGER._stable_system_console_user_identity(), (501, 20),
+            )
+
+    def test_noncharacter_console_fails_before_identity_lookup(self):
+        with mock.patch.object(
+            MANAGER, "_stable_system_console_user_identity",
         ) as identity, self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_credential_console_user_unavailable",
@@ -13132,11 +13175,12 @@ class HostControllerReleaseTests(unittest.TestCase):
         fixed_manager = current_manager + b"\n# stable SystemConfiguration console-user fix\n"
         for marker in (
             b"def system_console_user_identity()",
+            b"def _stable_system_console_user_identity()",
             b'command = ["/usr/sbin/scutil"]',
             b'input="show State:/Users/ConsoleUser\\n"',
             b"timeout=2",
-            b"first = system_console_user_identity()",
-            b"second = system_console_user_identity()",
+            b"observed = _stable_system_console_user_identity()",
+            b"for attempt in range(4)",
         ):
             self.assertIn(marker, fixed_manager)
         generation, candidate = self.alternate_native_host_candidate({
@@ -13239,8 +13283,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         current_broker = (current_path / "authorization_broker").read_bytes()
         current_manager = (current_path / "release_manager").read_bytes()
         unfixed_manager = current_manager.replace(
-            b"def system_console_user_identity()",
-            b"def removed_console_user_identity()",
+            b"def _stable_system_console_user_identity()",
+            b"def removed_stable_system_console_user_identity()",
             1,
         )
         self.assertNotEqual(unfixed_manager, current_manager)

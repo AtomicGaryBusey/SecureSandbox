@@ -569,13 +569,14 @@ BROKEN_CONSOLE_USER_BROKER_SHA256 = (
 BROKEN_CONSOLE_USER_MANAGER_SHA256 = (
     "909c32c1e1e2b3fc6e1e25aa1f939eb47e160f7cf4f6a3d7d83f4f0fe4e20f91"
 )
-# Exact source-slice digest of the reviewed `system_console_user_identity` and
-# `console_user_uid` top-level functions, in that order.  Locating unique
+# Exact source-slice digest of the reviewed SystemConfiguration query,
+# bounded stability gate, and `console_user_uid` top-level functions, in that
+# order. Locating unique
 # function nodes prevents marker literals elsewhere in this manager from
 # self-satisfying the one-time successor gate; hashing their original source
 # bytes avoids Python-version-dependent `ast.dump` representations.
 CONSOLE_USER_REPAIR_SOURCE_SHA256 = (
-    "25dfffa1655ab16fb57c7164b4482365b123d7da3239d2a81b1a160b41a520ef"
+    "a65ee73fa86c9566105a272c93f71fd5d7a5815bb692f5832508ce9cb752d92c"
 )
 EXPECTED_MODES = {
     "authorization_broker": 0o755,
@@ -1075,7 +1076,11 @@ def console_user_repair_source_sha256(manager: bytes) -> str:
         raise ReleaseFailure(
             "console_user_broker_recovery_successor_invalid"
         ) from error
-    names = ("system_console_user_identity", "console_user_uid")
+    names = (
+        "system_console_user_identity",
+        "_stable_system_console_user_identity",
+        "console_user_uid",
+    )
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     counts = {name: 0 for name in names}
     for node in tree.body:
@@ -11881,6 +11886,28 @@ def system_console_user_identity() -> tuple[int, int] | None:
     return uid, gid
 
 
+def _stable_system_console_user_identity() -> tuple[int, int] | None:
+    """Require two consecutive equal identities in one bounded window."""
+    previous: tuple[int, int] | None = None
+    previous_available = False
+    for attempt in range(4):
+        try:
+            observed = system_console_user_identity()
+        except ReleaseFailure:
+            # An unavailable or malformed sample proves no identity and can
+            # never pair with another failure to satisfy the stability gate.
+            previous = None
+            previous_available = False
+        else:
+            if previous_available and observed == previous:
+                return observed
+            previous = observed
+            previous_available = True
+        if attempt < 3:
+            time.sleep(0.05)
+    raise ReleaseFailure("native_credential_console_user_unavailable")
+
+
 def console_user_uid(console: Path = Path("/dev/console")) -> int:
     try:
         console_info = console.stat()
@@ -11901,33 +11928,30 @@ def console_user_uid(console: Path = Path("/dev/console")) -> int:
                 "native_credential_console_user_unavailable"
             )
         try:
-            first = system_console_user_identity()
-            second = system_console_user_identity()
+            observed = _stable_system_console_user_identity()
         except ReleaseFailure as error:
             raise ReleaseFailure(
                 "native_credential_console_user_unavailable"
             ) from error
-        if first is None and second is None:
+        if observed is None:
             # A locked but still valid console can make the dynamic-store API
             # temporarily return no principal. Preserve the kernel-owned
             # non-root device-node identity in that state.
             return console_info.st_uid
-        if (first is None or second is None or first != second
-                or first[0] != console_info.st_uid):
+        if observed[0] != console_info.st_uid:
             raise ReleaseFailure(
                 "native_credential_console_user_unavailable"
             )
         return console_info.st_uid
     try:
-        first = system_console_user_identity()
-        second = system_console_user_identity()
+        observed = _stable_system_console_user_identity()
     except ReleaseFailure as error:
         raise ReleaseFailure(
             "native_credential_console_user_unavailable"
         ) from error
-    if first is None or second is None or first != second:
+    if observed is None:
         raise ReleaseFailure("native_credential_console_user_unavailable")
-    return first[0]
+    return observed[0]
 
 
 def native_credential_service_is_loaded(uid: int) -> bool:

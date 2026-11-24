@@ -85,6 +85,42 @@ test rerun outside it). A transferred inert copy of the patched manager returns
 notarization, fresh authorization, and independent installed readback remain
 pending.
 
+The portable-fingerprint successor was then published as exact commit
+`1e4f7a7...` to both authorized remotes and built as Developer ID/notarized
+submission `b2de8d6c...`. Neo transfer verification retained the exact
+candidate, after which the password gate staged inert successor release
+`9030aa65...` without changing either selector, the launcher, or the stable
+Host pair. Fresh Touch ID request `df7c8644...`, bound to target plan
+`795209ce...`, reached the staged broker but its protected manager child
+returned status 1 before transition publication. The canonical receipt is
+`failed`, has empty stderr, and stdout digest `9fa4b402...`; exhaustive mapping
+of the exact manager rejection records resolves that digest only to
+`native_credential_console_user_unavailable`. Receipt-bound recovery rejected
+`runtime_metadata_receipt_recovery_error_mismatch`, as designed. Independent
+readback still proves current `a585d8f7...`, previous `b3d6600f...`, the prior
+STABLE pair and terminal, and no PENDING record. The request is spent and must
+not be replayed.
+
+A later read-only root probe of those exact staged manager bytes returned the
+canonical `scutil` UID 501/GID 20 identity and admitted UID 501. The same
+immutable implementation therefore passes after the failed request, proving a
+transient identity sampling window rather than a permanent root parser defect.
+The next successor retains the previously selected hard-timeout `scutil`
+boundary and adds a four-sample, fixed-interval stabilizer: only two
+consecutive identical validated identities pass; unavailable, malformed,
+changed, or oscillating samples reset the pair, and exhaustion fails closed.
+The one-time source-slice digest now binds the query, stabilizer, and console
+cross-check together. Python 3.13 on the release Mac and Python 3.9.6 on the
+Neo independently produce digest `a65ee73f...`; the Neo's unprivileged
+candidate probe returns UID 501/GID 20. Twelve focused console/recovery tests
+and the complete 310-test Host-controller suite pass with two intentional
+skips. The candidate transferred to the Neo is byte-identical to the release
+Mac source (`3e9f954c...`). Its independently authorized root probe under Apple
+Python 3.9.6 returned EUID 0, stable identity UID 501/GID 20, admitted UID 501,
+the exact `a65ee73f...` repair digest with `digest_matches: true`, and exit 0.
+Canonical publication, a fresh notarized successor, and physical activation
+remain pending.
+
 ## Current physical checkpoint — 2026-11-19
 
 The exact `0abefb4...` protected release completed both bootstrap cases, all
@@ -1455,9 +1491,24 @@ Independent calculation proved the reviewed function bodies were identical,
 but the initial attribute-free `ast.dump` fingerprint differed between the
 release Mac's Python 3.13 and Apple's Python 3.9 on the Neo. Current, previous,
 the stable Host pair, and the public terminal remain unchanged with no PENDING
-record. Source now locates the same two unique top-level functions through the
-AST but hashes their exact original source slices; both Python versions produce
-the same digest. A fresh published and notarized candidate remains required.
+record. Source now locates the unique query, stabilizer, and console cross-check
+functions through the AST and hashes their exact original source slices; both
+Python versions produce the same digest. A fresh published and notarized
+candidate remains required.
+
+Portable-fingerprint commit `1e4f7a7...` then passed the password stage and
+staged inert release `9030aa65...`. Its fresh Touch ID request `df7c8644...`
+failed before transition publication with the exact receipt-mapped
+`native_credential_console_user_unavailable`; selectors, STABLE, and launcher
+remain unchanged and PENDING is absent. A later root probe of the same staged
+manager succeeds, establishing a transient structured-identity window. The
+next source-slice gate covers the fixed `scutil` query, a four-sample bounded
+stabilizer requiring two consecutive identical identities, and the final
+console cross-check. An independently authorized Neo root probe of the exact
+transferred successor source returned the expected digest, stable UID 501/GID
+20 identity, admitted UID 501, and exit 0 under Apple Python 3.9.6. Publish and
+notarize that successor before another fresh request; never replay either spent
+request.
 
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited

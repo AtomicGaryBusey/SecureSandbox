@@ -616,13 +616,15 @@ in ignored local records, not in this file.
   receipt is not recoverable and the stable source pair remains unchanged.
   The reviewed repair preserves non-root `/dev/console` as the established
   authority, requires any available SystemConfiguration identity to agree,
-  and uses two stable, two-second-bounded reads of
+  and accepts only two consecutive identical validated samples of
   `State:/Users/ConsoleUser` through Apple's absolute `/usr/sbin/scutil` only
-  when the device node is root-owned. That fallback rejects nil, root/loginwindow,
-  unknown, unstable, non-character-device, and explicit mismatch states. An
-  established non-root device identity tolerates only two consecutive nil
-  structured reads; errors, malformed identities, one-sided nil, and
-  disagreement still fail closed.
+  when the device node is root-owned. A fixed four-sample window lets one
+  transient error, nil, or identity change settle, but every failed sample
+  resets the pair. That fallback rejects nil, root/loginwindow, unknown,
+  oscillating, exhausted, non-character-device, and explicit mismatch states.
+  An established non-root device identity tolerates only two consecutive nil
+  structured samples; errors, malformed identities, and disagreement reset
+  the pair and exhaustion still fails closed.
   The fixed-input child has a closed environment and bounded output; the
   earlier direct framework implementation was discarded after the exact
   publication suite demonstrated an unbounded SystemConfiguration stall.
@@ -645,6 +647,19 @@ in ignored local records, not in this file.
   functions through the AST but hashes their exact source slices; both Python
   versions independently produce the same digest. Republish and replay only
   that successor.
+  Portable-fingerprint commit `1e4f7a7...` subsequently staged inert successor
+  `9030aa65...`, but fresh Touch ID request `df7c8644...` hit a transient
+  `native_credential_console_user_unavailable` before transition publication.
+  Its exact receipt is spent; selectors, STABLE, launcher, and terminal remain
+  unchanged and PENDING is absent. The same staged manager later admits UID
+  501 under root. Publish and notarize the bounded four-sample successor whose
+  source-slice digest covers the query, stabilizer, and console cross-check,
+  then use another fresh exact-predecessor two-gate request. Never replay either
+  failed authorization. The exact transferred successor source has passed a
+  separate Neo root-context prepublication probe: EUID 0, stable UID 501/GID 20,
+  admitted UID 501, matching repair digest, Apple Python 3.9.6, and exit 0. That
+  diagnostic proof is not activation authority; publication, notarization, and
+  both fresh operator gates remain pending.
 
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case

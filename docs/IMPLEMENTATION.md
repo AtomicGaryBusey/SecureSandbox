@@ -613,6 +613,21 @@ STABLE digest. There is no standalone ordinary launcher migration; the low-level
 command is retained only for pre-pair bootstraps and rejects an established pair
 record.
 
+Host service selection derives the active Aqua UID without caller environment.
+The fixed absolute `/usr/sbin/scutil` query has fixed input, a closed environment,
+a 16-KiB output ceiling, and a two-second child timeout. A four-sample bounded
+stabilizer accepts only two consecutive identical, account-validated identities;
+an error, nil/identity change, or malformed sample resets the pair and exhaustion
+fails closed. A non-root character-special `/dev/console` owner must agree with
+the stable structured identity, except that two consecutive nil samples may
+retain that kernel projection. A root-owned console requires a stable non-root,
+non-loginwindow SystemConfiguration principal. The one-time exact-predecessor
+recovery gate hashes the original source slices of the query, stabilizer, and
+console cross-check together, so a successor cannot substitute one layer while
+retaining the others. An earlier in-process framework query remains prohibited:
+physical publication testing showed it could block a nested verifier without a
+killable child timeout.
+
 The private mode-0600 `secure-sandbox-host-pair-transition-v2` journal drives
 service fencing, launcher-first selection, selector and service replacement,
 and exact crash replay. Its receipt-free first-pair form includes a digest-bound

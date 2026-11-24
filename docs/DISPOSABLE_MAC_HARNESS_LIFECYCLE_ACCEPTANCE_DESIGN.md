@@ -232,17 +232,21 @@ character-special `/dev/console` remains the established kernel-projected
 identity; when Apple's structured SystemConfiguration identity is available,
 two stable reads must agree with it. macOS 27.2.1 can instead leave the device
 node root-owned while a completed non-root session remains on-console. Only in
-that state may two identical, two-second-bounded reads of
+that state may two consecutive identical validated samples of
 `State:/Users/ConsoleUser` through Apple's absolute `/usr/sbin/scutil` supply
 the UID/GID, and the account database must independently resolve the same non-root,
-non-loginwindow principal. Nil, root/loginwindow, unknown account, unstable
-read, non-character device, or explicit source disagreement fails closed in
-that root-owned fallback. For an established non-root device owner, only two
-consecutive nil structured reads may defer to that kernel identity; any
-structured error, malformed identity, one-sided nil, or disagreement fails
-closed. Each query uses a fixed command, fixed input, closed environment,
-bounded output, and a hard timeout so a stalled SystemConfiguration daemon
-cannot suspend privileged deployment indefinitely. The
+non-loginwindow principal. A bounded four-sample stabilization window permits
+one transient unavailable, nil, or changed sample to settle, but a failed
+sample resets the pair and never counts as identity. Nil, root/loginwindow,
+unknown account, oscillation, non-character device, exhaustion, or explicit
+source disagreement fails closed in that root-owned fallback. For an
+established non-root device owner, only two consecutive nil structured samples
+may defer to that kernel identity; errors, malformed identity, or disagreement
+reset the pair and exhaustion fails closed. Each query uses a fixed command,
+fixed input, closed environment, 16-KiB output ceiling, and a two-second hard
+timeout; the four-sample cap and fixed 50-ms inter-sample interval prevent a
+stalled SystemConfiguration daemon from suspending privileged deployment
+indefinitely. The
 identity is reread at the existing transition boundaries; this fallback does
 not turn a stale login record into mutation authority.
 
@@ -257,7 +261,10 @@ the Neo. Its password phase may only stage the exact signed/notarized successor
 release and candidate authority. It proves `current`, `previous`, the stable
 launcher, and the stable Host-pair record unchanged, and requires the successor
 manager to contain the fixed absolute `scutil` query, bounded input/output,
-timeout, and two-read stability checks. The staged successor broker then owns
+timeout, four-sample stabilization gate, and final console cross-check. The
+source-slice admission digest covers all three unique top-level functions, so
+neither query nor stabilization semantics can be substituted independently.
+The staged successor broker then owns
 a fresh ordinary Touch ID request for the normal atomic transition. Neither
 the password phase nor the consumed failed receipt can select a release.
 

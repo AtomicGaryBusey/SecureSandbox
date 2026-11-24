@@ -1248,6 +1248,7 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                     authorization_request_id=request_id,
                     authorization_request_sha256=request_sha256,
                     authorized_target_plan_sha256=plan_a_sha256,
+                    authorized_operator_uid=fixture.uid,
                 )
             self.assertFalse(
                 os.path.lexists(

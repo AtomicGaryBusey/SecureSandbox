@@ -3,6 +3,7 @@
 import importlib.util
 import ast
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -316,6 +317,91 @@ def inactive_launchd_snapshot(
 
 
 class NativeCredentialPackagingContractTests(unittest.TestCase):
+    def test_pinned_apple_root_has_exact_der_fingerprint(self):
+        decoded = subprocess.run(
+            ["/usr/bin/openssl", "x509", "-outform", "der"],
+            input=MANAGER.APPLE_ROOT_CA_PEM, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+        self.assertEqual(
+            hashlib.sha256(decoded).hexdigest(),
+            "b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024",
+        )
+
+    def test_profile_decoder_verifies_cms_against_pinned_apple_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "embedded.provisionprofile"
+            profile.write_bytes(b"p" * 1024)
+            profile.chmod(0o444)
+            decoded = {
+                "Entitlements": {"keychain-access-groups": ["ABCDE12345.*"]},
+                "ExpirationDate": datetime.datetime(2044, 1, 1),
+                "Padding": "x" * 1024,
+            }
+
+            def verify(argv, **kwargs):
+                self.assertEqual(argv[:4], [
+                    "/usr/bin/openssl", "smime", "-verify", "-inform",
+                ])
+                self.assertEqual(argv[4:7], ["der", "-in", str(profile)])
+                self.assertEqual(argv[7], "-CAfile")
+                self.assertEqual(
+                    Path(argv[8]).read_bytes(), MANAGER.APPLE_ROOT_CA_PEM,
+                )
+                self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                self.assertEqual(kwargs["timeout"], 15)
+                self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=plistlib.dumps(decoded),
+                    stderr=b"Verification successful\n",
+                )
+
+            with mock.patch.object(
+                MANAGER.subprocess, "run", side_effect=verify,
+            ):
+                self.assertEqual(
+                    MANAGER.verified_authorization_ui_profile(profile),
+                    decoded,
+                )
+
+    def test_profile_decoder_rejects_unverified_cms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "embedded.provisionprofile"
+            profile.write_bytes(b"p" * 1024)
+            profile.chmod(0o444)
+            failed = subprocess.CompletedProcess(
+                ["/usr/bin/openssl"], 4, stdout=b"",
+                stderr=b"Verification failure\n",
+            )
+            with mock.patch.object(
+                MANAGER.subprocess, "run", return_value=failed,
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "authorization_ui_profile_invalid",
+            ):
+                MANAGER.verified_authorization_ui_profile(profile)
+
+    def test_profile_decoder_rejects_profile_substitution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "embedded.provisionprofile"
+            profile.write_bytes(b"p" * 1024)
+            profile.chmod(0o444)
+
+            def substitute(argv, **_kwargs):
+                profile.chmod(0o644)
+                profile.write_bytes(b"q" * 1025)
+                profile.chmod(0o444)
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=plistlib.dumps({}),
+                    stderr=b"Verification successful\n",
+                )
+
+            with mock.patch.object(
+                MANAGER.subprocess, "run", side_effect=substitute,
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "authorization_ui_profile_invalid",
+            ):
+                MANAGER.verified_authorization_ui_profile(profile)
+
     def test_touchid_payload_verifier_covers_complete_shipping_source_tree(self):
         root = REPO / "macos/TouchIDAuthorization"
         expected = {

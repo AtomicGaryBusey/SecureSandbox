@@ -1635,3 +1635,25 @@ directory inode, and no world-write bit. A user-group parent, an alternate
 path, a symlink resolution mismatch, or a world-writable directory remains a
 hard failure. The random root-created socket name and all release, peer,
 operation, and target-plan bindings remain independently mandatory.
+
+### Authorization-profile verification without ambient Keychain state
+
+Host release admission must authenticate the embedded macOS provisioning
+profile while running inside the root authorization service. That service is
+not a login-Keychain client, and its ability to ask `securityd` to decode a CMS
+object is not an authority invariant. Runtime verification therefore uses the
+system OpenSSL implementation to verify the profile's CMS signature and full
+included certificate chain against the source-pinned Apple Root CA. The trust
+anchor is an immutable public certificate embedded in the exact release
+manager, not a caller path or mutable Keychain lookup.
+
+The decoder uses a private temporary CA file, a fixed environment, no stdin,
+a fifteen-second timeout, bounded output, exact success diagnostics, and
+before/after profile identity and security-relevant metadata. Only the
+authenticated plist reaches the
+existing platform, Team ID, application identifier, developer-team,
+keychain-group, all-device scope, and expiry checks. Developer ID codesign,
+entitlements, candidate-receipt signature, notarization, target-plan, and
+Touch ID bindings remain separate mandatory gates. A missing OpenSSL binary,
+untrusted chain, malformed CMS, substituted profile, unexpected output, or
+timeout fails closed.

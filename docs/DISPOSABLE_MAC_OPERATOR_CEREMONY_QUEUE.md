@@ -1124,3 +1124,15 @@ runtime-directory correction before trying again. The next attempt still
 requires one fresh password notice followed by one fresh Touch ID request;
 unexpected additional password prompts, an alternate socket parent, or any
 reuse of `f0425b7a...` is a hard stop.
+
+Do not reuse request `b5226997...`. It proved the corrected root:daemon runtime
+socket policy, exact staged broker/UI pairing, one-password supervisor, full
+target-plan display, and fresh Touch ID approval. The install failed before
+PENDING because the authorization-service context could not decode the valid
+embedded profile through ambient `securityd`; the receipt and unchanged
+selectors/journals are terminal evidence. Publish/sign/notarize and transfer
+the successor whose release manager cryptographically verifies the profile CMS
+chain against its pinned Apple Root CA. Before the next fresh ceremony, verify
+the new candidate's profile digest, Developer ID, notary submission, and target
+plan independently. Any fallback to unverified CMS, mutable Keychain trust, or
+request replay is a hard stop.

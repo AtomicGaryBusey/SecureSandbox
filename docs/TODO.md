@@ -1446,3 +1446,14 @@ new biometric nonce exists. Publish and install the narrow canonical-runtime
 directory correction, then use one fresh password and one fresh Touch ID
 ceremony. Preserve every release, peer, operation, random-socket, and exact-plan
 binding.
+
+The published `96e5527...` successor then proved the complete one-password,
+plan-bound staged-broker and fresh Touch ID path. Request `b5226997...` is
+spent. Its pre-PENDING receipt uniquely maps to
+`authorization_ui_profile_invalid`: the exact valid profile decodes in the
+login session, but ambient `security cms` failed inside the root authorization
+service. Selectors and journals remain unchanged. Publish and install the
+pinned-Apple-root OpenSSL CMS verifier, validate the exact new candidate, and
+use one fresh password plus one fresh Touch ID request. Never replay the spent
+request or weaken the remaining codesign, entitlement, Developer ID,
+notarization, expiry, target-plan, or peer gates.

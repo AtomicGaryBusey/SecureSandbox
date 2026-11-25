@@ -1632,3 +1632,30 @@ world-writable. Tests admit root:daemon 0775 and reject both root:daemon 0777
 and root:staff 0775; the existing wrong-plan and Control Center rejection tests
 continue to pass. Physical publication, notarization, transfer, and one fresh
 password/Touch ID ceremony remain required.
+
+Commit `96e5527...` passed the complete publication gate, was published to and
+independently read back from both authorized remotes, and produced signed,
+notarized candidate `42a06eef...`. The Neo independently admitted its exact
+commit, source, signing-configuration, preimage, generation-tree, Developer ID,
+and notarization bindings. Fresh request `b5226997...` used one administrator
+password, reached the exact random recovery socket, displayed the complete
+target plan `ae18242b...`, and was approved with Touch ID. The protected receipt
+then failed before PENDING with stdout digest `15acc63c...`; recovery correctly
+classified the unknown digest as
+`runtime_metadata_receipt_recovery_error_mismatch` rather than converting it
+into authority. Independent readback found current `a585d8f7...`, previous
+`b3d6600f...`, all transition/terminal journals absent, and no recovery
+process. The request is spent and must never be replayed.
+
+Exhaustive matching of that digest against all 569 canonical literal release
+rejections uniquely identified `authorization_ui_profile_invalid`. The exact
+root-owned staged profile has SHA-256 `55d26d66...`; login-context
+`security cms -D` decodes its Team ID, entitlements, and 2044 expiry, while the
+same validation inside the authorization-service operation produced invalid
+output. A destination-local OpenSSL probe verified the profile's CMS signature
+and complete included chain to Apple Root CA and decoded the same plist without
+Keychain or GUI-session state. Source now uses that pinned-root verifier at
+runtime. Focused tests verify the exact CA input and fixed process environment
+and reject unverified CMS and profile substitution; the actual candidate
+profile passes. Publication, signing/notarization, transfer, and a fresh
+non-replayed password/Touch ID ceremony remain required.

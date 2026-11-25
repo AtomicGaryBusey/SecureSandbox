@@ -681,6 +681,16 @@ in ignored local records, not in this file.
   console discovery. Publish, notarize, transfer, and use one fresh request;
   never replay `d17728de...`.
 
+  Published successor `23fd1736...` staged inert as `c6ced4ff...`, but fresh
+  request `5511db67...` exposed a mixed-generation launch: the staged broker
+  followed `current` and started the predecessor's authorization UI, which
+  exited in 187 ms before LocalAuthentication. No receipt, request file,
+  PENDING, TERMINAL, or selector mutation occurred; the request is spent.
+  Bind every installed broker to the sibling UI in its own immutable 64-hex
+  release, publish/sign/notarize and transfer a new successor, independently
+  prove that exact pairing, and use one fresh password plus one fresh Touch ID
+  request. Never replay `5511db67...` or activate `c6ced4ff...`.
+
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case
   password loop for consecutive provenance/archive/qualification fixtures

@@ -1554,6 +1554,30 @@ its intended service failure, while UID substitution and custody mismatch fail
 closed. Publication, a fresh signed candidate, and physical replay remain
 pending; request `d17728de...` must never be replayed.
 
+Commit `23fd1736...` was published to both authorized remotes, signed and
+notarized, transferred to the Neo, and staged inert as release `c6ced4ff...`.
+One administrator password started the bounded supervisor and fresh request
+`5511db67...` entered the broker, but no Touch ID window appeared. Unified-log
+readback proved the exact staged broker had launched
+`SecureSandboxAuthorizationUI.app` from selected predecessor `a585d8f7...`;
+that mixed-generation UI exited after 187 ms, before any LocalAuthentication
+activity. No protected/public receipt, request file, PENDING, or TERMINAL was
+created, and independent readback proved `current`, `previous`, STABLE, and the
+launcher unchanged. The ambiguous request is spent and non-replayable.
+
+Source now treats the broker and native UI as an inseparable immutable-release
+pair. An installed broker derives the UI only from its own resolved 64-hex
+directory beneath the fixed Host releases root; only source-tree tooling
+retains the `current` fallback. Focused tests prove exact-release selection,
+selected-directory symlink resolution, lookalike-tree rejection, and source
+fallback. The complete unrestricted combined suite passes 511 tests with two
+expected skips. The managed security-diff scanner refused the valid checkout
+at setup with its worktree/HEAD error and produced no canonical scan; manual
+trust-boundary review found no reportable issue. The exact committed publication
+gate remains required before release. Publish, notarize, transfer, and stage a
+new successor, independently prove its broker/UI co-location, and use a fresh
+password plus a fresh Touch ID request. Never replay `5511db67...`.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

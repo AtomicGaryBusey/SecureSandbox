@@ -296,8 +296,39 @@ NATIVE_CODEX_UI_HANDLE_ROOT = Path(
 )
 TOUCHID_UI_APP_NAME = "SecureSandboxAuthorizationUI.app"
 TOUCHID_UI_EXECUTABLE = Path("Contents/MacOS/SecureSandboxAuthorizationUI")
-DEFAULT_TOUCHID_UI = (Path("/usr/local/libexec/secure-sandbox-host/current")
-                      / TOUCHID_UI_APP_NAME / TOUCHID_UI_EXECUTABLE)
+
+
+def default_touchid_ui_for_broker(
+    broker_path: Path,
+    *,
+    releases_root: Path = HOST_INSTALL_ROOT / "releases",
+) -> Path:
+    """Bind an installed broker to the UI in its own immutable release.
+
+    Recovery may execute a staged successor broker while ``current`` still
+    names the defective predecessor.  Following the selector here would mix
+    those generations and let LaunchServices start the predecessor UI.  A
+    source-tree broker retains the selected-release fallback used by local
+    tooling; every installed release broker instead selects its exact sibling.
+    """
+    selected = (
+        Path("/usr/local/libexec/secure-sandbox-host/current")
+        / TOUCHID_UI_APP_NAME / TOUCHID_UI_EXECUTABLE
+    )
+    try:
+        broker = Path(broker_path).resolve(strict=True)
+    except OSError:
+        return selected
+    release = broker.parent
+    expected_releases_root = Path(releases_root).resolve(strict=False)
+    if (broker.name == "authorization_broker"
+            and release.parent == expected_releases_root
+            and SHA256.fullmatch(release.name) is not None):
+        return release / TOUCHID_UI_APP_NAME / TOUCHID_UI_EXECUTABLE
+    return selected
+
+
+DEFAULT_TOUCHID_UI = default_touchid_ui_for_broker(Path(__file__))
 LSREGISTER = Path(
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
     "LaunchServices.framework/Support/lsregister"

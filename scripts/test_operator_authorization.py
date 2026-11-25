@@ -61,6 +61,56 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.pwd.stop()
         self.temporary.cleanup()
 
+    def test_installed_broker_selects_ui_from_its_exact_release(self):
+        release = self.root / "secure-sandbox-host" / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        broker = release / "authorization_broker"
+        broker.write_bytes(b"broker")
+        self.assertEqual(
+            AUTH.default_touchid_ui_for_broker(
+                broker, releases_root=release.parent,
+            ),
+            release.resolve()
+            / AUTH.TOUCHID_UI_APP_NAME / AUTH.TOUCHID_UI_EXECUTABLE,
+        )
+
+    def test_selected_broker_symlink_resolves_to_its_exact_release_ui(self):
+        releases = self.root / "secure-sandbox-host" / "releases"
+        release = releases / ("b" * 64)
+        release.mkdir(parents=True)
+        broker = release / "authorization_broker"
+        broker.write_bytes(b"broker")
+        current = self.root / "secure-sandbox-host" / "current"
+        current.symlink_to(release)
+        self.assertEqual(
+            AUTH.default_touchid_ui_for_broker(
+                current / "authorization_broker", releases_root=releases,
+            ),
+            release.resolve()
+            / AUTH.TOUCHID_UI_APP_NAME / AUTH.TOUCHID_UI_EXECUTABLE,
+        )
+
+    def test_lookalike_release_tree_retains_selected_release_fallback(self):
+        lookalike = self.root / "lookalike" / "releases" / ("c" * 64)
+        lookalike.mkdir(parents=True)
+        broker = lookalike / "authorization_broker"
+        broker.write_bytes(b"broker")
+        self.assertEqual(
+            AUTH.default_touchid_ui_for_broker(broker),
+            Path("/usr/local/libexec/secure-sandbox-host/current")
+            / AUTH.TOUCHID_UI_APP_NAME / AUTH.TOUCHID_UI_EXECUTABLE,
+        )
+
+    def test_source_broker_retains_selected_release_ui_fallback(self):
+        source = self.root / "scripts" / "operator-authorization.py"
+        source.parent.mkdir()
+        source.write_bytes(b"source")
+        self.assertEqual(
+            AUTH.default_touchid_ui_for_broker(source),
+            Path("/usr/local/libexec/secure-sandbox-host/current")
+            / AUTH.TOUCHID_UI_APP_NAME / AUTH.TOUCHID_UI_EXECUTABLE,
+        )
+
     @contextlib.contextmanager
     def extended_acl(self, path: Path, rule: str):
         if sys.platform != "darwin":

@@ -1085,3 +1085,13 @@ Before launching the next ceremony, independently verify those bindings in the
 new signed/notarized candidate and confirm the old request is terminal. Use one
 fresh password plus one fresh Touch ID request; any second password prompt,
 ambient console-user error, UID mismatch, or custody mismatch is a hard stop.
+
+Do not reuse request `5511db67...` or select staged release `c6ced4ff...`.
+The password supervisor succeeded, but the exact staged broker followed
+`current` to predecessor `a585d8f7...` for its authorization UI. That
+mixed-generation UI exited in 187 ms before LocalAuthentication, leaving no
+receipt, request file, PENDING, or TERMINAL and no selector change. Publish and
+notarize the successor that binds an installed broker to the sibling UI in its
+own immutable release. Before the next ceremony, independently verify that
+exact co-location and that the old request is absent/spent. Then use one fresh
+password and one fresh Touch ID request only.

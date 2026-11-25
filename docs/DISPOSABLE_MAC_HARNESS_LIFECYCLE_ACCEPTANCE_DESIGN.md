@@ -160,6 +160,17 @@ the normal atomic Host-pair transition. Recovery cannot authorize selection,
 cannot accept a different predecessor, and becomes unavailable after the
 successor is selected.
 
+The successor broker and native authorization UI are one immutable release
+unit. An installed broker resolves its own executable path and may launch only
+the sibling `SecureSandboxAuthorizationUI.app` from that same 64-hex release
+directory beneath the fixed Host releases root. A lookalike release tree is
+not installed authority. The broker must never follow `current` for the UI:
+during recovery that selector intentionally still names the defective
+predecessor, and doing so would create a mixed-generation protocol pair.
+Source-tree tooling alone may use the selected-release fallback. A missing,
+substituted, differently placed, or non-release broker/UI relationship fails
+before biometric authority exists.
+
 The console-user two-gate recovery is one bounded privileged ceremony, not a
 sequence of password prompts. One `sudo` invocation starts the exact-digest
 release manager, stages only the displayed successor, and keeps that root

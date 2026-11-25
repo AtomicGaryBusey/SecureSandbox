@@ -43,7 +43,7 @@ SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 BOOTSTRAP_NOTICE_SCRIPT = r'''
 on run argv
-  tell application "System Events"
+  tell application "Terminal"
     activate
     set answer to display dialog (item 1 of argv) with title "SecureSandbox Bootstrap Authorization" buttons {"Cancel", "Continue"} default button "Cancel" cancel button "Cancel" with icon caution giving up after 90
     if gave up of answer then error number -128

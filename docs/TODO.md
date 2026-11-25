@@ -691,6 +691,14 @@ in ignored local records, not in this file.
   prove that exact pairing, and use one fresh password plus one fresh Touch ID
   request. Never replay `5511db67...` or activate `c6ced4ff...`.
 
+  The first `c4cde8e...` recovery attempt then proved its background System
+  Events-owned notice could exist for 90 seconds without rendering on the
+  physical Neo. It timed out as `operator_cancelled` before password, Touch ID,
+  or protected mutation. A harmless Terminal-owned dialog rendered physically
+  on the same machine. Make Terminal the notice owner while retaining Cancel as
+  default/cancel and the bounded fail-closed timeout; republish, sign, notarize,
+  transfer, and rerun the fresh two-gate ceremony.
+
   Historical implementation and campaign-repair narrative follows.
   The bounded visible-TTY ceremony helper removes the fresh-Terminal-per-case
   password loop for consecutive provenance/archive/qualification fixtures

@@ -2872,6 +2872,19 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(binding.release_id, "a" * 64)
         self.assertEqual(comparable.call_count, 2)
 
+    def test_bootstrap_notice_is_owned_by_visible_terminal(self):
+        self.assertIn(
+            'tell application "Terminal"', DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
+        )
+        self.assertNotIn(
+            'tell application "System Events"', DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
+        )
+        self.assertIn(
+            'default button "Cancel" cancel button "Cancel"',
+            DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
+        )
+        self.assertIn("giving up after 90", DEPLOY.BOOTSTRAP_NOTICE_SCRIPT)
+
     def test_host_pair_recovery_notice_discloses_ordinary_source_pair(self):
         binding = self.host_pair_recovery_binding()._replace(
             host_pair_source_release_id="f" * 64,

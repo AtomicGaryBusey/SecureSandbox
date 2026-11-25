@@ -171,6 +171,13 @@ Source-tree tooling alone may use the selected-release fallback. A missing,
 substituted, differently placed, or non-release broker/UI relationship fails
 before biometric authority exists.
 
+The preceding recovery notice is informational and grants no authority, but it
+must still be visible on the physical console. Its AppleScript dialog is owned
+by the already-visible Terminal application, not the background System Events
+agent. Cancel remains the default and cancel button, and a 90-second give-up is
+an ordinary fail-closed cancellation. Failure to render can therefore consume
+neither password nor biometric authority and cannot silently advance staging.
+
 The console-user two-gate recovery is one bounded privileged ceremony, not a
 sequence of password prompts. One `sudo` invocation starts the exact-digest
 release manager, stages only the displayed successor, and keeps that root

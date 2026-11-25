@@ -1095,3 +1095,11 @@ notarize the successor that binds an installed broker to the sibling UI in its
 own immutable release. Before the next ceremony, independently verify that
 exact co-location and that the old request is absent/spent. Then use one fresh
 password and one fresh Touch ID request only.
+
+The first `c4cde8e...` ceremony created no authorization request: its
+System Events-owned informational notice never appeared on the physical Neo
+and timed out after 90 seconds as `operator_cancelled`. No password or Touch ID
+authority was consumed and no protected state changed. A Terminal-owned
+harmless probe was physically visible. Publish/sign/notarize and transfer the
+successor whose notice is Terminal-owned, then rerun the exact ceremony. Cancel
+must remain the default, and any invisible or timed-out notice is a hard stop.

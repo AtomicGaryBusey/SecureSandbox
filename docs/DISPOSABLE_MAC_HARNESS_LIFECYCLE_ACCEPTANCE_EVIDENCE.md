@@ -1578,6 +1578,17 @@ gate remains required before release. Publish, notarize, transfer, and stage a
 new successor, independently prove its broker/UI co-location, and use a fresh
 password plus a fresh Touch ID request. Never replay `5511db67...`.
 
+The first `c4cde8e...` physical recovery attempt then stopped at its
+non-authorizing preflight notice: the background System Events process existed
+for the full 90-second bound, but no dialog rendered on the Neo's physical
+display. It timed out as `operator_cancelled`; the log and process readback
+prove no password supervisor, Touch ID request, receipt, PENDING, TERMINAL, or
+selector mutation followed. A separate harmless visibility probe using the
+Terminal application as dialog owner rendered immediately on that same
+physical display. Source now makes Terminal the notice owner while preserving
+Cancel as both default and cancel button and retaining the 90-second fail-closed
+timeout. Focused regression coverage rejects a return to System Events.
+
 The first prompt-free production migration plan rejected before mutation on a
 protected seed-control-key mismatch. This exposed an irrelevant inherited
 dependency: the topology-only operation had reused create/reprovision's media

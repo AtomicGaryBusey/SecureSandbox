@@ -5710,6 +5710,97 @@ class OperatorAuthorizationTests(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_recovery_touchid_listener_rejects_unbound_plan_before_execution(self):
+        client, server = socket.socketpair()
+        message = {
+            "request_id": "12345678-1234-4123-8123-123456789abc",
+            "request_sha256": "b" * 64,
+            "schema": AUTH.TOUCHID_SCHEMA,
+        }
+        client.sendall(AUTH.canonical(message))
+        client.shutdown(socket.SHUT_WR)
+        request = {
+            "ceremony": "approve",
+            "operation": "host-controller-install",
+            "parameters": {"authorized_target_plan_sha256": "c" * 64},
+        }
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(self.uid, b"x" * 32, Path("/signed-ui")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root,
+                ),
+                mock.patch.object(AUTH, "verify_touchid_peer"),
+                mock.patch.object(
+                    AUTH, "open_request_binding", return_value=(request, None),
+                ),
+                mock.patch.object(AUTH, "verify_request"),
+                mock.patch.object(AUTH, "execute_request") as execute,
+            ):
+                restart = AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "authorization_broker",
+                    expected_root_uid=self.uid,
+                    expected_recovery_plan_sha256="d" * 64,
+                )
+            response = client.recv(8192)
+            _magic, status, stdout_size, stderr_size = struct.unpack(
+                "!4sIII", response[:16]
+            )
+            self.assertEqual((status, stdout_size), (1, 0))
+            self.assertEqual(
+                json.loads(response[16:16 + stderr_size])["error"],
+                "console_user_recovery_request_binding_mismatch",
+            )
+            self.assertFalse(restart)
+            execute.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
+    def test_recovery_touchid_listener_rejects_control_center_queries(self):
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical({
+            "schema": AUTH.NATIVE_INSPECT_QUERY_SCHEMA,
+            "operation_id": "12345678-1234-4123-8123-123456789abc",
+        }))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(self.uid, b"x" * 32, Path("/control-center")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root,
+                ),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center",
+                ),
+                mock.patch.object(AUTH, "verify_control_center_peer"),
+                mock.patch.object(AUTH, "native_inspect_query") as inspect_query,
+            ):
+                AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "authorization_broker",
+                    expected_root_uid=self.uid,
+                    expected_recovery_plan_sha256="d" * 64,
+                )
+            response = client.recv(8192)
+            _magic, status, stdout_size, stderr_size = struct.unpack(
+                "!4sIII", response[:16]
+            )
+            self.assertEqual((status, stdout_size), (1, 0))
+            self.assertEqual(
+                json.loads(response[16:16 + stderr_size])["error"],
+                "console_user_recovery_request_binding_mismatch",
+            )
+            inspect_query.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
     def test_revoked_request_cannot_commit_after_ui_challenge(self):
         client, server = socket.socketpair()
         request_id = "12345678-1234-4123-8123-123456789abc"

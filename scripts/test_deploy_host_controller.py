@@ -558,6 +558,10 @@ class DeployHostControllerTests(unittest.TestCase):
             "authorized_target_plan_sha256": self.target_plan_sha256,
             "expires_at": 1900,
             "release_id": binding.release_id,
+            "recovery_socket_path": (
+                "/var/run/secure-sandbox-authorization-recovery-"
+                + "1" * 32 + ".sock"
+            ),
             "schema": DEPLOY.CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
             "started_at": 1000,
             "status": "staged",
@@ -609,6 +613,7 @@ class DeployHostControllerTests(unittest.TestCase):
                 / "authorization_broker"),
         )
         self.assertIn("request", calls[0])
+        self.assertIn("--recovery-socket-path", calls[0])
         self.assertNotIn("sudo", calls[0])
         finish_supervisor.assert_called_once_with(
             supervisor, binding.release_id, self.target_plan_sha256,
@@ -624,7 +629,9 @@ class DeployHostControllerTests(unittest.TestCase):
             f"release={release_id!r}\n"
             f"plan={plan_sha256!r}\n"
             "ready={'authorized_target_plan_sha256':plan,'expires_at':1900,"
-            "'release_id':release,'schema':schema,'started_at':1000,"
+            "'release_id':release,'recovery_socket_path':"
+            "'/var/run/secure-sandbox-authorization-recovery-"
+            + "2" * 32 + ".sock','schema':schema,'started_at':1000,"
             "'status':'staged'}\n"
             "sys.stdout.write(json.dumps(ready,separators=(',',':'),"
             "sort_keys=True)+'\\n');sys.stdout.flush()\n"

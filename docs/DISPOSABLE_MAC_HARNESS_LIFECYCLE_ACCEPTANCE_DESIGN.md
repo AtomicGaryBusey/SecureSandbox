@@ -1607,3 +1607,21 @@ This DDD is complete only when the dedicated Mac has:
 
 Until then the next First Exact Claude Generation Admission DDD remains
 blocked by design.
+
+### Staged-successor authorization isolation
+
+An immutable selected broker admits only the signed Touch ID application from
+its own release. A console-user repair deliberately stages its successor
+without selecting it, so that successor must never reuse the selected
+predecessor's system authorization socket. The password-bounded root supervisor
+instead starts the exact staged broker on a random root-created `/var/run`
+socket. Its canonical readiness record binds the release, socket path, and the
+already reviewed target-plan SHA-256.
+
+The one-shot listener verifies the sibling signed UI through the ordinary
+kernel-peer and Developer ID checks and rejects every request except the exact
+`host-controller-install` plan. It is reaped before terminal inspection or
+receipt recovery. Timeout, malformed readiness, wrong release, wrong plan,
+unexpected request, supervisor loss, or listener loss fails closed. The normal
+system broker's peer policy is not broadened, and this is neither a general
+alternate authority socket nor a password fallback.

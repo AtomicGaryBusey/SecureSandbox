@@ -9705,6 +9705,11 @@ class HostControllerReleaseTests(unittest.TestCase):
             "status": "failed",
         }
         candidate = {"generation_path": str(self.root / "generation")}
+        recovery_process = object()
+        recovery_socket = Path(
+            "/var/run/secure-sandbox-authorization-recovery-"
+            + "3" * 32 + ".sock"
+        )
         with (
             mock.patch.object(
                 MANAGER, "stage_console_user_broker_recovery",
@@ -9720,6 +9725,13 @@ class HostControllerReleaseTests(unittest.TestCase):
                     "runtime_metadata_receipt_recovery_error_mismatch"
                 ),
             ) as recover,
+            mock.patch.object(
+                MANAGER, "start_console_user_recovery_touchid_broker",
+                return_value=(recovery_process, recovery_socket),
+            ) as start_broker,
+            mock.patch.object(
+                MANAGER, "stop_console_user_recovery_touchid_broker",
+            ) as stop_broker,
         ):
             result = MANAGER.supervise_console_user_broker_recovery(
                 self.repo, self.install_root, self.launcher, self.state,
@@ -9731,12 +9743,19 @@ class HostControllerReleaseTests(unittest.TestCase):
         input_stream.close()
 
         stage.assert_called_once()
+        start_broker.assert_called_once_with(
+            self.install_root, "b" * 64, plan_sha256,
+        )
+        stop_broker.assert_called_once_with(
+            recovery_process, recovery_socket,
+        )
         inspect_receipt.assert_called_once_with(
             request_id, request_sha256, plan_sha256, self.uid,
         )
         recover.assert_called_once()
         ready = json.loads(output_stream.getvalue())
         self.assertEqual(ready["status"], "staged")
+        self.assertEqual(ready["recovery_socket_path"], str(recovery_socket))
         self.assertEqual(ready["expires_at"], 1900)
         self.assertEqual(result["status"], "recovery-rejected")
         self.assertEqual(result["receipt"], summary)
@@ -9757,6 +9776,47 @@ class HostControllerReleaseTests(unittest.TestCase):
                 )
         finally:
             stream.close()
+
+    def test_console_user_recovery_broker_is_exact_and_plan_bound(self):
+        release_id = "b" * 64
+        plan_sha256 = "c" * 64
+        socket_path = Path(
+            "/var/run/secure-sandbox-authorization-recovery-"
+            + "4" * 32 + ".sock"
+        )
+        ready = {
+            "authorized_target_plan_sha256": plan_sha256,
+            "path": str(socket_path),
+            "release_id": release_id,
+            "schema": "secure-sandbox-recovery-touchid-listener-v1",
+            "status": "ready",
+        }
+        output = tempfile.TemporaryFile()
+        output.write(MANAGER.canonical_state_record(ready))
+        output.seek(0)
+        process = mock.Mock()
+        process.stdout = output
+        launch = mock.Mock(return_value=process)
+        with mock.patch.object(
+            MANAGER.uuid, "uuid4",
+            return_value=types.SimpleNamespace(hex="4" * 32),
+        ):
+            observed_process, observed_socket = (
+                MANAGER.start_console_user_recovery_touchid_broker(
+                    self.install_root, release_id, plan_sha256, popen=launch,
+                )
+            )
+        self.assertIs(observed_process, process)
+        self.assertEqual(observed_socket, socket_path)
+        command = launch.call_args.args[0]
+        self.assertEqual(
+            command[0],
+            str(self.install_root / "releases" / release_id
+                / "authorization_broker"),
+        )
+        self.assertEqual(command[1], "serve-recovery-touchid")
+        self.assertEqual(command[-1], plan_sha256)
+        output.close()
 
     def authorized_rollback(self, target_id: str | None = None):
         pair = MANAGER.host_release_launcher_pair_public(

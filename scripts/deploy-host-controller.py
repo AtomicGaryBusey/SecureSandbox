@@ -41,6 +41,10 @@ STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
 INSTALL_TRANSITION_DIRECTORY = INSTALL_ROOT / "install-transitions"
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+RECOVERY_TOUCHID_SOCKET = re.compile(
+    r"^/var/run/secure-sandbox-authorization-recovery-"
+    r"[0-9a-f]{32}\.sock$"
+)
 BOOTSTRAP_NOTICE_SCRIPT = r'''
 on run argv
   tell application "Terminal"
@@ -1485,7 +1489,7 @@ def start_console_user_recovery_supervisor(
         ) from error
     fields = {
         "authorized_target_plan_sha256", "expires_at", "release_id",
-        "schema", "started_at", "status",
+        "recovery_socket_path", "schema", "started_at", "status",
     }
     if (not isinstance(staged, dict) or set(staged) != fields
             or raw != MANAGER.canonical_state_record(staged)
@@ -1494,6 +1498,9 @@ def start_console_user_recovery_supervisor(
             or staged.get("release_id") != expected_release_id
             or staged.get("authorized_target_plan_sha256")
                 != expected_target_plan_sha256
+            or RECOVERY_TOUCHID_SOCKET.fullmatch(str(
+                staged.get("recovery_socket_path", "")
+            )) is None
             or not isinstance(staged.get("started_at"), int)
             or isinstance(staged.get("started_at"), bool)
             or not isinstance(staged.get("expires_at"), int)
@@ -3063,6 +3070,7 @@ def main() -> int:
     console_user_supervisor: subprocess.Popen[bytes] | None = None
     console_user_supervisor_release_id = ""
     console_user_supervisor_plan_sha256 = ""
+    console_user_recovery_socket_path: str | None = None
     try:
         live = MANAGER.active_markers(state_root)
         if live:
@@ -3305,7 +3313,7 @@ def main() -> int:
                 source.authorized_target_plan_sha256,
             ]
             try:
-                console_user_supervisor, _staged = (
+                console_user_supervisor, staged_recovery = (
                     start_console_user_recovery_supervisor(
                         supervisor_command, binding.release_id,
                         source.authorized_target_plan_sha256,
@@ -3317,6 +3325,9 @@ def main() -> int:
             console_user_supervisor_release_id = binding.release_id
             console_user_supervisor_plan_sha256 = (
                 source.authorized_target_plan_sha256
+            )
+            console_user_recovery_socket_path = str(
+                staged_recovery["recovery_socket_path"]
             )
             selected_broker_path = (
                 INSTALL_ROOT / "releases" / binding.release_id
@@ -3829,6 +3840,11 @@ def main() -> int:
             "--operation", operation, "--parameters-json",
             json.dumps(parameters, separators=(",", ":"), sort_keys=True),
         ]
+        if console_user_recovery_socket_path is not None:
+            command.extend([
+                "--recovery-socket-path",
+                console_user_recovery_socket_path,
+            ])
         # The broker's manager child takes the protected controller fence.
         # Retaining this wrapper's coordination lock across that subprocess
         # would make the authorized install/rollback deadlock against its own

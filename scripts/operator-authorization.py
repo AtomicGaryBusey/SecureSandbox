@@ -144,6 +144,10 @@ OPERATION_TIMEOUT_SECONDS = 120
 NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS = 60 * 60 + 300
 AUTHORIZATION_COMPLETION_MARGIN_SECONDS = 60
 TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
+RECOVERY_TOUCHID_SOCKET = re.compile(
+    r"^/var/run/secure-sandbox-authorization-recovery-"
+    r"[0-9a-f]{32}\.sock$"
+)
 HOST_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 HOST_INSTALL_PENDING = HOST_INSTALL_ROOT / ".install-transition.json"
 HOST_PAIR_PUBLIC = HOST_INSTALL_ROOT / "host-release-launcher-pair.json"
@@ -657,6 +661,10 @@ def request_with_supervisor_custody(args: argparse.Namespace) -> int:
             args.agent, args.session, args.purpose, args.resource,
             args.operation, json.loads(args.parameters_json),
             ceremony=args.ceremony, request_id=args.request_id,
+            socket_path=(
+                TOUCHID_SOCKET if args.recovery_socket_path is None
+                else Path(args.recovery_socket_path)
+            ),
         )
     finally:
         for signum, handler in previous.items():
@@ -9499,7 +9507,8 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                               recovery_only: bool = False,
                               deployment_recovery_only: bool = False,
                               catalog_promotion_recovery_only: bool = False,
-                              host_install_fenced: bool = False) -> bool:
+                              host_install_fenced: bool = False,
+                              expected_recovery_plan_sha256: str | None = None) -> bool:
     restart_after_response = False
     inspect_query = False
     session_plan_query = False
@@ -9524,6 +9533,15 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         else:
             verify_touchid_peer(process_path, release, expected_root_uid)
         message = read_touchid_line(connection, 5, 65536)
+        if expected_recovery_plan_sha256 is not None and (
+            peer_kind != "touch-id-ui"
+            or message.get("schema") not in {
+                TOUCHID_SCHEMA, "secure-sandbox-touchid-approval-v2",
+            }
+        ):
+            raise AuthorizationError(
+                "console_user_recovery_request_binding_mismatch"
+            )
         inspect_query = message.get("schema") == NATIVE_INSPECT_QUERY_SCHEMA
         session_plan_query = (
             message.get("schema") == NATIVE_SESSION_PLAN_QUERY_SCHEMA
@@ -9726,6 +9744,15 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 request_path, uid, message["request_sha256"]
             )
             verify_request(value, uid, message["request_id"], int(time.time()))
+            if expected_recovery_plan_sha256 is not None and (
+                value.get("operation") != "host-controller-install"
+                or value.get("parameters", {}).get(
+                    "authorized_target_plan_sha256"
+                ) != expected_recovery_plan_sha256
+            ):
+                raise AuthorizationError(
+                    "console_user_recovery_request_binding_mismatch"
+                )
             if (recovery_only and value["operation"] not in {
                     native_projection_reconciliation.OPERATION,
                     native_projection_identity_recovery.OPERATION,
@@ -9771,6 +9798,15 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             request_path, uid, message["request_sha256"]
         )
         verify_request(value, uid, message["request_id"], int(time.time()))
+        if expected_recovery_plan_sha256 is not None and (
+            value.get("operation") != "host-controller-install"
+            or value.get("parameters", {}).get(
+                "authorized_target_plan_sha256"
+            ) != expected_recovery_plan_sha256
+        ):
+            raise AuthorizationError(
+                "console_user_recovery_request_binding_mismatch"
+            )
         if (recovery_only and value["operation"] not in {
                 native_projection_reconciliation.OPERATION,
                 native_projection_identity_recovery.OPERATION,
@@ -10756,6 +10792,54 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
             pass
 
 
+def serve_recovery_touchid(
+    socket_path: Path, authorized_target_plan_sha256: str,
+) -> int:
+    """Serve one exact staged-successor ceremony on a root-created socket."""
+    if os.geteuid() != 0:
+        raise AuthorizationError("root_required")
+    if (RECOVERY_TOUCHID_SOCKET.fullmatch(str(socket_path)) is None
+            or SHA256.fullmatch(authorized_target_plan_sha256) is None):
+        raise AuthorizationError("console_user_recovery_socket_binding_invalid")
+    parent = socket_path.parent.resolve(strict=True)
+    parent_info = parent.stat()
+    if (parent != Path("/var/run").resolve(strict=True)
+            or parent_info.st_uid != 0
+            or not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_mode & 0o022):
+        raise AuthorizationError("touchid_socket_directory_untrusted")
+    release = protected_release_directory(Path(__file__), 0)
+    if socket_path.exists() or socket_path.is_symlink():
+        raise AuthorizationError("touchid_socket_path_untrusted")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o666)
+        listener.listen(1)
+        ready = {
+            "authorized_target_plan_sha256": authorized_target_plan_sha256,
+            "path": str(socket_path),
+            "release_id": release.name,
+            "schema": "secure-sandbox-recovery-touchid-listener-v1",
+            "status": "ready",
+        }
+        sys.stdout.buffer.write(canonical(ready))
+        sys.stdout.buffer.flush()
+        connection, _ = listener.accept()
+        with connection:
+            handle_touchid_connection(
+                connection, broker_path=release / "authorization_broker",
+                expected_recovery_plan_sha256=authorized_target_plan_sha256,
+            )
+        return 0
+    finally:
+        listener.close()
+        try:
+            socket_path.unlink()
+        except OSError:
+            pass
+
+
 def authorization_execution_timeout(operation: str) -> int:
     if operation == "vm-preserve-legacy":
         return 8 * 60 * 60 + 300
@@ -11307,7 +11391,8 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                           operation: str, parameters: dict[str, Any], now: int | None = None,
                           runner=run_process, native_ui_path: Path | None = None,
                           ceremony: str = "approve",
-                          request_id: str | None = None) -> int:
+                          request_id: str | None = None,
+                          socket_path: Path = TOUCHID_SOCKET) -> int:
     agent, session = validate_identity(agent, session)
     purpose = clean_text(purpose, "purpose", MAX_PURPOSE)
     resource = clean_text(resource, "resource", MAX_RESOURCE)
@@ -11315,6 +11400,9 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
         raise AuthorizationTerminalError("ceremony_invalid", operation=operation)
     if request_id is not None:
         valid_uuid4(request_id)
+    if (socket_path != TOUCHID_SOCKET
+            and RECOVERY_TOUCHID_SOCKET.fullmatch(str(socket_path)) is None):
+        raise AuthorizationError("console_user_recovery_socket_binding_invalid")
     uid = os.geteuid()
     if uid == 0:
         raise AuthorizationError("unprivileged_request_required")
@@ -11362,7 +11450,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 if native_ui_path is None:
                     try:
                         native = run_touchid_app(
-                            ui_path, path, request_sha256, TOUCHID_SOCKET,
+                            ui_path, path, request_sha256, socket_path,
                             authorization_client_timeout(operation), uid,
                         )
                     except AuthorizationError as error:
@@ -11373,7 +11461,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     native = runner([
                         str(ui_path), "--request-path", str(path),
                         "--request-sha256", request_sha256,
-                        "--socket-path", str(TOUCHID_SOCKET),
+                        "--socket-path", str(socket_path),
                     ], authorization_client_timeout(operation))
                 native_outcome = getattr(native, "outcome", None)
                 if native_outcome == "broker-result" and native.returncode == 0:
@@ -11464,6 +11552,7 @@ def parser() -> argparse.ArgumentParser:
     request.add_argument("--operation", required=True)
     request.add_argument("--parameters-json", required=True)
     request.add_argument("--request-id")
+    request.add_argument("--recovery-socket-path")
     request.add_argument("--ceremony", choices=sorted(CEREMONIES), default="approve")
     execute = sub.add_parser("execute")
     execute.add_argument("--uid", type=int, required=True)
@@ -11493,6 +11582,9 @@ def parser() -> argparse.ArgumentParser:
     completion = sub.add_parser("execution-approval-completion-status")
     completion.add_argument("--transaction-id", required=True)
     sub.add_parser("serve-touchid")
+    recovery = sub.add_parser("serve-recovery-touchid")
+    recovery.add_argument("--socket-path", required=True)
+    recovery.add_argument("--authorized-target-plan-sha256", required=True)
     return result
 
 
@@ -11518,6 +11610,10 @@ def main() -> int:
                 if pending_host_install_role(release) == "candidate":
                     prepare_failed_host_install_rollback(release)
                 raise
+        if args.command == "serve-recovery-touchid":
+            return serve_recovery_touchid(
+                Path(args.socket_path), args.authorized_target_plan_sha256,
+            )
         if args.command == "execution-approval-key-init":
             print(json.dumps(execution_approval_key_initialize(), separators=(",", ":"), sort_keys=True))
             return 0

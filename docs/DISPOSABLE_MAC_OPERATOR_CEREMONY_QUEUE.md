@@ -1103,3 +1103,15 @@ authority was consumed and no protected state changed. A Terminal-owned
 harmless probe was physically visible. Publish/sign/notarize and transfer the
 successor whose notice is Terminal-owned, then rerun the exact ceremony. Cancel
 must remain the default, and any invisible or timed-out notice is a hard stop.
+
+Do not reuse request `f0425b7a...`. The exact staged successor UI launched,
+but the still-selected predecessor broker correctly rejected that
+different-release peer before Touch ID. There was no protected mutation and
+the selectors remain unchanged. Publish/sign/notarize and transfer the
+successor containing the plan-bound one-shot recovery listener. On the next
+fresh ceremony, require readiness to name the exact staged release, a random
+root-created recovery socket, and the displayed target-plan SHA-256. Only the
+staged sibling UI may connect, only the exact host install may execute, and the
+listener must be reaped before receipt recovery. Any ordinary system-socket
+fallback, wrong plan, second connection, or second password prompt is a hard
+stop.

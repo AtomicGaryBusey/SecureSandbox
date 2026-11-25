@@ -14208,6 +14208,89 @@ CONSOLE_USER_RECOVERY_BATCH_SCHEMA = (
 )
 CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS = 15 * 60
 CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT = 4096
+CONSOLE_USER_RECOVERY_BROKER_READY_SECONDS = 15
+
+
+def stop_console_user_recovery_touchid_broker(
+    process: subprocess.Popen[bytes], socket_path: Path,
+) -> None:
+    """Boundedly reap the one-shot staged broker and remove its socket."""
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        else:
+            process.wait()
+    finally:
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def start_console_user_recovery_touchid_broker(
+    install_root: Path, release_id: str,
+    authorized_target_plan_sha256: str, *,
+    popen: object = subprocess.Popen,
+) -> tuple[subprocess.Popen[bytes], Path]:
+    """Start and authenticate one exact staged-release Touch ID listener."""
+    if (SHA256.fullmatch(release_id) is None
+            or SHA256.fullmatch(authorized_target_plan_sha256) is None):
+        raise ReleaseFailure("console_user_recovery_broker_binding_invalid")
+    socket_path = Path(
+        "/var/run/secure-sandbox-authorization-recovery-"
+        f"{uuid.uuid4().hex}.sock"
+    )
+    broker = install_root / "releases" / release_id / "authorization_broker"
+    process = popen(
+        [str(broker), "serve-recovery-touchid", "--socket-path",
+         str(socket_path), "--authorized-target-plan-sha256",
+         authorized_target_plan_sha256],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=None,
+        bufsize=0,
+    )
+    if process.stdout is None:
+        stop_console_user_recovery_touchid_broker(process, socket_path)
+        raise ReleaseFailure("console_user_recovery_broker_launch_failed")
+    import select
+    readable, _, _ = select.select(
+        [process.stdout.fileno()], [], [],
+        CONSOLE_USER_RECOVERY_BROKER_READY_SECONDS,
+    )
+    if not readable:
+        stop_console_user_recovery_touchid_broker(process, socket_path)
+        raise ReleaseFailure("console_user_recovery_broker_ready_timeout")
+    raw = process.stdout.readline(CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT + 1)
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        stop_console_user_recovery_touchid_broker(process, socket_path)
+        raise ReleaseFailure(
+            "console_user_recovery_broker_ready_invalid"
+        ) from error
+    expected = {
+        "authorized_target_plan_sha256", "path", "release_id", "schema",
+        "status",
+    }
+    if (len(raw) > CONSOLE_USER_RECOVERY_BATCH_MESSAGE_LIMIT
+            or raw != canonical_state_record(value)
+            or not isinstance(value, dict) or set(value) != expected
+            or value.get("schema")
+                != "secure-sandbox-recovery-touchid-listener-v1"
+            or value.get("status") != "ready"
+            or value.get("release_id") != release_id
+            or value.get("authorized_target_plan_sha256")
+                != authorized_target_plan_sha256
+            or value.get("path") != str(socket_path)):
+        stop_console_user_recovery_touchid_broker(process, socket_path)
+        raise ReleaseFailure("console_user_recovery_broker_ready_invalid")
+    return process, socket_path
 
 
 def authorization_receipt_summary(
@@ -14362,6 +14445,8 @@ def supervise_console_user_broker_recovery(
         raise ReleaseFailure("console_user_recovery_batch_binding_invalid")
     started_at = int(wall_time())
     deadline = monotonic() + CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS
+    recovery_broker: subprocess.Popen[bytes] | None = None
+    recovery_socket: Path | None = None
     staged = stage_console_user_broker_recovery(
         repo, install_root, launcher_path, state_root, expected_uid,
         expected_source_release_id, expected_current_release_id,
@@ -14372,19 +14457,37 @@ def supervise_console_user_broker_recovery(
             or staged.get("authorized_target_plan_sha256")
                 != authorized_target_plan_sha256):
         raise ReleaseFailure("console_user_recovery_batch_stage_invalid")
+    recovery_broker, recovery_socket = (
+        start_console_user_recovery_touchid_broker(
+            install_root, expected_source_release_id,
+            authorized_target_plan_sha256,
+        )
+    )
     ready = {
         "authorized_target_plan_sha256": authorized_target_plan_sha256,
         "expires_at": started_at + CONSOLE_USER_RECOVERY_BATCH_TTL_SECONDS,
         "release_id": expected_source_release_id,
+        "recovery_socket_path": str(recovery_socket),
         "schema": CONSOLE_USER_RECOVERY_BATCH_SCHEMA,
         "started_at": started_at,
         "status": "staged",
     }
-    output_stream.write(canonical_state_record(ready))
-    output_stream.flush()
-    message = _read_console_user_recovery_batch_message(
-        input_stream, now=monotonic, deadline=deadline,
+    try:
+        output_stream.write(canonical_state_record(ready))
+        output_stream.flush()
+        message = _read_console_user_recovery_batch_message(
+            input_stream, now=monotonic, deadline=deadline,
+        )
+    except BaseException:
+        stop_console_user_recovery_touchid_broker(
+            recovery_broker, recovery_socket,
+        )
+        raise
+    stop_console_user_recovery_touchid_broker(
+        recovery_broker, recovery_socket,
     )
+    recovery_broker = None
+    recovery_socket = None
     if (message.get("schema") != CONSOLE_USER_RECOVERY_BATCH_SCHEMA
             or message.get("authorized_target_plan_sha256")
                 != authorized_target_plan_sha256):

@@ -1428,3 +1428,12 @@ that satisfies the workflow, carry explicit evidence semantics and resource
 bounds, and receive independent review before deployment. A passing test suite
 does not replace cold-boot and boundary acceptance for changes affecting the
 live lab.
+
+Disposable-Mac continuation: the `a83cb54...` replay proved the repaired
+broker launches its sibling UI, but the selected predecessor correctly
+rejected that staged successor peer before LocalAuthentication. Request
+`f0425b7a...` is spent; selectors and journals remain unchanged. Publish and
+install the one-shot staged-broker recovery socket repair, verify its exact
+release/target-plan readiness binding, and use a fresh password plus a fresh
+Touch ID request. Never weaken the ordinary system broker's same-release peer
+admission.

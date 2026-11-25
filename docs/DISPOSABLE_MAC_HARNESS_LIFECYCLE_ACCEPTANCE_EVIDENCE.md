@@ -1597,3 +1597,20 @@ omits those media authorities only for backend migration while retaining the
 exact VM, layout, Parallels binary, network, MAC, process, disconnected-uplink,
 and transaction bindings. Physical replay remains pending publication and
 installation of that correction.
+
+Terminal-notice successor `a83cb54...` was published to both authorized
+remotes, signed and notarized, transferred to the Neo, and staged as immutable
+release `19bf21aa...`. Fresh request `f0425b7a...` launched the correct sibling
+UI from that exact staged release, proving the broker/UI pairing fix. The UI
+exited after approximately 292 ms before application lifecycle entry or
+LocalAuthentication. No request file, receipt, PENDING, or TERMINAL remained;
+`current` stayed `a585d8f7...` and `previous` stayed `b3d6600f...`. The request
+is spent and must never be replayed.
+
+Source review established the fail-closed cause: the selected predecessor's
+system broker authenticates Touch ID peers only against its own immutable
+release, so it rejected the staged successor UI before protocol processing.
+The repair retains that boundary and gives the staged broker one root-custodied,
+target-plan-bound connection. Negative coverage proves a mismatched plan cannot
+reach execution. Publication, notarization, transfer, and a fresh physical
+request remain required.

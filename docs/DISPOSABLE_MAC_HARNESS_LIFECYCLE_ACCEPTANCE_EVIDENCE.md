@@ -1614,3 +1614,21 @@ The repair retains that boundary and gives the staged broker one root-custodied,
 target-plan-bound connection. Negative coverage proves a mismatched plan cannot
 reach execution. Publication, notarization, transfer, and a fresh physical
 request remain required.
+
+The published `7b97395...` successor was signed, notarized, transferred, and
+destination-verified on the Neo. Its fresh console-user recovery staged exact
+successor release `a8fcb549...` and bound readiness to target-plan SHA-256
+`8b800927...`, then failed closed before creating a Touch ID request because
+the recovery listener rejected canonical macOS `/private/var/run`: that
+root:daemon directory is mode 0775, while the first policy rejected every group
+write bit. Independent readback found `current` still `a585d8f7...`, `previous`
+still `b3d6600f...`, no install transition, no launcher-pair transition, no
+terminal record, and no remaining recovery process. No biometric nonce was
+created or spent.
+
+The correction recognizes only the resolved canonical runtime directory when
+it is a directory owned by root, belongs to group root or daemon, and is not
+world-writable. Tests admit root:daemon 0775 and reject both root:daemon 0777
+and root:staff 0775; the existing wrong-plan and Control Center rejection tests
+continue to pass. Physical publication, notarization, transfer, and one fresh
+password/Touch ID ceremony remain required.

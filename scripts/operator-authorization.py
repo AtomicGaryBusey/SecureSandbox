@@ -10792,6 +10792,19 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
             pass
 
 
+def recovery_touchid_socket_directory_trusted(
+    parent: Path, info: os.stat_result, canonical_parent: Path,
+) -> bool:
+    """Admit only macOS's canonical root/system runtime directory."""
+    return (
+        parent == canonical_parent
+        and info.st_uid == 0
+        and info.st_gid in {0, 1}
+        and stat.S_ISDIR(info.st_mode)
+        and info.st_mode & stat.S_IWOTH == 0
+    )
+
+
 def serve_recovery_touchid(
     socket_path: Path, authorized_target_plan_sha256: str,
 ) -> int:
@@ -10803,10 +10816,9 @@ def serve_recovery_touchid(
         raise AuthorizationError("console_user_recovery_socket_binding_invalid")
     parent = socket_path.parent.resolve(strict=True)
     parent_info = parent.stat()
-    if (parent != Path("/var/run").resolve(strict=True)
-            or parent_info.st_uid != 0
-            or not stat.S_ISDIR(parent_info.st_mode)
-            or parent_info.st_mode & 0o022):
+    if not recovery_touchid_socket_directory_trusted(
+        parent, parent_info, Path("/var/run").resolve(strict=True),
+    ):
         raise AuthorizationError("touchid_socket_directory_untrusted")
     release = protected_release_directory(Path(__file__), 0)
     if socket_path.exists() or socket_path.is_symlink():

@@ -1115,3 +1115,12 @@ staged sibling UI may connect, only the exact host install may execute, and the
 listener must be reaped before receipt recovery. Any ordinary system-socket
 fallback, wrong plan, second connection, or second password prompt is a hard
 stop.
+
+The first `7b97395...` physical ceremony created no Touch ID request: its exact
+staged listener rejected canonical root:daemon mode-0775 `/private/var/run`
+before binding. Selectors and transition journals remained unchanged and the
+listener was reaped. Publish/sign/notarize and transfer the narrow canonical
+runtime-directory correction before trying again. The next attempt still
+requires one fresh password notice followed by one fresh Touch ID request;
+unexpected additional password prompts, an alternate socket parent, or any
+reuse of `f0425b7a...` is a hard stop.

@@ -5801,6 +5801,30 @@ class OperatorAuthorizationTests(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_recovery_socket_accepts_canonical_root_daemon_directory(self):
+        parent = Path("/private/var/run")
+        self.assertTrue(AUTH.recovery_touchid_socket_directory_trusted(
+            parent,
+            SimpleNamespace(
+                st_uid=0, st_gid=1, st_mode=stat.S_IFDIR | 0o775,
+            ),
+            parent,
+        ))
+        self.assertFalse(AUTH.recovery_touchid_socket_directory_trusted(
+            parent,
+            SimpleNamespace(
+                st_uid=0, st_gid=1, st_mode=stat.S_IFDIR | 0o777,
+            ),
+            parent,
+        ))
+        self.assertFalse(AUTH.recovery_touchid_socket_directory_trusted(
+            parent,
+            SimpleNamespace(
+                st_uid=0, st_gid=20, st_mode=stat.S_IFDIR | 0o775,
+            ),
+            parent,
+        ))
+
     def test_revoked_request_cannot_commit_after_ui_challenge(self):
         client, server = socket.socketpair()
         request_id = "12345678-1234-4123-8123-123456789abc"

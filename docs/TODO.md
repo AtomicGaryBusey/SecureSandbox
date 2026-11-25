@@ -1437,3 +1437,12 @@ install the one-shot staged-broker recovery socket repair, verify its exact
 release/target-plan readiness binding, and use a fresh password plus a fresh
 Touch ID request. Never weaken the ordinary system broker's same-release peer
 admission.
+
+The published `7b97395...` replay subsequently staged the exact successor and
+proved its target-plan readiness binding, then failed closed before request
+creation because canonical macOS root:daemon mode-0775 `/private/var/run` was
+classified as untrusted. Selectors and journals again remain unchanged, and no
+new biometric nonce exists. Publish and install the narrow canonical-runtime
+directory correction, then use one fresh password and one fresh Touch ID
+ceremony. Preserve every release, peer, operation, random-socket, and exact-plan
+binding.

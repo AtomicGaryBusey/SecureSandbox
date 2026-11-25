@@ -1625,3 +1625,13 @@ receipt recovery. Timeout, malformed readiness, wrong release, wrong plan,
 unexpected request, supervisor loss, or listener loss fails closed. The normal
 system broker's peer policy is not broadened, and this is neither a general
 alternate authority socket nor a password fallback.
+
+The recovery socket parent is the resolved canonical `/var/run` directory on
+the executing Mac. macOS exposes that directory as root-owned, group `daemon`,
+mode 0775; group write is therefore part of the platform runtime-directory
+contract, not evidence that an arbitrary user controls the parent. Recovery
+admits only the canonical path, root ownership, group `root` or `daemon`, a
+directory inode, and no world-write bit. A user-group parent, an alternate
+path, a symlink resolution mismatch, or a world-writable directory remains a
+hard failure. The random root-created socket name and all release, peer,
+operation, and target-plan bindings remain independently mandatory.

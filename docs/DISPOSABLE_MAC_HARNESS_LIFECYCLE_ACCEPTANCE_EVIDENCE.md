@@ -1659,3 +1659,15 @@ runtime. Focused tests verify the exact CA input and fixed process environment
 and reject unverified CMS and profile substitution; the actual candidate
 profile passes. Publication, signing/notarization, transfer, and a fresh
 non-replayed password/Touch ID ceremony remain required.
+
+The first `0eca839...` notice timed out before password authority and recorded
+`operator_cancelled`; all protected state remained unchanged. A fresh notice
+was continued, but the root supervisor rejected before staging and the
+unprivileged client collapsed its canonical rejection to
+`console_user_recovery_batch_stage_invalid`. Independent readback found no
+successor release directory, recovery socket, transition, or terminal and
+unchanged current/previous selectors. The client now propagates only a
+canonical three-field root rejection whose error is a bounded lowercase code;
+arbitrary, noncanonical, path-bearing, or otherwise unbounded root output
+remains the generic fail-closed diagnostic. This preserves output confinement
+while making the next single password attempt diagnostically actionable.

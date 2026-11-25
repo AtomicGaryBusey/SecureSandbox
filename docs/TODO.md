@@ -1457,3 +1457,12 @@ pinned-Apple-root OpenSSL CMS verifier, validate the exact new candidate, and
 use one fresh password plus one fresh Touch ID request. Never replay the spent
 request or weaken the remaining codesign, entitlement, Developer ID,
 notarization, expiry, target-plan, or peer gates.
+
+The `0eca839...` retry reached the one-password supervisor but failed before
+staging; the existing client discarded the root manager's canonical reason and
+reported only `console_user_recovery_batch_stage_invalid`. Protected state is
+unchanged and no request exists. Publish the narrow diagnostic repair that
+surfaces only bounded safe error codes from exact canonical manager rejection
+records, then use one fresh attempt to identify and repair the actual gate.
+Never convert an arbitrary root string, path-bearing message, or malformed
+record into operator-visible authority evidence.

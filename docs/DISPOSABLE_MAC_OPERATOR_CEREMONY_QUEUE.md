@@ -1136,3 +1136,13 @@ chain against its pinned Apple Root CA. Before the next fresh ceremony, verify
 the new candidate's profile digest, Developer ID, notary submission, and target
 plan independently. Any fallback to unverified CMS, mutable Keychain trust, or
 request replay is a hard stop.
+
+The first `0eca839...` notice timed out without authority. Its fresh retry was
+continued but failed before staging with the client-side aggregate
+`console_user_recovery_batch_stage_invalid`; no successor release, socket,
+request, selector change, or journal exists. Publish the bounded canonical
+root-rejection diagnostic successor before another password attempt. The
+client may reveal only an exact safe lowercase rejection code from a canonical
+`{error,schema,status}` manager record. It must reject arbitrary root output,
+paths, extra fields, noncanonical JSON, and oversized data. Use the resulting
+exact code to repair the underlying pre-stage gate; do not bypass it.

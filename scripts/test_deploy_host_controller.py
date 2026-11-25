@@ -668,6 +668,42 @@ class DeployHostControllerTests(unittest.TestCase):
                 "a" * 64, "b" * 64,
             )
 
+    def test_console_user_recovery_surfaces_canonical_root_rejection(self):
+        rejection = {
+            "error": "authorization_ui_profile_invalid",
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "rejected",
+        }
+        script = (
+            "import json\n"
+            f"print(json.dumps({rejection!r},separators=(',',':'),sort_keys=True))\n"
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "console_user_recovery_batch_stage_rejected:"
+            "authorization_ui_profile_invalid",
+        ):
+            DEPLOY.start_console_user_recovery_supervisor(
+                [sys.executable, "-c", script], "a" * 64, "b" * 64,
+            )
+
+    def test_console_user_recovery_rejects_unbounded_root_diagnostic(self):
+        rejection = {
+            "error": "unsafe rejection with ambient path",
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "rejected",
+        }
+        script = (
+            "import json\n"
+            f"print(json.dumps({rejection!r},separators=(',',':'),sort_keys=True))\n"
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "console_user_recovery_batch_stage_invalid",
+        ):
+            DEPLOY.start_console_user_recovery_supervisor(
+                [sys.executable, "-c", script], "a" * 64, "b" * 64,
+            )
+
     def test_console_user_recovery_preflight_binds_broker_and_manager(self):
         release = (
             self.root / DEPLOY.MANAGER.BROKEN_CONSOLE_USER_RELEASE_ID

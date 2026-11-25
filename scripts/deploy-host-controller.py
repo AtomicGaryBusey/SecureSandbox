@@ -45,6 +45,7 @@ RECOVERY_TOUCHID_SOCKET = re.compile(
     r"^/var/run/secure-sandbox-authorization-recovery-"
     r"[0-9a-f]{32}\.sock$"
 )
+SAFE_ROOT_REJECTION_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 BOOTSTRAP_NOTICE_SCRIPT = r'''
 on run argv
   tell application "Terminal"
@@ -1487,6 +1488,18 @@ def start_console_user_recovery_supervisor(
         raise RuntimeError(
             "console_user_recovery_batch_stage_invalid"
         ) from error
+    rejection_fields = {"error", "schema", "status"}
+    if (isinstance(staged, dict) and set(staged) == rejection_fields
+            and raw == MANAGER.canonical_state_record(staged)
+            and staged.get("schema") == MANAGER.SCHEMA
+            and staged.get("status") == "rejected"
+            and isinstance(staged.get("error"), str)
+            and SAFE_ROOT_REJECTION_CODE.fullmatch(staged["error"])):
+        terminate_console_user_recovery_supervisor(process)
+        raise RuntimeError(
+            "console_user_recovery_batch_stage_rejected:"
+            + staged["error"]
+        )
     fields = {
         "authorized_target_plan_sha256", "expires_at", "release_id",
         "recovery_socket_path", "schema", "started_at", "status",

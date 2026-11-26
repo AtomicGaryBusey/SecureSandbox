@@ -597,9 +597,11 @@ class DeployHostControllerTests(unittest.TestCase):
                 "Disposable-Mac-Harness-Lifecycle-Acceptance",
             ])
         self.assertEqual(result, 0)
-        binding_call.assert_called_once_with(
-            console_user_broker_recovery=True,
-        )
+        self.assertEqual(binding_call.call_count, 2)
+        binding_call.assert_has_calls([
+            mock.call(console_user_broker_recovery=True),
+            mock.call(console_user_broker_recovery=True),
+        ])
         notice.assert_called_once_with(
             "Codex", "Disposable-Mac-Harness-Lifecycle-Acceptance",
             binding, "recover-console-user-broker",
@@ -653,6 +655,42 @@ class DeployHostControllerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "closed")
         self.assertEqual(process.returncode, 0)
+
+    def test_console_user_recovery_revalidates_after_lock_free_rendezvous(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "d" * 64,
+            schema_current_release_id=(
+                DEPLOY.MANAGER.BROKEN_CONSOLE_USER_RELEASE_ID
+            ),
+            native_host_candidate=self.candidate,
+        )
+        changed = binding._replace(replacement_launcher_sha256="e" * 64)
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", side_effect=[binding, changed],
+            ),
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ),
+            mock.patch.object(
+                DEPLOY, "start_console_user_recovery_supervisor",
+            ) as start_supervisor,
+            mock.patch("sys.stderr", stderr),
+        ):
+            result = self.run_main([
+                "recover-console-user-broker",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "lock-free-rendezvous",
+            ])
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "console_user_broker_recovery_plan_changed",
+            stderr.getvalue(),
+        )
+        start_supervisor.assert_not_called()
 
     def test_console_user_recovery_password_wait_is_bounded_and_reaped(self):
         with (
@@ -2939,6 +2977,32 @@ class DeployHostControllerTests(unittest.TestCase):
                 stream, select_fn=lambda *_args: ([], [], []),
                 read_fn=lambda *_args: b"CONTINUE\n",
             ))
+
+    def test_terminal_notice_uses_long_non_authoritative_rendezvous(self):
+        stream = mock.Mock()
+        stream.fileno.return_value = 9
+        observed = []
+
+        def select_fn(readers, writers, exceptional, timeout):
+            observed.append((readers, writers, exceptional, timeout))
+            return [9], [], []
+
+        with (
+            mock.patch.object(DEPLOY.os, "isatty", return_value=True),
+            mock.patch.object(DEPLOY.os, "tcgetpgrp", return_value=42),
+            mock.patch.object(DEPLOY.os, "getpgrp", return_value=42),
+        ):
+            self.assertTrue(DEPLOY.terminal_notice_confirmation(
+                stream, select_fn=select_fn,
+                read_fn=lambda *_args: b"CONTINUE\n",
+            ))
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(
+            observed[0][3],
+            DEPLOY.CONSOLE_USER_RECOVERY_NOTICE_WAIT_SECONDS,
+        )
+        self.assertEqual(observed[0][3], 8 * 60 * 60)
 
     def test_terminal_notice_rejects_redirected_or_background_input(self):
         stream = mock.Mock()

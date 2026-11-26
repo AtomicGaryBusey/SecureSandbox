@@ -1469,8 +1469,12 @@ record into operator-visible authority evidence.
 
 The `29521ad...` diagnostic notice reproduced a physical-rendering failure:
 Terminal was frontmost and the AppleScript process was live, but no dialog
-appeared on the Neo. It timed out without mutation. Replace the modal with a
-ninety-second exact `CONTINUE` confirmation read only from the foreground
-controlling Terminal TTY, publish, sign, and notarize it, and retry once.
+appeared on the Neo. It timed out without mutation. Replace the modal with an
+eight-hour exact `CONTINUE` rendezvous read only from the foreground
+controlling Terminal TTY. The wait is privilege-free and lock-free; after
+confirmation the wrapper reacquires the coordination lock and recomputes the
+complete exact plan before any password prompt. A static phase title makes the
+single Terminal ceremony discoverable. Publish, sign, and notarize it, and
+retry once.
 Password and Touch ID remain mandatory; the text confirmation is notice
 acknowledgment, not authentication.

@@ -1420,6 +1420,22 @@ CONSOLE_USER_RECOVERY_BATCH_SCHEMA = (
 )
 CONSOLE_USER_RECOVERY_BATCH_OUTPUT_LIMIT = 1024 * 1024
 CONSOLE_USER_RECOVERY_PASSWORD_WAIT_SECONDS = 5 * 60
+CONSOLE_USER_RECOVERY_NOTICE_WAIT_SECONDS = 8 * 60 * 60
+TERMINAL_TITLE_ESCAPE = "\x1b]0;{}\x07"
+
+
+def set_terminal_title(title: str, stream: Any = None) -> None:
+    """Set a static Terminal title without treating terminal state as trust."""
+    if stream is None:
+        stream = sys.stderr
+    try:
+        descriptor = stream.fileno()
+        if not os.isatty(descriptor):
+            return
+    except (AttributeError, OSError, ValueError):
+        return
+    stream.write(TERMINAL_TITLE_ESCAPE.format(title))
+    stream.flush()
 
 
 def terminate_console_user_recovery_supervisor(
@@ -2592,7 +2608,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
 
 
 def terminal_notice_confirmation(
-    input_stream: Any = None, *, timeout: float = 90.0,
+    input_stream: Any = None, *,
+    timeout: float = CONSOLE_USER_RECOVERY_NOTICE_WAIT_SECONDS,
     select_fn: Callable[..., tuple[list[int], list[int], list[int]]]
         = select.select,
     read_fn: Callable[[int, int], bytes] = os.read,
@@ -2615,9 +2632,14 @@ def terminal_notice_confirmation(
             return False
     except (AttributeError, OSError, ValueError):
         return False
+    set_terminal_title(
+        "SecureSandbox — ACTION REQUIRED — TYPE CONTINUE",
+    )
     print(
         "Type CONTINUE and press Return to authorize only the displayed "
-        "password phase; any other input cancels:",
+        "password phase; any other input cancels. This rendezvous remains "
+        "open for up to eight hours and holds no privilege or SecureSandbox "
+        "coordination lock:",
         file=sys.stderr, flush=True,
     )
     try:
@@ -2627,7 +2649,12 @@ def terminal_notice_confirmation(
         raw = read_fn(descriptor, 65)
     except (OSError, ValueError):
         return False
-    return raw == b"CONTINUE\n"
+    confirmed = raw == b"CONTINUE\n"
+    set_terminal_title(
+        "SecureSandbox — ADMIN PASSWORD NEXT" if confirmed
+        else "SecureSandbox — CANCELLED",
+    )
+    return confirmed
 
 
 def expected_source_release_binding() -> SourceReleaseBinding:
@@ -3105,6 +3132,7 @@ def main() -> int:
     console_user_supervisor_release_id = ""
     console_user_supervisor_plan_sha256 = ""
     console_user_recovery_socket_path: str | None = None
+    console_user_recovery_rendezvous = False
     try:
         live = MANAGER.active_markers(state_root)
         if live:
@@ -3298,6 +3326,10 @@ def main() -> int:
             lock = LAUNCHER.acquire_lock(state_root, timeout=10.0)
             args.command = "deploy"
         if args.command == "recover-console-user-broker":
+            console_user_recovery_rendezvous = True
+            set_terminal_title(
+                "SecureSandbox — VERIFYING EXACT RECOVERY PLAN",
+            )
             binding = bootstrap_binding(
                 console_user_broker_recovery=True,
             )
@@ -3311,12 +3343,41 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # The operator rendezvous carries no authority and may remain open
+            # for hours. Do not monopolize the user-side coordination fence
+            # while waiting. The complete displayed binding is recomputed and
+            # compared after confirmation, under a newly acquired fence,
+            # before sudo can request password authority.
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
             if not bootstrap_notice(
                 args.requesting_agent, args.requesting_session, binding,
                 "recover-console-user-broker",
             ):
                 print("operator_cancelled", file=sys.stderr)
                 return 1
+            lock = LAUNCHER.acquire_lock(state_root, timeout=10.0)
+            if MANAGER.active_markers(state_root):
+                print(
+                    "console_user_broker_recovery_plan_changed",
+                    file=sys.stderr,
+                )
+                return 1
+            refreshed_binding = bootstrap_binding(
+                console_user_broker_recovery=True,
+            )
+            refreshed_source = expected_source_release_binding()
+            if (refreshed_binding != binding
+                    or refreshed_source != source):
+                print(
+                    "console_user_broker_recovery_plan_changed",
+                    file=sys.stderr,
+                )
+                return 1
+            binding = refreshed_binding
+            source = refreshed_source
             print(
                 "The next password request can stage only the exact immutable "
                 "console-user fixed release shown above. It cannot activate "
@@ -3362,6 +3423,9 @@ def main() -> int:
             )
             console_user_recovery_socket_path = str(
                 staged_recovery["recovery_socket_path"]
+            )
+            set_terminal_title(
+                "SecureSandbox — TOUCH ID REQUIRED",
             )
             selected_broker_path = (
                 INSTALL_ROOT / "releases" / binding.release_id
@@ -4090,6 +4154,10 @@ def main() -> int:
                 pass
         if lock is not None:
             LAUNCHER.release_lock(lock)
+        if console_user_recovery_rendezvous:
+            set_terminal_title(
+                "SecureSandbox — SESSION ENDED — REVIEW OUTPUT",
+            )
 
 
 if __name__ == "__main__":

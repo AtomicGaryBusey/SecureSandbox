@@ -1665,9 +1665,13 @@ invoked the operation. A process-owned AppleScript dialog is not sufficient:
 macOS can retain that modal in a remote WindowServer surface while rendering
 nothing on the Mac's physical display. The notice therefore prints the entire
 attributed plan in Terminal and accepts only the exact line `CONTINUE` from
-that process's foreground controlling TTY within ninety seconds. Redirected
-stdin, a background process group, timeout, EOF, a partial or oversized line,
-or any other text cancels.
+that process's foreground controlling TTY within an eight-hour operator
+rendezvous. The wait holds neither privilege nor the SecureSandbox coordination
+lock. After exact confirmation the wrapper reacquires that lock, repeats the
+active-controller check, and recomputes the complete release, candidate,
+predecessor, launcher, and target-plan binding. Any drift cancels before `sudo`
+can request a password. Redirected stdin, a background process group, timeout,
+EOF, a partial or oversized line, or any other text cancels.
 
 This typed notice is not authentication and grants no privileged authority.
 It only acknowledges the displayed password phase. The subsequent local
@@ -1675,3 +1679,12 @@ administrator password, exact root supervisor bindings, and fresh Touch ID
 request remain independent mandatory gates. Eliminating the GUI modal also
 prevents a physically absent notice from being approved through an unrelated
 remote display surface.
+
+The Terminal title is a usability projection, never a trust input. It advances
+through `VERIFYING EXACT RECOVERY PLAN`, `ACTION REQUIRED — TYPE CONTINUE`,
+`ADMIN PASSWORD NEXT`, `TOUCH ID REQUIRED`, and `SESSION ENDED — REVIEW
+OUTPUT`. Static titles and the long unprivileged rendezvous let the operator
+complete one attended sequence without agent/chat synchronization. The one
+password root supervisor continues to batch staging, exact receipt inspection,
+bounded recovery, and protected readback; Touch ID remains the one independent
+mutation authority.

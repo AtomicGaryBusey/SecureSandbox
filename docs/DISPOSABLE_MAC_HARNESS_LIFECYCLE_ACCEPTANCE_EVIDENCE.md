@@ -1683,3 +1683,18 @@ main workflow. Source now replaces the modal with an exact `CONTINUE` line
 read only from the foreground controlling Terminal TTY under the same
 ninety-second bound. Focused tests cover success, wrong case, empty input,
 timeout, redirected input, and background process-group rejection.
+
+The first Terminal-native `f6bb7d1...` operator attempt proved the foreground
+TTY check but also exposed an orchestration defect: its 90-second deadline
+expired before operator input reached that exact Terminal. It recorded only
+`operator_cancelled`; no password, staged release, Touch ID request, selector,
+or journal followed. The batching repair makes this an eight-hour
+non-authoritative rendezvous and releases the SecureSandbox coordination lock
+before waiting. After exact `CONTINUE`, it reacquires the lock, rejects any
+active controller, and recomputes and compares the full release/candidate/
+predecessor/launcher/target-plan binding before `sudo` can prompt. Static
+Terminal titles project each phase without becoming trust input. Focused tests
+cover the long wait, exact foreground input, plan drift after the lock-free
+wait, one-password supervisor, and bounded terminal message. Publication,
+notarization, Neo admission, and the single password/Touch ID physical run
+remain pending.

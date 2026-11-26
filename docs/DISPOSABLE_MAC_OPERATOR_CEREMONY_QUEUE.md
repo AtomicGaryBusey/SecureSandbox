@@ -1146,3 +1146,12 @@ client may reveal only an exact safe lowercase rejection code from a canonical
 `{error,schema,status}` manager record. It must reject arbitrary root output,
 paths, extra fields, noncanonical JSON, and oversized data. Use the resulting
 exact code to repair the underlying pre-stage gate; do not bypass it.
+
+The `29521ad...` notice was not physically visible even though its `osascript`
+process remained live and Terminal reported itself frontmost. It timed out as
+`operator_cancelled` with all protected state unchanged. Do not retry any
+AppleScript modal. Publish and transfer the Terminal-native successor. Review
+the complete plan printed in that Terminal, then type exact uppercase
+`CONTINUE` and Return within ninety seconds. Any redirected or background
+input, different text, timeout, or absence of the printed plan is a hard
+cancel. Administrator password and Touch ID remain separate subsequent gates.

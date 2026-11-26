@@ -1466,3 +1466,11 @@ surfaces only bounded safe error codes from exact canonical manager rejection
 records, then use one fresh attempt to identify and repair the actual gate.
 Never convert an arbitrary root string, path-bearing message, or malformed
 record into operator-visible authority evidence.
+
+The `29521ad...` diagnostic notice reproduced a physical-rendering failure:
+Terminal was frontmost and the AppleScript process was live, but no dialog
+appeared on the Neo. It timed out without mutation. Replace the modal with a
+ninety-second exact `CONTINUE` confirmation read only from the foreground
+controlling Terminal TTY, publish, sign, and notarize it, and retry once.
+Password and Touch ID remain mandatory; the text confirmation is notice
+acknowledgment, not authentication.

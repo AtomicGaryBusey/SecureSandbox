@@ -1671,3 +1671,15 @@ canonical three-field root rejection whose error is a bounded lowercase code;
 arbitrary, noncanonical, path-bearing, or otherwise unbounded root output
 remains the generic fail-closed diagnostic. This preserves output confinement
 while making the next single password attempt diagnostically actionable.
+
+The signed/notarized `29521ad...` diagnostic successor was published to both
+authorized remotes, admitted on the Neo, and independently bound to release
+`70326797...` and target plan `f09895cc...`. Its AppleScript notice process was
+live and Terminal reported itself frontmost with three windows, yet the
+operator physically observed no notice on the Neo. The bounded attempt timed
+out as `operator_cancelled`; no password, staging, request, socket, selector,
+or journal followed. This reproduces the unsafe rendering ambiguity in the
+main workflow. Source now replaces the modal with an exact `CONTINUE` line
+read only from the foreground controlling Terminal TTY under the same
+ninety-second bound. Focused tests cover success, wrong case, empty input,
+timeout, redirected input, and background process-group rejection.

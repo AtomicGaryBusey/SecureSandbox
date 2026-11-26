@@ -2915,18 +2915,42 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(binding.release_id, "a" * 64)
         self.assertEqual(comparable.call_count, 2)
 
-    def test_bootstrap_notice_is_owned_by_visible_terminal(self):
-        self.assertIn(
-            'tell application "Terminal"', DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
-        )
-        self.assertNotIn(
-            'tell application "System Events"', DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
-        )
-        self.assertIn(
-            'default button "Cancel" cancel button "Cancel"',
-            DEPLOY.BOOTSTRAP_NOTICE_SCRIPT,
-        )
-        self.assertIn("giving up after 90", DEPLOY.BOOTSTRAP_NOTICE_SCRIPT)
+    def test_terminal_notice_requires_exact_foreground_tty_confirmation(self):
+        stream = mock.Mock()
+        stream.fileno.return_value = 9
+        with (
+            mock.patch.object(DEPLOY.os, "isatty", return_value=True),
+            mock.patch.object(DEPLOY.os, "tcgetpgrp", return_value=42),
+            mock.patch.object(DEPLOY.os, "getpgrp", return_value=42),
+        ):
+            self.assertTrue(DEPLOY.terminal_notice_confirmation(
+                stream, select_fn=lambda *_args: ([9], [], []),
+                read_fn=lambda *_args: b"CONTINUE\n",
+            ))
+            self.assertFalse(DEPLOY.terminal_notice_confirmation(
+                stream, select_fn=lambda *_args: ([9], [], []),
+                read_fn=lambda *_args: b"\n",
+            ))
+            self.assertFalse(DEPLOY.terminal_notice_confirmation(
+                stream, select_fn=lambda *_args: ([9], [], []),
+                read_fn=lambda *_args: b"continue\n",
+            ))
+            self.assertFalse(DEPLOY.terminal_notice_confirmation(
+                stream, select_fn=lambda *_args: ([], [], []),
+                read_fn=lambda *_args: b"CONTINUE\n",
+            ))
+
+    def test_terminal_notice_rejects_redirected_or_background_input(self):
+        stream = mock.Mock()
+        stream.fileno.return_value = 9
+        with mock.patch.object(DEPLOY.os, "isatty", return_value=False):
+            self.assertFalse(DEPLOY.terminal_notice_confirmation(stream))
+        with (
+            mock.patch.object(DEPLOY.os, "isatty", return_value=True),
+            mock.patch.object(DEPLOY.os, "tcgetpgrp", return_value=41),
+            mock.patch.object(DEPLOY.os, "getpgrp", return_value=42),
+        ):
+            self.assertFalse(DEPLOY.terminal_notice_confirmation(stream))
 
     def test_host_pair_recovery_notice_discloses_ordinary_source_pair(self):
         binding = self.host_pair_recovery_binding()._replace(
@@ -2936,8 +2960,7 @@ class DeployHostControllerTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.object(
-                DEPLOY.subprocess, "run",
-                return_value=SimpleNamespace(returncode=0),
+                DEPLOY, "terminal_notice_confirmation", return_value=True,
             ),
             mock.patch("sys.stderr", stderr),
         ):
@@ -4221,8 +4244,7 @@ class DeployHostControllerTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.object(
-                DEPLOY.subprocess, "run",
-                return_value=SimpleNamespace(returncode=0),
+                DEPLOY, "terminal_notice_confirmation", return_value=True,
             ),
             mock.patch("sys.stderr", stderr),
         ):
@@ -4267,8 +4289,7 @@ class DeployHostControllerTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.object(
-                DEPLOY.subprocess, "run",
-                return_value=SimpleNamespace(returncode=0),
+                DEPLOY, "terminal_notice_confirmation", return_value=True,
             ),
             mock.patch("sys.stderr", stderr),
         ):

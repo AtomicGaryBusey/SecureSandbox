@@ -1657,3 +1657,21 @@ entitlements, candidate-receipt signature, notarization, target-plan, and
 Touch ID bindings remain separate mandatory gates. A missing OpenSSL binary,
 untrusted chain, malformed CMS, substituted profile, unexpected output, or
 timeout fails closed.
+
+### Physical notice rendering without WindowServer modal ambiguity
+
+The pre-password informational gate must be visible in the same Terminal that
+invoked the operation. A process-owned AppleScript dialog is not sufficient:
+macOS can retain that modal in a remote WindowServer surface while rendering
+nothing on the Mac's physical display. The notice therefore prints the entire
+attributed plan in Terminal and accepts only the exact line `CONTINUE` from
+that process's foreground controlling TTY within ninety seconds. Redirected
+stdin, a background process group, timeout, EOF, a partial or oversized line,
+or any other text cancels.
+
+This typed notice is not authentication and grants no privileged authority.
+It only acknowledges the displayed password phase. The subsequent local
+administrator password, exact root supervisor bindings, and fresh Touch ID
+request remain independent mandatory gates. Eliminating the GUI modal also
+prevents a physically absent notice from being approved through an unrelated
+remote display surface.

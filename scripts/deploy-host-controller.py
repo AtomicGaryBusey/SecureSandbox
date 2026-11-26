@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Mapping, NamedTuple
+from typing import Any, Callable, Mapping, NamedTuple
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("secure-sandbox-claude-launcher.py")
@@ -46,16 +46,6 @@ RECOVERY_TOUCHID_SOCKET = re.compile(
     r"[0-9a-f]{32}\.sock$"
 )
 SAFE_ROOT_REJECTION_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
-BOOTSTRAP_NOTICE_SCRIPT = r'''
-on run argv
-  tell application "Terminal"
-    activate
-    set answer to display dialog (item 1 of argv) with title "SecureSandbox Bootstrap Authorization" buttons {"Cancel", "Continue"} default button "Cancel" cancel button "Cancel" with icon caution giving up after 90
-    if gave up of answer then error number -128
-    return button returned of answer
-  end tell
-end run
-'''
 BOOTSTRAP_LOADER = r'''
 import hashlib, os, stat, sys
 path, expected = sys.argv[1], sys.argv[2]
@@ -2598,15 +2588,46 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "Continue only if this matches the agent conversation you intend to authorize.",
     ])
     print(message, file=sys.stderr, flush=True)
+    return terminal_notice_confirmation()
+
+
+def terminal_notice_confirmation(
+    input_stream: Any = None, *, timeout: float = 90.0,
+    select_fn: Callable[..., tuple[list[int], list[int], list[int]]]
+        = select.select,
+    read_fn: Callable[[int, int], bytes] = os.read,
+) -> bool:
+    """Require an exact, bounded confirmation from the foreground Terminal.
+
+    GUI dialogs can exist in a remote WindowServer surface without appearing
+    on the Mac's physical display.  The complete plan is already emitted in
+    the invoking Terminal.  This confirmation therefore uses only that same
+    foreground controlling TTY and treats every other condition as cancel.
+    It grants no privileged authority: sudo and Touch ID remain independent
+    mandatory gates after this notice.
+    """
+    if input_stream is None:
+        input_stream = sys.stdin
     try:
-        result = subprocess.run(
-            ["/usr/bin/osascript", "-e", BOOTSTRAP_NOTICE_SCRIPT, "--", message],
-            check=False, stdin=subprocess.DEVNULL, timeout=90,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-        )
-    except subprocess.TimeoutExpired:
+        descriptor = input_stream.fileno()
+        if (not os.isatty(descriptor)
+                or os.tcgetpgrp(descriptor) != os.getpgrp()):
+            return False
+    except (AttributeError, OSError, ValueError):
         return False
-    return result.returncode == 0
+    print(
+        "Type CONTINUE and press Return to authorize only the displayed "
+        "password phase; any other input cancels:",
+        file=sys.stderr, flush=True,
+    )
+    try:
+        readable, _, _ = select_fn([descriptor], [], [], timeout)
+        if readable != [descriptor]:
+            return False
+        raw = read_fn(descriptor, 65)
+    except (OSError, ValueError):
+        return False
+    return raw == b"CONTINUE\n"
 
 
 def expected_source_release_binding() -> SourceReleaseBinding:
